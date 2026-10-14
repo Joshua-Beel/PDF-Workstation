@@ -10,6 +10,20 @@ pub const MAX_OPEN_DOCUMENTS: usize = 32;
 /// Total source bytes held across all open documents (about 8 GiB including PDFium's copies).
 pub const MAX_OPEN_SOURCE_TOTAL: u64 = 4 * GIB;
 
+// Parse-work limits for every lopdf load of a document source (`pdf_load::load`). A file over one is refused
+// before or during the load with "Nothing was opened.". Measurements: README and the SM5 log.
+/// Most objects one load may parse: indirect-object headers in the raw bytes are counted before lopdf starts,
+/// and object-stream entries while it runs. lopdf's own header-scanning repair stops at the same 1,000,000.
+/// Large real documents stay far below it (a 10,000-page file is typically tens to hundreds of thousands).
+pub const MAX_LOAD_OBJECTS: usize = 1_000_000;
+/// Largest decoded size of any single stream lopdf decodes while loading (object and cross-reference streams;
+/// page content and images are not decoded at load). A cross-reference stream for 1,000,000 objects is about
+/// 8 MiB; producers write object streams of tens to hundreds of KiB.
+pub const MAX_LOAD_STREAM_DECODE_BYTES: usize = 32 * 1024 * 1024;
+/// Total decoded size of all object streams in one load: 256 bytes for each of `MAX_LOAD_OBJECTS` objects.
+/// Object streams hold only dictionaries, arrays and numbers, so real files use a small fraction of it.
+pub const MAX_LOAD_DECODE_TOTAL: usize = 256 * 1024 * 1024;
+
 fn mib(bytes: u64) -> u64 { bytes.div_ceil(1024 * 1024) }
 
 fn size_text(bytes: u64) -> String { if bytes >= GIB && bytes % GIB == 0 { format!("{} GiB", bytes / GIB) } else { format!("{} MiB", mib(bytes)) } }

@@ -633,6 +633,7 @@ impl PdfService {
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
                             if password.contains('\0') { return Err("Passwords cannot contain a null character.".into()); }
                             let bytes = crate::open_limits::read_open_source(&path, sessions.values().map(|(session, _)| session.source.len() as u64), document_limit)?;
+                            let parsed = crate::pdf_load::load_for_open(&bytes)?;
                             let document = match engine.load_pdf_from_byte_vec(bytes.clone(), Some(&password)) {
                                 Ok(document) => document,
                                 Err(PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError)) => return Ok(OpenResult::PasswordRequired { request_id, name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), incorrect: !password.is_empty() }),
@@ -647,7 +648,7 @@ impl PdfService {
                                     Ok::<_, String>(crate::recovery_store::read_recovery(root, source, None, 0)?.filter(|record| record.active))
                                 }).transpose()?.flatten()
                             } else { None };
-                            sessions.insert(id, (EditSession::new_with_password(bytes, info.pages.len(), &password), info.clone()));
+                            sessions.insert(id, (EditSession::opened(bytes, parsed, info.pages.len(), Some(&password)), info.clone()));
                             documents.insert(id, std::rc::Rc::new(document));
                             let offer = recovery.as_ref().map(|record| RecoveryOffer { revision: record.revision, current_page: record.current_page });
                             if let Some(record) = recovery { recovery_offers.insert(id, record); }
@@ -668,11 +669,12 @@ impl PdfService {
                         let result = (|| {
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
                             let bytes = crate::open_limits::read_open_source(&path, sessions.values().map(|(session, _)| session.source.len() as u64), document_limit)?;
+                            let parsed = crate::pdf_load::load_for_open(&bytes)?;
                             let document = engine.load_pdf_from_byte_vec(bytes.clone(), None).map_err(|e| format!("Unable to open PDF: {e}"))?;
                             let pages = page_sizes(&document)?;
                             let id = next_id; next_id += 1;
                             let info = DocumentInfo { id, name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), pages, revision: 0, dirty: false, can_undo: false, can_redo: false };
-                            sessions.insert(id, (EditSession::new(bytes, info.pages.len()), info.clone()));
+                            sessions.insert(id, (EditSession::opened(bytes, parsed, info.pages.len(), None), info.clone()));
                             documents.insert(id, std::rc::Rc::new(document)); Ok(info)
                         })();
                         let result = result.map(|info| { let cleanup = UnclaimedReply::Document(info.id); ReplyLease::new(info, cleanup, resource_cleanup.clone()) });
@@ -707,10 +709,11 @@ impl PdfService {
                             if !record.active { return Ok(None); }
                             accept_recovery_record(&mut recovery_floors, &record)?;
                             if recovery_heads.values().any(|(identity, _)| *identity == source) { return Err("Another open tab already owns recovery for this PDF.".into()); }
+                            let parsed = crate::pdf_load::load_for_open(&bytes)?;
                             let document = engine.load_pdf_from_byte_vec(bytes.clone(), None).map_err(|error| format!("Unable to open PDF: {error}"))?;
                             if !matches!(document.permissions().security_handler_revision(), Ok(PdfSecurityHandlerRevision::Unprotected)) { return Err("Encrypted or restricted PDFs cannot be restored from recovery.".into()); }
                             let pages = page_sizes(&document)?;
-                            let mut session = EditSession::new(bytes, pages.len());
+                            let mut session = EditSession::opened(bytes, parsed, pages.len(), None);
                             restore_recovery_session(&mut session, &record)?;
                             session.export(None)?;
                             let id = next_id; next_id += 1;
@@ -2209,6 +2212,22 @@ mod tests {
         assert_eq!(result.err().unwrap(), STALE_PAGE_PLAN);
         assert!(!output.exists());
         call(&service, |reply| Request::Close(info.id, reply)).unwrap();
+    }
+    #[test]
+    fn open_refuses_load_work_limits_before_pdfium_and_keeps_no_document() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let folder = tempfile::tempdir().unwrap();
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        for (name, bytes, expected) in [("bomb.pdf", crate::pdf_load::tests::object_stream_bomb(1, 1 + 258 * 200_000), "expands past 32 MiB"), ("objects.pdf", crate::pdf_load::tests::many_objects(crate::open_limits::MAX_LOAD_OBJECTS + 1), "more than 1,000,000 objects")] {
+            let path = folder.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let error = call(&service, |reply| Request::Open(path.clone(), reply)).err().unwrap();
+            assert!(error.contains(expected) && error.ends_with("Nothing was opened."), "{error}");
+            let error = match call(&service, |reply| Request::BeginOpen(path.clone(), reply)) { Err(error) => error, Ok(_) => panic!("{name} opened") };
+            assert!(error.contains(expected) && error.ends_with("Nothing was opened."), "{error}");
+            assert!(call(&service, |reply| Request::OpenDocumentsForPath(path.clone(), reply)).unwrap().is_empty());
+            assert!(call(&service, |reply| Request::PasswordRequestsForPath(path.clone(), reply)).unwrap().is_empty());
+        }
     }
     #[test]
     #[ignore = "uses an isolated worker and must run alone because PDFium binding is process-global"]

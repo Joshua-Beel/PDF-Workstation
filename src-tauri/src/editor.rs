@@ -112,13 +112,11 @@ impl EditSession {
         self.revision = snapshot.revision; self.next_note = snapshot.next_note;
     }
     pub fn new(source: Vec<u8>, count: usize) -> Self {
-        Self::new_with_open_password(source, count, None)
+        let parsed = crate::pdf_load::load(&source).map_err(|error| error.to_string());
+        Self::opened(source, parsed, count, None)
     }
-    pub fn new_with_password(source: Vec<u8>, count: usize, password: &str) -> Self {
-        Self::new_with_open_password(source, count, Some(password))
-    }
-    fn new_with_open_password(source: Vec<u8>, count: usize, password: Option<&str>) -> Self {
-        let parsed = Document::load_mem(&source).map_err(|error| error.to_string());
+    /// A session for a source already parsed by `pdf_load::load_for_open`, so an open parses it once.
+    pub(crate) fn opened(source: Vec<u8>, parsed: Result<Document, String>, count: usize, password: Option<&str>) -> Self {
         let owner_access = parsed.as_ref().ok().is_some_and(|document| password.is_some_and(|password| document.authenticate_owner_password(password).is_ok()));
         let text_extraction_permission = if owner_access {
             Ok(())
@@ -228,7 +226,7 @@ impl EditSession {
         }
     }
     fn load_source(&self) -> Result<Document, String> {
-        let document = Document::load_mem(&self.source).map_err(|e| e.to_string())?;
+        let document = crate::pdf_load::load(&self.source).map_err(|e| e.to_string())?;
         if document.is_encrypted() || document.encryption_state.is_some() { return Err("Encrypted PDFs cannot be edited in this build.".into()); }
         let pages = document.get_pages();
         if pages.len() != self.source_page_count {
@@ -354,7 +352,7 @@ impl EditSession {
         if let Some(root) = new_root {
             document.objects.insert(root, Object::Dictionary(dictionary! { "Type" => "Pages", "Count" => plan.len() as i64, "Kids" => kids }));
             document.catalog_mut().map_err(|e| e.to_string())?.set("Pages", root);
-            document.prune_objects();
+            crate::pdf_load::prune_unreachable(&mut document);
         }
         let mut bytes = Vec::new();
         document.save_to(&mut bytes).map_err(|e| e.to_string())?;

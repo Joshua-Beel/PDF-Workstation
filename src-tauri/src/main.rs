@@ -2,6 +2,7 @@
 mod service;
 mod open_path;
 mod open_limits;
+mod pdf_load;
 mod editor;
 mod printing;
 mod print_commands;

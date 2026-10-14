@@ -353,15 +353,7 @@ fn appearance(style: &Style, value: &str) -> Content<Vec<Operation>> {
     Content { operations }
 }
 // A filled copy keeps only objects reachable from the trailer, so replaced appearances and superseded revisions do not carry old values.
-fn reachable(document: &Document) -> HashSet<ObjectId> {
-    fn references(value: &Object, out: &mut Vec<ObjectId>) {
-        match value { Object::Reference(id) => out.push(*id), Object::Array(values) => for value in values { references(value, out); }, Object::Dictionary(dict) => for (_, value) in dict { references(value, out); }, Object::Stream(stream) => for (_, value) in &stream.dict { references(value, out); }, _ => {} }
-    }
-    let mut pending = Vec::new(); for (_, value) in &document.trailer { references(value, &mut pending); }
-    let mut live = HashSet::new();
-    while let Some(id) = pending.pop() { if live.insert(id) { if let Some(value) = document.objects.get(&id) { references(value, &mut pending); } } }
-    live
-}
+use crate::pdf_load::reachable;
 fn same_object(a: &Object, b: &Object) -> bool {
     match (a, b) { (Object::Integer(_) | Object::Real(_), Object::Integer(_) | Object::Real(_)) => number(a).ok().zip(number(b).ok()).is_some_and(|(a, b)| (a - b).abs() < 0.0001), _ => a == b }
 }

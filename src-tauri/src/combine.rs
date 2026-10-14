@@ -98,7 +98,7 @@ fn opaque_graph(document: &Document, value: &Object, page_graph: &HashSet<Object
 
 fn checked_document(session: &EditSession, label: &str) -> Result<Document, String> {
     let bytes = session.export(None).map_err(|error| format!("{label} PDF: {error}"))?;
-    let original = Document::load_mem(&session.source).map_err(|error| format!("{label} PDF: {error}"))?;
+    let original = crate::pdf_load::load(&session.source).map_err(|error| format!("{label} PDF: {error}"))?;
     supported_shape(&original).map_err(|error| format!("{label} PDF: {error}"))?;
     let document = Document::load_mem(&bytes).map_err(|error| format!("{label} PDF: {error}"))?;
     supported_shape(&document).map_err(|error| format!("{label} PDF: {error}"))?;
@@ -241,7 +241,7 @@ fn assemble_sequence(first: &EditSession, second: &EditSession, sequence: CopyOp
     if let Some(metadata) = metadata { catalog.set("Metadata", metadata); }
     let catalog = output.add_object(catalog); output.trailer.set("Root", catalog);
     if let Some(info) = info { output.trailer.set("Info", info); }
-    output.prune_objects();
+    crate::pdf_load::prune_unreachable(&mut output);
     let mut bytes = Vec::new(); output.save_to(&mut bytes).map_err(|error| error.to_string())?;
     output_size(bytes.len())?;
     Ok(bytes)

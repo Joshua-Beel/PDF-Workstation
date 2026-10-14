@@ -123,7 +123,7 @@ fn read_source(source: &[u8], source_pages: usize) -> SourcePageLabels {
     if source_pages == 0 || source_pages > MAX_PAGES {
         return SourcePageLabels::unavailable("Page labels are unavailable for this source page count.");
     }
-    let document = match Document::load_mem(source) {
+    let document = match crate::pdf_load::load(source) {
         Ok(document) => document,
         Err(_) => return SourcePageLabels::unavailable("The PDF page-label structure could not be read."),
     };
