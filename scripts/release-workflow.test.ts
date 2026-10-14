@@ -81,7 +81,12 @@ describe('release workflow contract', () => {
     const createStep = publish.indexOf('- name: Create draft release');
     expect(publish.indexOf('GH_TOKEN: ${{ github.token }}')).toBeGreaterThan(createStep);
     expect(publish).toContain('--notes-file release-notes/release-notes.md');
-    expect(publish).toContain("throw 'Downloaded updater manifest is not bound to the exact version, detached signature, and release notes.'");
+    expect(publish).toContain("throw 'Downloaded updater manifest is not bound to the exact version, installer URL, detached signature, and release notes.'");
+    expect(publish).toContain("$manifest.platforms.'windows-x86_64'.url -cne $expectedUrl");
+    expect(publish).toContain('$expectedUrl = "https://github.com/Joshua-Beel/Smacrobat/releases/download/v$($env:RELEASE_VERSION)/$($installerName.Replace(\' \', \'.\'))"');
+    expect(publish).toContain('$signedFiles[0] -cne $installerName');
+    expect(publish.indexOf("throw 'Downloaded updater signature does not name the exact installer in its trusted comment.'")).toBeGreaterThan(0);
+    expect(publish.indexOf("throw 'Downloaded updater signature does not name the exact installer in its trusted comment.'")).toBeLessThan(publish.indexOf('- name: Create draft release'));
   });
 
   it('gives the updater key only to the signing build step and checks the signed installer name', () => {

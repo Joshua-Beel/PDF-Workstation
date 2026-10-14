@@ -175,8 +175,15 @@ jobs:
           $manifest = Get-Content (Join-Path release-assets 'latest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
           $signature = (Get-Content (Join-Path release-assets "$installerName.sig") -Raw -Encoding UTF8).Trim()
           $notes = Get-Content $notesFiles[0].FullName -Raw -Encoding UTF8
-          if ($manifest.version -cne $env:RELEASE_VERSION -or $manifest.platforms.'windows-x86_64'.signature -cne $signature -or $manifest.notes -cne $notes) {
-            throw 'Downloaded updater manifest is not bound to the exact version, detached signature, and release notes.'
+          $expectedUrl = "https://github.com/Joshua-Beel/Smacrobat/releases/download/v$($env:RELEASE_VERSION)/$($installerName.Replace(' ', '.'))"
+          if ($manifest.version -cne $env:RELEASE_VERSION -or $manifest.platforms.'windows-x86_64'.url -cne $expectedUrl -or $manifest.platforms.'windows-x86_64'.signature -cne $signature -or $manifest.notes -cne $notes) {
+            throw 'Downloaded updater manifest is not bound to the exact version, installer URL, detached signature, and release notes.'
+          }
+          $signatureText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($signature))
+          $trusted = @($signatureText -split "`r?`n" | Where-Object { $_ -clike 'trusted comment: *' })
+          $signedFiles = @(if ($trusted.Count -eq 1) { $trusted[0].Substring(17) -split "`t" | Where-Object { $_ -clike 'file:*' } | ForEach-Object { $_.Substring(5) } })
+          if ($trusted.Count -ne 1 -or $signedFiles.Count -ne 1 -or $signedFiles[0] -cne $installerName) {
+            throw 'Downloaded updater signature does not name the exact installer in its trusted comment.'
           }
       - name: Create draft release
         shell: pwsh
