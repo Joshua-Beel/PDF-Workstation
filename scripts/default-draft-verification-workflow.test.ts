@@ -6,6 +6,9 @@ import { randomUUID } from 'node:crypto';
 const workflow = readFileSync('.github/workflows/default-draft-verification.yml', 'utf8');
 const verifier = readFileSync('scripts/verify-default-draft.ps1', 'utf8');
 const pdfiumPreparation = readFileSync('scripts/prepare-default-draft-pdfium.ps1', 'utf8');
+const currentVersion: string = JSON.parse(readFileSync('package.json', 'utf8')).version;
+const wrongVersion = '0.0.0';
+if (!/^\d+\.\d+\.\d+$/.test(currentVersion) || currentVersion === wrongVersion) throw new Error('package.json version is not a usable release version.');
 
 function runPowerShell(source: string) {
   const root = `target/default-draft-test-${randomUUID()}`;
@@ -164,7 +167,7 @@ describe('default draft verification workflow', () => {
       $fake=Put 'version-fixture.exe';$goodVersion={param($path)[pscustomobject]@{FileVersion='0.2.12';ProductVersion='0.2.12';ProductName='PDF Workstation'}};$oldVersion={param($path)[pscustomobject]@{FileVersion='0.2.11';ProductVersion='0.2.11';ProductName='PDF Workstation'}}
       Assert-PackagedApplicationIdentity $fake.FullName '0.2.12' $goodVersion;Reject {Assert-PackagedApplicationIdentity $fake.FullName '0.2.12' $oldVersion} 'old application'
       $source=Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'source';foreach($relative in @('package.json','package-lock.json','src-tauri/tauri.conf.json','src-tauri/Cargo.toml','src-tauri/Cargo.lock')){$destination=Join-Path $source $relative;[IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destination))|Out-Null;[IO.File]::Copy((Join-Path (Get-Location) $relative),$destination)}
-      Assert-ReleaseSourceVersion (Get-Location).Path $source '0.2.12';$package=Get-Content (Join-Path $source 'package.json') -Raw|ConvertFrom-Json;$package.version='9.9.9';[IO.File]::WriteAllText((Join-Path $source 'package.json'),($package|ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false));Reject {Assert-ReleaseSourceVersion (Get-Location).Path $source '0.2.12'} 'source version mismatch'
+      Assert-ReleaseSourceVersion (Get-Location).Path $source '${currentVersion}';$package=Get-Content (Join-Path $source 'package.json') -Raw|ConvertFrom-Json;$package.version='${wrongVersion}';[IO.File]::WriteAllText((Join-Path $source 'package.json'),($package|ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false));Reject {Assert-ReleaseSourceVersion (Get-Location).Path $source '${currentVersion}'} 'source version mismatch'
       Write-Output PASS
     `;
     const result = runPowerShell(check);
