@@ -52,11 +52,13 @@ enum Stage<U, B> {
 pub struct UpdateSlot<U, B> {
     stage: Stage<U, B>,
     latest_check: u64,
+    /// True while an install confirmation is open, so only one can be shown.
+    confirming: bool,
 }
 
 impl<U, B> Default for UpdateSlot<U, B> {
     fn default() -> Self {
-        Self { stage: Stage::Empty, latest_check: 0 }
+        Self { stage: Stage::Empty, latest_check: 0, confirming: false }
     }
 }
 
@@ -230,15 +232,34 @@ fn lock_slot<U, B>(slot: &Mutex<UpdateSlot<U, B>>) -> Result<std::sync::MutexGua
     slot.lock().map_err(|_| "The updater state is unavailable. Restart PDF Workstation and try again.".to_string())
 }
 
+/// Clears the open-confirmation flag however the install attempt ends.
+struct ConfirmingGuard<'a, U, B>(&'a Mutex<UpdateSlot<U, B>>);
+
+impl<U, B> Drop for ConfirmingGuard<'_, U, B> {
+    fn drop(&mut self) {
+        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).confirming = false;
+    }
+}
+
 /// Asks before installing the downloaded update the backend holds for `key`.
 /// The question names the backend's own version, not one supplied by the
 /// webview. The slot is not locked while the question is open; No leaves the
-/// downloaded offer in place, Yes takes it single use and installs it.
+/// downloaded offer in place, Yes takes it single use and installs it. Only one
+/// question may be open at a time: a second call while one is pending is refused.
 pub fn install_confirmed<U, B>(slot: &Mutex<UpdateSlot<U, B>>, key: &UpdateKey, current: &semver::Version, confirm: impl FnOnce(&str) -> bool, install: impl FnOnce(U, B) -> Result<(), String>) -> Result<InstallOutcome, String> {
-    let version = lock_slot(slot)?.downloaded_version(key)?;
-    if !is_upgrade(current, &version) {
-        return Err("The offered update is not newer than the installed version.".into());
-    }
+    let version = {
+        let mut held = lock_slot(slot)?;
+        if held.confirming {
+            return Err("An update installation is already waiting for your answer.".into());
+        }
+        let version = held.downloaded_version(key)?;
+        if !is_upgrade(current, &version) {
+            return Err("The offered update is not newer than the installed version.".into());
+        }
+        held.confirming = true;
+        version
+    };
+    let _confirming = ConfirmingGuard(slot);
     if !confirm(&version) {
         return Ok(InstallOutcome::Cancelled);
     }
@@ -467,6 +488,41 @@ mod tests {
         let outcome = install_confirmed(&slot, &k, &current(), |_| { slot.lock().unwrap().release(&k); true }, |_, _| { installed = true; Ok(()) });
         assert!(outcome.is_err());
         assert!(!installed);
+    }
+
+    #[test]
+    fn a_second_install_while_the_question_is_open_is_refused_without_asking() {
+        let k = key("0.3.0", "sig");
+        let slot = Mutex::new(downloaded(&k));
+        let mut second = None;
+        let mut asked_twice = false;
+        let mut installed = 0;
+        let outcome = install_confirmed(&slot, &k, &current(), |_| {
+            second = Some(install_confirmed(&slot, &k, &current(), |_| { asked_twice = true; true }, |_, _| { installed += 1; Ok(()) }));
+            false
+        }, |_, _| Ok(()));
+        assert_eq!(outcome, Ok(InstallOutcome::Cancelled));
+        assert!(second.unwrap().unwrap_err().contains("already waiting"));
+        assert!(!asked_twice, "only one confirmation may be shown at a time");
+        assert_eq!(installed, 0);
+        let mut asked_again = false;
+        assert_eq!(install_confirmed(&slot, &k, &current(), |_| { asked_again = true; true }, |_, _| Ok(())), Ok(InstallOutcome::Started), "answering the first question frees the next install");
+        assert!(asked_again);
+    }
+
+    #[test]
+    fn the_open_question_flag_clears_on_every_exit() {
+        let k = key("0.3.0", "sig");
+        let slot = Mutex::new(downloaded(&k));
+        assert!(install_confirmed(&slot, &k, &current(), |_| true, |_, _| Err("installer failed".into())).is_err());
+        assert!(!slot.lock().unwrap().confirming, "a failed install must not leave the question marked open");
+        let slot = Mutex::new(downloaded(&k));
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| install_confirmed(&slot, &k, &current(), |_| panic!("dialog failed"), |_, _| Ok(()))));
+        assert!(panicked.is_err());
+        assert!(!slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).confirming);
+        let stale = Mutex::new(downloaded(&k));
+        assert!(install_confirmed(&stale, &k, &semver::Version::parse("0.3.0").unwrap(), |_| true, |_, _| Ok(())).is_err());
+        assert!(!stale.lock().unwrap().confirming, "a refused install never marks the question open");
     }
 
     #[test]
