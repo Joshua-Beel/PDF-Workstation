@@ -14,6 +14,7 @@ mod combine;
 mod comments;
 mod forms;
 mod page_labels;
+mod bookmark_destinations;
 mod image_pdf;
 #[cfg(windows)]
 mod image_edit;

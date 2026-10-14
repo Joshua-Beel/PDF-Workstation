@@ -40,7 +40,7 @@ pub struct SearchableOcrPreflight { pub suggested_name: String, pub page_count: 
 #[serde(rename_all = "camelCase")]
 pub struct PageImageReceipt { path: String, document_id: u64, revision: u64, page: u16, dpi: u16, width: u32, height: u32, format: PageImageFormat }
 #[derive(Serialize)]
-pub struct BookmarkInfo { title: String, page: Option<usize>, depth: usize }
+pub struct BookmarkInfo { title: String, page: Option<usize>, depth: usize, destination: Option<crate::bookmark_destinations::BookmarkDestination> }
 #[derive(Serialize)]
 pub struct BookmarkList { items: Vec<BookmarkInfo>, truncated: bool }
 const MAX_READ_TEXT_BYTES: usize = 1_048_576;
@@ -870,6 +870,7 @@ impl PdfService {
                             let document = documents.get(&id).ok_or("Document is closed")?;
                             let mut items = Vec::new();
                             let mut depths = HashMap::new();
+                            let mut views = HashMap::new();
                             let mut truncated = false;
                             let mut title_bytes = 0usize;
                             for bookmark in document.bookmarks().iter().take(1001) {
@@ -879,11 +880,27 @@ impl PdfService {
                                 { bookmark_work.entry(id).or_default().visited += 1; }
                                 let depth = bookmark.parent().and_then(|parent| depths.get(&parent).copied()).map_or(0, |depth: usize| depth + 1);
                                 depths.insert(bookmark.clone(), depth);
-                                let source = bookmark.destination().and_then(|destination| destination.page_index().ok());
+                                let target = bookmark.destination();
+                                let source = target.as_ref().and_then(|destination| destination.page_index().ok());
                                 let page = source.and_then(|source| session.plan.iter().position(|spec| spec.source == source as usize));
+                                let destination = match (page, target) {
+                                    (Some(position), Some(target)) => {
+                                        let mut parsed = crate::bookmark_destinations::parse(target.view_settings());
+                                        if parsed.needs_view() {
+                                            let view = *views.entry(position).or_insert_with(|| with_planned_page(document, &session.plan[position], |planned| {
+                                                let bounds = planned.boundaries().bounding().or_else(|_| planned.boundaries().crop()).or_else(|_| planned.boundaries().media()).map(|boundary| boundary.bounds);
+                                                let (left, bottom) = bounds.map_or((0.0, 0.0), |bounds| (bounds.left().value, bounds.bottom().value));
+                                                Ok(planned.rotation().ok().and_then(|rotation| crate::bookmark_destinations::page_view(left, bottom, planned.width().value, planned.height().value, rotation.as_degrees())))
+                                            }).ok().flatten());
+                                            match view { Some(view) => parsed.view = Some(view), None => parsed = parsed.without_position() }
+                                        }
+                                        Some(parsed)
+                                    }
+                                    _ => None,
+                                };
                                 let title = bookmark.title().filter(|s| !s.is_empty()).unwrap_or_else(|| "Untitled bookmark".into());
                                 title_bytes = checked_read_text_bytes(title_bytes, title.len(), "Bookmarks contain too much text.")?;
-                                items.push(BookmarkInfo { title, page, depth });
+                                items.push(BookmarkInfo { title, page, depth, destination });
                             }
                             Ok(BookmarkList { items, truncated })
                         })();
@@ -4693,6 +4710,109 @@ mod tests {
         assert_eq!(result.items[1].depth, 1); assert_eq!(result.items[1].page, Some(1));
         assert_eq!(result.items[2].page, None);
         let (tx, rx) = oneshot::channel(); service.sender.send(Request::Bookmarks(info.id, 99, tx)).unwrap(); assert!(rx.blocking_recv().unwrap().is_err());
+    }
+    fn open_outline(entries: Vec<(&str, lopdf::Object)>, setup: impl FnOnce(&mut lopdf::Document, &std::collections::BTreeMap<u32, lopdf::ObjectId>)) -> (PdfService, ReplyLease<DocumentInfo>, tempfile::TempDir) {
+        use lopdf::{dictionary, Object};
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut pdf = lopdf::Document::load(root.join("resources/welcome.pdf")).unwrap();
+        let pages = pdf.get_pages();
+        setup(&mut pdf, &pages);
+        let outlines = pdf.new_object_id();
+        let ids: Vec<_> = entries.iter().map(|_| pdf.new_object_id()).collect();
+        pdf.objects.insert(outlines, dictionary! { "Type" => "Outlines", "First" => ids[0], "Last" => ids[ids.len() - 1], "Count" => ids.len() as i64 }.into());
+        for (index, (title, target)) in entries.into_iter().enumerate() {
+            let mut entry = dictionary! { "Title" => Object::string_literal(title), "Parent" => outlines };
+            if let Object::Dictionary(action) = target { entry.set("A", action); } else { entry.set("Dest", target); }
+            if index > 0 { entry.set("Prev", ids[index - 1]); }
+            if index + 1 < ids.len() { entry.set("Next", ids[index + 1]); }
+            pdf.objects.insert(ids[index], entry.into());
+        }
+        pdf.catalog_mut().unwrap().set("Outlines", outlines);
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("destinations.pdf"); pdf.save(&path).unwrap();
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::Open(path, tx)).unwrap();
+        let info = rx.blocking_recv().unwrap().unwrap();
+        (service, info, folder)
+    }
+    #[test]
+    fn bookmark_destinations_resolve_modes_named_destinations_and_rotated_cropped_pages() {
+        use crate::bookmark_destinations::DestinationMode::*;
+        use lopdf::{dictionary, Object};
+        let name = |value: &str| Object::Name(value.as_bytes().to_vec());
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let pages = lopdf::Document::load(root.join("resources/welcome.pdf")).unwrap().get_pages();
+        let (one, two) = (pages[&1], pages[&2]);
+        let to = |page: lopdf::ObjectId, mut rest: Vec<Object>| { let mut array = vec![Object::Reference(page)]; array.append(&mut rest); Object::Array(array) };
+        let (service, info, _folder) = open_outline(vec![
+            ("xyz", to(one, vec![name("XYZ"), Object::Real(72.0), Object::Real(700.0), Object::Real(1.5)])),
+            ("xyz keep", to(one, vec![name("XYZ"), Object::Null, Object::Null, Object::Null])),
+            ("xyz zero zoom", to(one, vec![name("XYZ"), Object::Real(72.0), Object::Real(700.0), Object::Integer(0)])),
+            ("fit", to(two, vec![name("Fit")])),
+            ("fith", to(two, vec![name("FitH"), Object::Real(500.0)])),
+            ("fitv", to(two, vec![name("FitV"), Object::Real(30.0)])),
+            ("fitr", to(two, vec![name("FitR"), Object::Real(300.0), Object::Real(400.0), Object::Real(10.0), Object::Real(20.0)])),
+            ("fitb", to(two, vec![name("FitB")])),
+            ("fitbh", to(two, vec![name("FitBH"), Object::Real(100.0)])),
+            ("fitbv", to(two, vec![name("FitBV"), Object::Real(40.0)])),
+            ("goto", Object::Dictionary(dictionary! { "S" => "GoTo", "D" => to(two, vec![name("XYZ"), Object::Integer(5), Object::Integer(6), Object::Integer(0)]) })),
+            ("named old", name("chapter-old")),
+            ("named tree", Object::string_literal("chapter-tree")),
+            ("goto named", Object::Dictionary(dictionary! { "S" => "GoTo", "D" => Object::string_literal("chapter-tree") })),
+            ("missing name", Object::string_literal("no-such-destination")),
+            ("huge", to(two, vec![name("XYZ"), Object::Real(9.0e6), Object::Real(-9.0e6), Object::Real(-5.0)])),
+            ("overflow", to(two, vec![name("XYZ"), Object::Real(1.0e30), Object::Real(-1.0e30), Object::Real(1.0e30)])),
+            ("short fitr", to(two, vec![name("FitR"), Object::Real(1.0), Object::Real(2.0), Object::Real(3.0)])),
+            ("bogus mode", to(two, vec![name("Bogus"), Object::Real(1.0)])),
+        ], |pdf, pages| {
+            let (one, two) = (pages[&1], pages[&2]);
+            let page = pdf.get_object_mut(one).unwrap().as_dict_mut().unwrap();
+            page.set("Rotate", 90);
+            page.set("CropBox", vec![Object::Integer(50), Object::Integer(100), Object::Integer(450), Object::Integer(700)]);
+            let dests = dictionary! { "chapter-old" => to(two, vec![name("FitH"), Object::Real(222.0)]) };
+            let tree = dictionary! { "Names" => vec![Object::string_literal("chapter-tree"), to(two, vec![name("XYZ"), Object::Real(33.0), Object::Real(44.0), Object::Real(2.0)])] };
+            let catalog = pdf.catalog_mut().unwrap();
+            catalog.set("Dests", dests);
+            catalog.set("Names", dictionary! { "Dests" => tree });
+        });
+        let (tx, rx) = oneshot::channel(); service.sender.send(Request::Bookmarks(info.id, info.revision, tx)).unwrap();
+        let list = rx.blocking_recv().unwrap().unwrap();
+        assert_eq!(list.items.len(), 19);
+        let find = |title: &str| list.items.iter().find(|item| item.title == title).unwrap();
+        let dest = |title: &str| find(title).destination.clone().unwrap_or_else(|| panic!("{title} has no destination"));
+        let close = |value: Option<f32>, expected: f32| assert!((value.unwrap() - expected).abs() < 0.01, "{value:?} != {expected}");
+
+        let xyz = dest("xyz");
+        assert_eq!((find("xyz").page, xyz.mode), (Some(0), Xyz));
+        close(xyz.x, 72.0); close(xyz.y, 700.0); close(xyz.zoom, 1.5);
+        let view = xyz.view.expect("a positioned destination carries the page geometry");
+        assert_eq!((view.left, view.bottom, view.width, view.height, view.rotation), (50.0, 100.0, 400.0, 600.0, 90));
+        assert_eq!((info.pages[0].width, info.pages[0].height), (600.0, 400.0));
+        let keep = dest("xyz keep");
+        assert_eq!((keep.mode, keep.x, keep.y, keep.zoom, keep.view), (Xyz, None, None, None, None));
+        assert_eq!(dest("xyz zero zoom").zoom, None);
+
+        assert_eq!((find("fit").page, dest("fit").mode, dest("fit").view), (Some(1), Fit, None));
+        let fith = dest("fith"); assert_eq!((fith.mode, fith.x), (FitH, None)); close(fith.y, 500.0);
+        let fitv = dest("fitv"); assert_eq!((fitv.mode, fitv.y), (FitV, None)); close(fitv.x, 30.0);
+        let fitr = dest("fitr"); assert_eq!(fitr.mode, FitR);
+        let rect = fitr.rect.unwrap(); for (actual, expected) in rect.iter().zip([10.0, 20.0, 300.0, 400.0]) { assert!((actual - expected).abs() < 0.01, "{rect:?}"); }
+        assert_eq!(fitr.view.unwrap().rotation, 0);
+        assert_eq!((dest("fitb").mode, dest("fitbh").mode, dest("fitbv").mode), (FitB, FitBh, FitBv));
+        close(dest("fitbh").y, 100.0); close(dest("fitbv").x, 40.0);
+
+        let goto = dest("goto"); assert_eq!((find("goto").page, goto.mode), (Some(1), Xyz)); close(goto.x, 5.0); close(goto.y, 6.0);
+        let tree = dest("named tree"); assert_eq!((find("named tree").page, tree.mode), (Some(1), Xyz)); close(tree.x, 33.0); close(tree.y, 44.0); close(tree.zoom, 2.0);
+        let goto_named = dest("goto named"); assert_eq!((find("goto named").page, goto_named.mode), (Some(1), Xyz)); close(goto_named.x, 33.0);
+        let old = dest("named old"); assert_eq!((find("named old").page, old.mode), (Some(1), FitH)); close(old.y, 222.0);
+        assert!(find("missing name").page.is_none() && find("missing name").destination.is_none());
+
+        let huge = dest("huge");
+        assert_eq!((huge.mode, huge.x, huge.y, huge.zoom), (Xyz, Some(1_000_000.0), Some(-1_000_000.0), None));
+        let overflow = dest("overflow");
+        assert!(overflow.x.is_none_or(|x| x.abs() <= 1_000_000.0) && overflow.y.is_none_or(|y| y.abs() <= 1_000_000.0) && overflow.zoom.is_none_or(|z| (0.1..=4.0).contains(&z)));
+        let short = dest("short fitr"); assert_eq!((short.mode, short.rect, short.view), (Top, None, None));
+        assert_eq!(dest("bogus mode").mode, Top);
     }
     #[test]
     fn bookmark_cycles_and_large_outlines_are_bounded() {

@@ -1,4 +1,5 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
+import type { BookmarkDestination } from './bookmarkDestination';
 export { recoveryCommittedReopenRequired } from './recoveryErrors';
 export type { RecoveryCommittedReopenRequired } from './recoveryErrors';
 import type { DocumentInfo, PageEdit } from './model';
@@ -58,7 +59,7 @@ export type PageTextGeometry = {
   reason: string | null;
 };
 export const pageTextGeometry = (id: number, page: number, revision: number) => invoke<PageTextGeometry>('page_text_geometry', { id, page, revision });
-export type BookmarkList = { items: { title: string; page: number | null; depth: number }[]; truncated: boolean };
+export type BookmarkList = { items: { title: string; page: number | null; depth: number; destination?: BookmarkDestination | null }[]; truncated: boolean };
 export const documentBookmarks = (id: number, revision: number) => invoke<BookmarkList>('document_bookmarks', { id, revision });
 export const editPages = (id: number, revision: number, edit: PageEdit, currentPage: number) => invoke<DocumentInfo>('edit_pages', { id, revision, edit, currentPage });
 export type SavedCopy = { path: string; document: DocumentInfo };

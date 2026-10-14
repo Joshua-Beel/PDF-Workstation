@@ -2,6 +2,7 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import Viewer from './Viewer';
 import { renderPage } from './bridge';
+import { pageTopOffset } from './bookmarkDestination';
 import { fitPageScale, pageLayout, scaleAnchoredTop, visiblePageRange, type DocumentInfo } from './model';
 
 vi.mock('./bridge', () => ({ renderPage: vi.fn() }));
@@ -90,5 +91,50 @@ it('recomputes fit-page scale on resize while retaining the target-page anchor',
   act(() => resize?.([{ contentRect: { width: 744, height: 648 } }]));
   const nextScale = fitPageScale(info.pages[1], 744, 648), nextLayout = pageLayout(info.pages, nextScale);
   expect(viewport.scrollTop).toBeCloseTo(scaleAnchoredTop(oldLayout, nextLayout, oldScale, nextScale, oldTop));
+  act(() => ui.unmount());
+});
+
+const upright = { left: 0, bottom: 0, width: 612, height: 792, rotation: 0 };
+
+it('scrolls straight to a destination point when it asks for no scale change', () => {
+  const info = document(4, 1, 3); let ui!: ReactTestRenderer;
+  const onView = vi.fn();
+  const target = { page: 1, token: 1, destination: { mode: 'xyz' as const, x: null, y: 700, rect: null, zoom: null, view: upright } };
+  act(() => { ui = create(<Viewer {...props(info)} onView={onView} target={target} />, { createNodeMock: () => viewport }); });
+  expect(onView).not.toHaveBeenCalled();
+  expect(viewport.scrollTo).toHaveBeenLastCalledWith({ top: pageTopOffset(info.pages, 1, 96 / 72) + 92 * 96 / 72 });
+  act(() => ui.unmount());
+});
+
+it('applies a destination zoom first and scrolls to the point once the new scale has laid out', () => {
+  const info = document(4, 1, 3); let ui!: ReactTestRenderer;
+  const onView = vi.fn();
+  const target = { page: 1, token: 1, destination: { mode: 'xyz' as const, x: null, y: 700, rect: null, zoom: 1.5, view: upright } };
+  act(() => { ui = create(<Viewer {...props(info)} onView={onView} target={target} />, { createNodeMock: () => viewport }); });
+  expect(onView).toHaveBeenCalledWith('none', 150);
+  expect(viewport.scrollTo).not.toHaveBeenCalled();
+  act(() => ui.update(<Viewer {...props(info)} zoom={150} onView={onView} target={target} />));
+  expect(viewport.scrollTop).toBeCloseTo(pageTopOffset(info.pages, 1, 2) + 92 * 2);
+  act(() => ui.unmount());
+});
+
+it('drops a pending destination view when the requested scale never arrives', () => {
+  const info = document(4, 1, 3); let ui!: ReactTestRenderer;
+  const target = { page: 1, token: 1, destination: { mode: 'xyz' as const, x: null, y: 700, rect: null, zoom: 1.5, view: upright } };
+  act(() => { ui = create(<Viewer {...props(info)} target={target} />, { createNodeMock: () => viewport }); });
+  viewport.scrollTop = 123;
+  act(() => ui.update(<Viewer {...props(info)} zoom={200} target={target} />));
+  expect(viewport.scrollTop).not.toBeCloseTo(pageTopOffset(info.pages, 1, 2) + 92 * 2);
+  act(() => ui.update(<Viewer {...props(info)} zoom={150} target={target} />));
+  expect(viewport.scrollTop).not.toBeCloseTo(pageTopOffset(info.pages, 1, 2) + 92 * 2);
+  act(() => ui.unmount());
+});
+
+it('frames a Fit destination at the fit-page scale of its page', () => {
+  const info = document(4, 1, 3); let ui!: ReactTestRenderer;
+  const target = { page: 2, token: 1, destination: { mode: 'fit' as const, x: null, y: null, rect: null, zoom: null, view: null } };
+  act(() => { ui = create(<Viewer {...props(info)} fit="page" target={target} />, { createNodeMock: () => viewport }); });
+  const scale = fitPageScale(info.pages[2], 900, 800);
+  expect(viewport.scrollTo).toHaveBeenLastCalledWith({ top: pageTopOffset(info.pages, 2, scale) - 24 });
   act(() => ui.unmount());
 });
