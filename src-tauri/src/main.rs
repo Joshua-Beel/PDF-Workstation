@@ -255,7 +255,9 @@ async fn replace_pdf_image_copy(app: tauri::AppHandle, service: State<'_, PdfSer
     let result = async {
         let window = app.get_webview_window("main").ok_or("Application window is unavailable")?;
         let source_window = window.clone();
-        let source = tauri::async_runtime::spawn_blocking(move || rfd::FileDialog::new().set_parent(&source_window).set_title("Choose an exact-size replacement PNG or JPEG").add_filter("PNG and JPEG images", &["png", "jpg", "jpeg"]).pick_file()).await.map_err(|error| error.to_string())?;
+        let source = service.image_replacement_source_via(document_id, revision, target.page, || async move {
+            tauri::async_runtime::spawn_blocking(move || rfd::FileDialog::new().set_parent(&source_window).set_title("Choose an exact-size replacement PNG or JPEG").add_filter("PNG and JPEG images", &["png", "jpg", "jpeg"]).pick_file()).await.map_err(|error| error.to_string())
+        }).await?;
         let Some(source) = source else { return Ok(None); };
         let pixel_width = target.pixel_width; let pixel_height = target.pixel_height;
         let replacement = tauri::async_runtime::spawn_blocking(move || {

@@ -1509,6 +1509,10 @@ impl PdfService {
     pub async fn inspect_image_replacement(&self, id: u64, revision: u64, page: u16) -> Result<crate::image_edit::ImageEditTargetInfo, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::InspectImageReplacement(id, revision, page, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
     }
+    pub async fn image_replacement_source_via<F, Fut>(&self, id: u64, revision: u64, page: u16, pick: F) -> Result<Option<PathBuf>, String> where F: FnOnce() -> Fut, Fut: std::future::Future<Output = Result<Option<PathBuf>, String>> {
+        self.inspect_image_replacement(id, revision, page).await?;
+        pick().await
+    }
     pub async fn replace_image_copy(&self, id: u64, revision: u64, page: u16, expected: crate::image_edit::ImageEditTargetInfo, replacement_rgb: Vec<u8>, path: PathBuf) -> Result<SavedCopy, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::ReplaceImageCopy(id, revision, page, expected, replacement_rgb, path, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?.map(ReplyLease::accept)
     }
@@ -5278,6 +5282,43 @@ mod tests {
         assert_eq!(output.get_object(image_id).unwrap().as_stream().unwrap().decompressed_content().unwrap(), replacement);
         assert_eq!(saved.document.revision, 0); assert!(!saved.document.dirty);
         for id in [source.id, saved.document.id] { call(&service, |reply| Request::Close(id, reply)).unwrap(); }
+    }
+
+    #[test]
+    fn image_replacement_refuses_a_stale_revision_before_the_image_picker_opens() {
+        use lopdf::{content::{Content, Operation}, dictionary, Dictionary, Document, Object, Stream};
+        let mut pdf = Document::with_version("1.7");
+        let pages = pdf.new_object_id();
+        let image_id = pdf.add_object(Stream::new(dictionary! { "Type" => "XObject", "Subtype" => "Image", "Width" => 2, "Height" => 1, "ColorSpace" => "DeviceRGB", "BitsPerComponent" => 8 }, vec![255, 0, 0, 0, 255, 0]));
+        let content = Content { operations: vec![Operation::new("q", vec![]), Operation::new("cm", vec![200.into(), 0.into(), 0.into(), 100.into(), 0.into(), 0.into()]), Operation::new("Do", vec![Object::Name(b"Image".to_vec())]), Operation::new("Q", vec![])] }.encode().unwrap();
+        let contents = pdf.add_object(Stream::new(Dictionary::new(), content));
+        let page_id = pdf.add_object(dictionary! { "Type" => "Page", "Parent" => pages, "MediaBox" => vec![0.into(), 0.into(), 200.into(), 100.into()], "Resources" => dictionary! { "XObject" => dictionary! { "Image" => image_id } }, "Contents" => contents });
+        pdf.objects.insert(pages, dictionary! { "Type" => "Pages", "Count" => 1, "Kids" => vec![Object::Reference(page_id)] }.into());
+        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages }); pdf.trailer.set("Root", catalog);
+        let folder = tempfile::tempdir().unwrap(); let source_path = folder.path().join("picker-source.pdf"); pdf.save(&source_path).unwrap();
+        let service = PdfService::start(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/pdfium/bin/pdfium.dll"));
+        let source = call(&service, |reply| Request::Open(source_path.clone(), reply)).unwrap();
+        let stale = source.revision;
+        call(&service, |reply| Request::InspectImageReplacement(source.id, stale, 0, reply)).unwrap();
+        let picks = std::sync::atomic::AtomicUsize::new(0);
+        let pick = || { picks.fetch_add(1, std::sync::atomic::Ordering::SeqCst); async { Ok(None) } };
+        let rotated = call(&service, |reply| Request::Edit(source.id, PageEdit::Rotate { pages: vec![0], clockwise: true }, reply)).unwrap();
+        let unsupported = tauri::async_runtime::block_on(service.image_replacement_source_via(source.id, rotated.revision, 0, pick));
+        assert_eq!(unsupported.err().unwrap(), "Image replacement requires the original unedited page order, geometry, and annotations.");
+        assert_eq!(picks.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let restored = call(&service, |reply| Request::Edit(source.id, PageEdit::Undo, reply)).unwrap();
+        assert!(stale != rotated.revision && stale != restored.revision);
+        let refused = tauri::async_runtime::block_on(service.image_replacement_source_via(source.id, stale, 0, pick));
+        assert_eq!(refused.err().unwrap(), "Document changed. Inspect the image again.");
+        assert_eq!(picks.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let closed = tauri::async_runtime::block_on(service.image_replacement_source_via(u64::MAX, 0, 0, pick));
+        assert!(closed.is_err());
+        assert_eq!(picks.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let chosen = folder.path().join("replacement.png");
+        let accepted = tauri::async_runtime::block_on(service.image_replacement_source_via(source.id, restored.revision, 0, || { picks.fetch_add(1, std::sync::atomic::Ordering::SeqCst); let chosen = chosen.clone(); async move { Ok(Some(chosen)) } }));
+        assert_eq!(accepted.unwrap(), Some(chosen));
+        assert_eq!(picks.load(std::sync::atomic::Ordering::SeqCst), 1);
+        call(&service, |reply| Request::Close(source.id, reply)).unwrap();
     }
 
     #[test]
