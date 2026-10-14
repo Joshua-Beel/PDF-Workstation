@@ -16,8 +16,13 @@
 //! The on-screen viewer renders with `render_annotations(true)` and no
 //! `FPDF_PRINTING`; redaction renders with `use_print_quality(true)`, which sets
 //! `FPDF_PRINTING`. Tests named `documents_leak_*` assert the current leaking
-//! behaviour so the evidence reruns in CI; when SM2 fixes the leak they fail and
-//! must be flipped to `assert_clean`.
+//! behaviour so the evidence reruns wherever the full native suite runs: there
+//! is no per-push CI, but `scripts/run-native-recovery-gates.ps1` runs every
+//! test target (`cargo test --locked`) in the manual Windows validation, the
+//! tag-triggered release and the manual signed-OCR workflows. When SM2 fixes the
+//! leak these tests fail and must be flipped to `assert_clean`.
+//! `worker_render_path_matches_this_replica` fails if `service.rs` drifts from
+//! the flags, DPI or conversion copied here.
 
 #[allow(dead_code)]
 #[path = "../src/page_image.rs"]
@@ -455,7 +460,9 @@ fn documents_leak_noview_print_annotation_hidden_on_screen_is_printed_into_outpu
     };
     let report = evaluate("annot_noview_print", build, &[BOX]);
     assert_eq!(report.view_ink, vec![0, 0], "the annotation is invisible in the viewer");
-    // LEAK (SM7 2026-10-14): same FPDF_PRINTING cause as the widget case.
+    // LEAK (SM7 2026-10-14, R-1): redaction renders with FPDF_PRINTING, so PDFium draws
+    // annotations by the Print flag and ignores NoView; the viewer does the reverse.
+    // Flip to assert_clean once fixed.
     assert!(report.output_ink[0] > 0 && report.rerender_ink[0] > 0, "{report:?}");
 }
 
@@ -537,6 +544,90 @@ fn optional_content(s: &str, ocg_extra: &str, config_extra: &str) -> Vec<u8> {
         vec![obj(format!("<< /Type /OCG /Name (Layer) {ocg_extra} >>"))],
         "",
     )
+}
+
+fn covered_by_screen_only_annotation(s: &str, subtype: &str, ap_content: &str, annot_extra: &str) -> Vec<u8> {
+    let a = first_extra(2);
+    let mut first = page(format!("{OUTSIDE_BOX} ({s}) Tj ET"));
+    first.extra = format!("/Annots [{a} 0 R]");
+    let annot = obj(format!(
+        "<< /Type /Annot /Subtype /{subtype} /Rect [10 50 190 80] /F 0 /P 4 0 R {annot_extra} /AP << /N {} 0 R >> >>",
+        a + 1
+    ));
+    let ap = stream(
+        "/Type /XObject /Subtype /Form /BBox [0 0 180 30] /Resources << /Font << /F1 3 0 R >> >>",
+        ap_content.as_bytes(),
+    );
+    two_pages(first, "", vec![annot, ap], "")
+}
+
+#[test]
+fn documents_leak_opaque_square_annotation_without_print_flag_uncovers_text_in_output() {
+    let report = evaluate(
+        "cover_square_no_print",
+        |s| covered_by_screen_only_annotation(s, "Square", "0 g 0 0 180 30 re f", "/IC [0 0 0] /C [0 0 0]"),
+        &[BOX],
+    );
+    assert_eq!(report.view_ink, vec![0, 0], "the secret is covered in the viewer");
+    // LEAK (SM7 2026-10-14, S-1, reverse of R-1): the cover has no Print flag, so the
+    // FPDF_PRINTING redaction render drops it and the text it covered on screen is
+    // rasterised, unmarked because it looked covered. Flip to assert_clean once fixed.
+    assert!(report.output_ink[0] > 0 && report.rerender_ink[0] > 0, "{report:?}");
+}
+
+#[test]
+fn documents_leak_opaque_freetext_annotation_without_print_flag_uncovers_text_in_output() {
+    let report = evaluate(
+        "cover_freetext_no_print",
+        |s| covered_by_screen_only_annotation(s, "FreeText", "1 g 0 0 180 30 re f BT 0 g /F1 12 Tf 10 10 Td (approved) Tj ET", "/Contents (approved) /DA (/Helv 12 Tf 0 g)"),
+        &[BOX],
+    );
+    assert_eq!(report.view_ink, vec![0, 0], "the secret is covered in the viewer");
+    // LEAK (SM7 2026-10-14, S-1): same cause as the Square cover. Flip to assert_clean once fixed.
+    assert!(report.output_ink[0] > 0 && report.rerender_ink[0] > 0, "{report:?}");
+}
+
+#[test]
+fn documents_leak_view_only_optional_content_cover_uncovers_text_in_output() {
+    let build = |s: &str| {
+        let o = first_extra(2);
+        let mut first = page(format!("{OUTSIDE_BOX} ({s}) Tj ET /OC /cover BDC 0 g 10 50 180 30 re f EMC"));
+        first.resources = format!("/Properties << /cover {o} 0 R >>");
+        two_pages(
+            first,
+            &format!("/OCProperties << /OCGs [{o} 0 R] /D << /Order [{o} 0 R] /ON [{o} 0 R] /AS [<< /Event /Print /OCGs [{o} 0 R] /Category [/Print] >> << /Event /View /OCGs [{o} 0 R] /Category [/View] >>] >> >>"),
+            vec![obj("<< /Type /OCG /Name (Cover) /Usage << /Print << /PrintState /OFF >> /View << /ViewState /ON >> >> >>")],
+            "",
+        )
+    };
+    let report = evaluate("cover_ocg_view_only", build, &[BOX]);
+    assert_eq!(report.view_ink, vec![0, 0], "the secret is covered in the viewer");
+    // LEAK (SM7 2026-10-14, S-1): FPDF_PRINTING evaluates the cover layer's Print usage
+    // (/PrintState /OFF), so the cover vanishes and the text is rasterised. Flip to assert_clean once fixed.
+    assert!(report.output_ink[0] > 0 && report.rerender_ink[0] > 0, "{report:?}");
+}
+
+#[test]
+fn worker_render_path_matches_this_replica() {
+    let source = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/service.rs")).unwrap();
+    let start = source.find("Request::RasterRedact(id, revision, page, rectangles, path, reply) =>").expect("RasterRedact worker arm");
+    let end = start + source[start..].find("redact_raster_pages(raster_pages)").expect("redact_raster_pages call");
+    let worker = &source[start..end];
+    for expected in [
+        "let document = note_document(engine, original, session, &mut redaction_note_documents, id)?;",
+        ".set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(false).clear_before_rendering(true).set_clear_color(PdfColor::WHITE).render_annotations(true).render_form_data(true).use_print_quality(true))",
+        "crate::page_image::bgra_to_rgb(raster.dimensions, &bgra, PageImageFormat::Png)?",
+        "rectangles: if index == usize::from(page) { rectangles.clone() } else { Vec::new() },",
+    ] {
+        assert!(worker.contains(expected), "RasterRedact drifted from the replica: {expected}");
+    }
+    let plan_start = source.find("fn checked_raster_redaction_request(").expect("plan function");
+    let plan = &source[plan_start..plan_start + source[plan_start..].find("Ok(RasterRedactionPlan { pages })").expect("plan end")];
+    assert!(plan.contains("crate::page_image::dimensions(page_width, page_height, 150, PageImageFormat::Png)?"), "redaction DPI drifted from 150");
+    assert!(
+        source.contains("page.render_with_config(&PdfRenderConfig::new().set_target_width(width).set_maximum_height(5000).render_annotations(true))"),
+        "the viewer render flags drifted; the view_ink assertions model them"
+    );
 }
 
 #[test]
