@@ -241,6 +241,13 @@ impl<U, B> Drop for ConfirmingGuard<'_, U, B> {
     }
 }
 
+/// The confirmation must be owned by the main window so it is modal to the app.
+/// Without that window the install is refused rather than shown ownerless.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn require_owner(owner: Option<isize>) -> Result<isize, String> {
+    owner.filter(|hwnd| *hwnd != 0).ok_or_else(|| "The update confirmation could not be attached to the PDF Workstation window. Nothing was installed. Close and reopen PDF Workstation, then try again.".to_string())
+}
+
 /// Asks before installing the downloaded update the backend holds for `key`.
 /// The question names the backend's own version, not one supplied by the
 /// webview. The slot is not locked while the question is open; No leaves the
@@ -275,25 +282,25 @@ pub fn confirmation_text(version: &str) -> String {
 const CONFIRMATION_TITLE: &str = "Install update?";
 
 #[cfg(windows)]
-fn ask_to_install(owner: Option<isize>, version: &str) -> bool {
+fn ask_to_install(owner: isize, version: &str) -> bool {
     use windows::{core::PCWSTR, Win32::{Foundation::HWND, UI::WindowsAndMessaging::{MessageBoxW, IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_SETFOREGROUND, MB_YESNO}}};
     let wide = |text: &str| text.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
     let (text, title) = (wide(&confirmation_text(version)), wide(CONFIRMATION_TITLE));
-    let owner = owner.map(|hwnd| HWND(hwnd as *mut _)).unwrap_or_default();
+    let owner = HWND(owner as *mut _);
     unsafe { MessageBoxW(Some(owner), PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()), MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND) == IDYES }
 }
 
 #[cfg(not(windows))]
-fn ask_to_install(_owner: Option<isize>, version: &str) -> bool {
+fn ask_to_install(_owner: (), version: &str) -> bool {
     rfd::MessageDialog::new().set_title(CONFIRMATION_TITLE).set_description(confirmation_text(version)).set_buttons(rfd::MessageButtons::YesNo).set_level(rfd::MessageLevel::Warning).show() == rfd::MessageDialogResult::Yes
 }
 
 #[tauri::command]
 pub async fn install_update<R: Runtime>(app: AppHandle<R>, update: UpdateKey) -> Result<InstallOutcome, String> {
     #[cfg(windows)]
-    let owner = app.get_webview_window("main").and_then(|window| window.hwnd().ok()).map(|hwnd| hwnd.0 as isize);
+    let owner = require_owner(app.get_webview_window("main").and_then(|window| window.hwnd().ok()).map(|hwnd| hwnd.0 as isize))?;
     #[cfg(not(windows))]
-    let owner = None;
+    let owner = ();
     let worker = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let state = worker.state::<PendingUpdate>();
@@ -523,6 +530,15 @@ mod tests {
         let stale = Mutex::new(downloaded(&k));
         assert!(install_confirmed(&stale, &k, &semver::Version::parse("0.3.0").unwrap(), |_| true, |_, _| Ok(())).is_err());
         assert!(!stale.lock().unwrap().confirming, "a refused install never marks the question open");
+    }
+
+    #[test]
+    fn install_is_refused_when_the_main_window_handle_is_missing() {
+        assert_eq!(require_owner(Some(0x1234)), Ok(0x1234));
+        for missing in [None, Some(0)] {
+            let error = require_owner(missing).unwrap_err();
+            assert!(error.contains("Nothing was installed"), "{missing:?} must refuse rather than show an ownerless box");
+        }
     }
 
     #[test]
