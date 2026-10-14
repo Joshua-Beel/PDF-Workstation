@@ -489,7 +489,7 @@ mod tests {
 
     #[cfg(ocr_opt_in)]
     fn profile_dir() -> PathBuf {
-        let exe = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let exe = std::env::current_exe().expect("the test binary path is unavailable").canonicalize().expect("the test binary path cannot be canonicalized");
         let deps = exe.parent().unwrap();
         assert_eq!(deps.file_name().and_then(|name| name.to_str()), Some("deps"), "the test binary is expected under <target>/<profile>/deps");
         deps.parent().unwrap().to_path_buf()
