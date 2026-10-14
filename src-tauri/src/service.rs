@@ -166,6 +166,7 @@ enum Request {
     DurableEdit(u64, PageEdit, u32, Reply<DocumentInfo>),
     DurableEditAt(u64, u64, PageEdit, u32, Reply<DocumentInfo>),
     SaveAt(u64, u64, Option<Vec<usize>>, PathBuf, Reply<SavedCopy>),
+    CheckRevision(u64, u64, Reply<()>),
     Crop(u64, u16, u64, CropRect, Reply<DocumentInfo>),
     DurableCrop(u64, u16, u64, CropRect, u32, Reply<DocumentInfo>),
     CropPages(u64, Vec<u16>, u64, CropInsets, Reply<DocumentInfo>),
@@ -410,6 +411,10 @@ impl PdfService {
                             Ok(PageImageReceipt { path: path.to_string_lossy().into_owned(), document_id: id, revision, page, dpi, width: dimensions.width, height: dimensions.height, format })
                         })();
                         let _ = reply.send(result);
+                    }
+                    Request::CheckRevision(id, revision, reply) => {
+                        if reply.is_closed() { continue; }
+                        let _ = reply.send(match sessions.get(&id) { None => Err("Document is closed".into()), Some((session, _)) if session.revision != revision => Err(STALE_PAGE_PLAN.into()), Some(_) => Ok(()) });
                     }
                     Request::PreflightRasterRedaction(id, revision, page, rectangles, reply) => {
                         if reply.is_closed() { continue; }
@@ -1532,6 +1537,14 @@ impl PdfService {
     pub async fn save_at(&self, id: u64, revision: u64, pages: Option<Vec<usize>>, path: PathBuf) -> Result<SavedCopy, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::SaveAt(id, revision, pages, path, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
     }
+    pub async fn check_revision(&self, id: u64, revision: u64) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::CheckRevision(id, revision, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
+    }
+    pub async fn save_copy_via<F, Fut>(&self, id: u64, revision: u64, pages: Option<Vec<usize>>, pick: F) -> Result<Option<SavedCopy>, String> where F: FnOnce(&'static str) -> Fut, Fut: std::future::Future<Output = Result<Option<PathBuf>, String>> {
+        self.check_revision(id, revision).await?;
+        let suggested = if pages.is_some() { "extracted-pages.pdf" } else { "organized-copy.pdf" };
+        match pick(suggested).await? { Some(path) => self.save_at(id, revision, pages, path).await.map(Some), None => Ok(None) }
+    }
     pub async fn split(&self, id: u64, revision: u64, pages_per_file: usize, folder: PathBuf) -> Result<crate::split::SplitOutput, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Split(id, revision, pages_per_file, folder, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
     }
@@ -2110,6 +2123,30 @@ mod tests {
         let dimensions = std::str::from_utf8(lines.next().unwrap()).unwrap().split_once(' ').unwrap();
         assert_eq!(lines.next(), Some(b"255".as_slice()));
         (dimensions.0.parse().unwrap(), dimensions.1.parse().unwrap(), lines.next().unwrap())
+    }
+    #[test]
+    fn save_copy_refuses_a_stale_revision_before_the_dialog_opens() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = root.join("resources/welcome.pdf");
+        let folder = tempfile::tempdir().unwrap();
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let info = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap();
+        let stale = info.revision;
+        let edited = call(&service, |reply| Request::DurableEditAt(info.id, stale, PageEdit::Rotate { pages: vec![0], clockwise: true }, 0, reply)).unwrap();
+        let dialogs = std::sync::atomic::AtomicUsize::new(0);
+        let output = folder.path().join("copy.pdf");
+        let refused = tauri::async_runtime::block_on(service.save_copy_via(info.id, stale, None, |_| { dialogs.fetch_add(1, std::sync::atomic::Ordering::SeqCst); let output = output.clone(); async move { Ok(Some(output)) } }));
+        assert_eq!(refused.err().unwrap(), STALE_PAGE_PLAN);
+        assert_eq!(dialogs.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(!output.exists());
+        let accepted = tauri::async_runtime::block_on(service.save_copy_via(info.id, edited.revision, Some(vec![0]), |name| { dialogs.fetch_add(1, std::sync::atomic::Ordering::SeqCst); assert_eq!(name, "extracted-pages.pdf"); let output = output.clone(); async move { Ok(Some(output)) } }));
+        assert!(accepted.unwrap().is_some());
+        assert_eq!(dialogs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(output.exists());
+        let cancelled = tauri::async_runtime::block_on(service.save_copy_via(info.id, edited.revision, None, |_| async { Ok(None) }));
+        assert!(cancelled.unwrap().is_none());
+        let closed = tauri::async_runtime::block_on(service.save_copy_via(info.id + 99, 0, None, |_| async { Ok(None) }));
+        assert!(closed.is_err());
     }
     #[test]
     fn page_edit_and_save_reject_stale_revisions_and_accept_the_current_one() {
