@@ -967,13 +967,6 @@ mod tests {
     static FAKE_EXECUTABLE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
     const TEST_P6: &[u8] = b"P6\n1 1\n255\n\xFF\xFF\xFF";
-    const VERIFIED_ENGINE_BYTES: u64 = 4_391_424;
-    const VERIFIED_ENGINE_SHA256: [u8; 32] = [
-        0x1d, 0x0f, 0x85, 0xd0, 0x65, 0x5e, 0xd8, 0xc0, 0xb5, 0xf6, 0x47, 0x2c, 0xd2,
-        0x92, 0x13, 0xbb, 0xd7, 0x9d, 0xc5, 0x27, 0x5c, 0xcb, 0xee, 0x73, 0x36, 0x36,
-        0x06, 0x65, 0xa9, 0x4f, 0x8c, 0x16,
-    ];
-
     struct FakeCase {
         runner: OcrProcessRunner,
         directory: PathBuf,
@@ -1434,30 +1427,60 @@ fn main() {
         assert!(!case.directory.join("child.pid").exists());
     }
 
+    #[test]
+    fn wrong_declared_size_is_refused_for_engine_and_model_before_process_creation() {
+        let _serial = test_lock();
+        let case = fake_case("exact");
+        let engine_path = case.directory.join("tesseract.exe");
+        let engine_bytes = std::fs::read(&engine_path).unwrap();
+        let model_bytes = std::fs::read(case.directory.join("tessdata/eng.traineddata")).unwrap();
+        let engine = OcrExecutableIdentity { bytes: engine_bytes.len() as u64, sha256: sha256(&engine_bytes).unwrap() };
+        let model = OcrExecutableIdentity { bytes: model_bytes.len() as u64, sha256: sha256(&model_bytes).unwrap() };
+        let wrong_engine = OcrExecutableIdentity { bytes: engine.bytes + 1, ..engine };
+        let wrong_model = OcrExecutableIdentity { bytes: model.bytes + 1, ..model };
+        for (engine, model) in [(wrong_engine, model), (engine, wrong_model)] {
+            let error = match OcrProcessRunner::new_with_model_identity(engine_path.clone(), case.directory.join("tessdata"), engine, model) {
+                Ok(_) => panic!("a wrong declared size was accepted"),
+                Err(error) => error,
+            };
+            assert!(matches!(&error, OcrProcessError::AssetIntegrity(message) if message.contains("size does not match")), "{error:?}");
+        }
+        assert!(!case.directory.join("child.pid").exists());
+    }
+
     fn verified_recipe_root() -> PathBuf {
-        repository_root().join("target/ocr-recipe-verified-20260924")
+        crate::ocr_test_support::local_setup().expect("the test must call require_local_setup first").root.clone()
     }
 
     fn verified_runner() -> OcrProcessRunner {
-        let root = verified_recipe_root();
+        let setup = crate::ocr_test_support::local_setup().expect("the test must call require_local_setup first");
         OcrProcessRunner::new(
-            root.join("engine/bin/tesseract.exe"),
-            root.join("engine/tessdata"),
-            OcrExecutableIdentity { bytes: VERIFIED_ENGINE_BYTES, sha256: VERIFIED_ENGINE_SHA256 },
+            setup.root.join("engine/bin/tesseract.exe"),
+            setup.root.join("engine/tessdata"),
+            setup.engine,
         )
         .unwrap()
     }
 
     #[test]
-    #[ignore = "requires the retained OCR setup junction-guard evidence"]
-    fn retained_setup_junction_is_rejected_as_an_asset_ancestor() {
-        let path = repository_root().join("target/ocr-junction-guard-link-20260924/engine/bin/tesseract.exe");
-        assert!(matches!(assert_no_reparse_ancestors(&path, "OCR executable"), Err(OcrProcessError::InvalidAsset(_))));
+    fn a_junction_ancestor_is_rejected_as_an_asset_ancestor() {
+        let folder = tempfile::tempdir().unwrap();
+        let actual = folder.path().join("actual");
+        std::fs::create_dir_all(actual.join("engine/bin")).unwrap();
+        std::fs::write(actual.join("engine/bin/tesseract.exe"), b"stand-in").unwrap();
+        assert!(assert_no_reparse_ancestors(&actual.join("engine/bin/tesseract.exe"), "OCR executable").is_ok());
+        let link = folder.path().join("link");
+        let output = Command::new("cmd.exe").args(["/d", "/c", "mklink", "/J"]).arg(&link).arg(&actual).output().unwrap();
+        assert!(output.status.success(), "mklink failed: {}", String::from_utf8_lossy(&output.stderr));
+        let result = assert_no_reparse_ancestors(&link.join("engine/bin/tesseract.exe"), "OCR executable");
+        std::fs::remove_dir(&link).unwrap();
+        assert!(matches!(result, Err(OcrProcessError::InvalidAsset(_))));
     }
 
     #[test]
-    #[ignore = "requires the verified opt-in OCR recipe output"]
+    #[ignore = "needs PDF_WORKSTATION_OCR_SETUP_ROOT pointing at a scripts/setup-ocr.ps1 output root"]
     fn verified_engine_recognizes_the_owned_known_text_fixture() {
+        if crate::ocr_test_support::require_local_setup("verified_engine_recognizes_the_owned_known_text_fixture").is_none() { return; }
         let _serial = test_lock();
         let input = std::fs::read(verified_recipe_root().join("smoke/known-text.pnm")).unwrap();
         let output = verified_runner().recognize_p6(&input, &OcrCancellation::default()).unwrap();
@@ -1466,8 +1489,9 @@ fn main() {
     }
 
     #[test]
-    #[ignore = "requires the verified opt-in OCR recipe output"]
+    #[ignore = "needs PDF_WORKSTATION_OCR_SETUP_ROOT pointing at a scripts/setup-ocr.ps1 output root"]
     fn verified_engine_accepts_a_deterministic_near_input_cap_page() {
+        if crate::ocr_test_support::require_local_setup("verified_engine_accepts_a_deterministic_near_input_cap_page").is_none() { return; }
         let _serial = test_lock();
         let source = std::fs::read(verified_recipe_root().join("smoke/known-text.pnm")).unwrap();
         let (_, source_height) = validate_p6(&source).unwrap();
