@@ -280,10 +280,10 @@ pub fn require_owner(owner: Option<isize>) -> Result<isize, InstallError> {
 pub fn install_confirmed<U, B>(slot: &Mutex<UpdateSlot<U, B>>, key: &UpdateKey, current: &semver::Version, confirm: impl FnOnce(&str) -> Result<bool, String>, install: impl FnOnce(U, B) -> Result<(), String>) -> Result<InstallOutcome, InstallError> {
     let version = {
         let mut held = lock_slot(slot)?;
+        let version = held.downloaded_version(key)?;
         if held.confirming {
             return Err(InstallError::kept("An update installation is already waiting for your answer."));
         }
-        let version = held.downloaded_version(key)?;
         if !is_upgrade(current, &version) {
             return Err("The offered update is not newer than the installed version.".to_string().into());
         }
@@ -333,6 +333,8 @@ fn ask_to_install(_owner: (), version: &str) -> Result<bool, String> {
 
 #[tauri::command]
 pub async fn install_update<R: Runtime>(app: AppHandle<R>, update: UpdateKey) -> Result<InstallOutcome, InstallError> {
+    // A key with no downloaded update is refused before the window check, so only a valid key gets `offerKept`.
+    lock_slot(&app.state::<PendingUpdate>())?.downloaded_version(&update)?;
     #[cfg(windows)]
     let owner = require_owner(app.get_webview_window("main").and_then(|window| window.hwnd().ok()).map(|hwnd| hwnd.0 as isize))?;
     #[cfg(not(windows))]
@@ -538,14 +540,19 @@ mod tests {
         let k = key("0.3.0", "sig");
         let slot = Mutex::new(downloaded(&k));
         let mut second = None;
+        let mut stale = None;
         let mut asked_twice = false;
         let mut installed = 0;
         let outcome = install_confirmed(&slot, &k, &current(), |_| {
             second = Some(install_confirmed(&slot, &k, &current(), |_| { asked_twice = true; Ok(true) }, |_, _| { installed += 1; Ok(()) }));
+            stale = Some(install_confirmed(&slot, &key("0.3.0", "forged"), &current(), |_| { asked_twice = true; Ok(true) }, |_, _| { installed += 1; Ok(()) }));
             Ok(false)
         }, |_, _| Ok(()));
         assert_eq!(outcome, Ok(InstallOutcome::Cancelled));
         assert!(second.unwrap().unwrap_err() == InstallError::kept("An update installation is already waiting for your answer."));
+        let stale = stale.unwrap().unwrap_err();
+        assert!(!stale.offer_kept, "a key with no downloaded update never gets the keep-the-offer hint, even while a question is open");
+        assert!(!stale.message.contains("already waiting"));
         assert!(!asked_twice, "only one confirmation may be shown at a time");
         assert_eq!(installed, 0);
         let mut asked_again = false;
