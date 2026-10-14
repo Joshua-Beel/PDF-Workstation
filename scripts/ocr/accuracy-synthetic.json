@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "scope": "Synthetic text rendered by scripts/ocr/generate-accuracy-fixtures.ps1 with Windows GDI+ system fonts at 150 DPI. Not real scans; says nothing about scan accuracy.",
+  "lines": [
+    "Invoice 2047 was issued on 14 March 2025 to the Harbor Street Cooperative.",
+    "Totals: 3 crates at $18.40 each, 12 boxes at $7.25, and a delivery fee of $9.00.",
+    "Please confirm the order by phone (555-0142) or write to the office before Friday.",
+    "The quick brown fox jumps over the lazy dog; sixty-one zebras quietly vexed him."
+  ],
+  "variants": [
+    { "id": "arial-12", "font": "Arial", "pt": 12 },
+    { "id": "times-11", "font": "Times New Roman", "pt": 11 },
+    { "id": "courier-10", "font": "Courier New", "pt": 10 },
+    { "id": "verdana-14", "font": "Verdana", "pt": 14 },
+    { "id": "arial-9-small", "font": "Arial", "pt": 9 },
+    { "id": "arial-12-skew-noise", "font": "Arial", "pt": 12, "skewDegrees": 1.5, "noiseDensity": 0.02, "noiseSeed": 20261014 }
+  ]
+}

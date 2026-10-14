@@ -120,3 +120,5 @@ The following local, unshipped research artifacts provide provenance. They are n
 ## Remaining work
 
 The opt-in source build still needs native-window interaction testing beyond the WebView oracle, real-document validation, and release publication work before it can be described as shipped. A representative real-document corpus is still needed to measure recognition quality, language coverage, total page-to-text time, and resource use; searchable document OCR remains unimplemented.
+
+The measuring tool for that corpus is described in [OCR accuracy harness](ocr-accuracy.md); no real-scan accuracy has been measured with it.
