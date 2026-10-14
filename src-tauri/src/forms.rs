@@ -1,5 +1,5 @@
 use crate::editor::EditSession;
-use lopdf::{content::{Content, Operation}, dictionary, Dictionary, Document, LoadOptions, Object, ObjectId, Stream};
+use lopdf::{content::{Content, Operation}, dictionary, xref::XrefEntry, Dictionary, Document, LoadOptions, Object, ObjectId, Stream};
 use serde::{ser::SerializeMap, Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -30,13 +30,18 @@ mod tests {
         let mut document = Document::load_mem(FIXTURE).unwrap(); change(&mut document);
         let mut bytes = Vec::new(); document.save_to(&mut bytes).unwrap(); session(bytes)
     }
+    fn normal_appearances(document: &Document, fields: &[ObjectId]) -> Vec<ObjectId> {
+        let mut copy = Document::with_version("1.7"); copy.objects = document.objects.clone();
+        copy.trailer.set("Replaced", fields.iter().filter_map(|id| dict(document, document.get_dictionary(*id).ok()?.get(b"AP").ok()?).ok()?.get(b"N").ok()?.as_reference().ok()).map(Object::Reference).collect::<Vec<_>>());
+        reachable(&copy).into_iter().collect()
+    }
     fn field_ids(document: &Document) -> Vec<ObjectId> {
         dict(document, document.catalog().unwrap().get(b"AcroForm").unwrap()).unwrap().get(b"Fields").unwrap().as_array().unwrap().iter().map(|value| value.as_reference().unwrap()).collect()
     }
     #[test]
     fn choices_tagged_display_export_mapping_defaults_and_unchanged_appearance_are_exact() {
         let source=session(CHOICE.to_vec());let parsed=FormDocument::parse(&source).unwrap();let original=parsed.document.clone();let field=&parsed.fields[0].dto;let choice=field.choice.as_ref().unwrap();assert_eq!(choice.presentation,"dropdown");assert_eq!(field.value,"south-002");let wire=serde_json::to_value(FormDocument::query(&source,9)).unwrap();assert_eq!(wire["fields"][0]["kind"],"choice");assert_eq!(wire["fields"][0]["presentation"],"dropdown");assert_eq!(wire["fields"][0]["options"][0]["label"],"North Hub");assert!(wire["fields"][0].get("value").is_none()&&wire["fields"][0]["options"][0].get("export").is_none());let patch:FieldValue=serde_json::from_value(serde_json::json!({"kind":"choice","fieldId":field.field_id,"optionId":choice.options[0].option_id})).unwrap();assert!(matches!(serde_json::from_value::<FieldValue>(serde_json::json!({"kind":"choice","fieldId":field.field_id,"optionId":null})).unwrap(),FieldValue::Choice {option_id:None,..}));assert!(serde_json::from_value::<FieldValue>(serde_json::json!({"kind":"choice","fieldId":field.field_id})).is_err());assert!(serde_json::from_value::<FieldValue>(serde_json::json!({"kind":"choice","fieldId":field.field_id,"optionId":choice.options[0].option_id,"value":"forged"})).is_err());
-        let(bytes,fields)=parsed.prepare(&[patch]).unwrap();assert_eq!(fields[0].value,"north-001");let output=FormDocument::parse(&session(bytes)).unwrap();let ids=field_ids(&original);let changed=output.document.get_dictionary(ids[0]).unwrap();assert_eq!(text(changed.get(b"V").unwrap()).unwrap(),"north-001");assert_eq!(changed.get(b"I").unwrap().as_array().unwrap(),&vec![Object::Integer(0)]);for key in[b"Opt".as_slice(),b"DV",b"BS",b"MK",b"Rect",b"DA"]{assert_eq!(changed.get(key).unwrap(),original.get_dictionary(ids[0]).unwrap().get(key).unwrap());}assert_eq!(output.document.get_object(ids[1]).unwrap(),original.get_object(ids[1]).unwrap());for(id,value)in&original.objects{assert_eq!(output.document.get_object(*id).unwrap(),if *id==ids[0]{output.document.get_object(*id).unwrap()}else{value});}assert_eq!(source.source,CHOICE);
+        let(bytes,fields)=parsed.prepare(&[patch]).unwrap();assert_eq!(fields[0].value,"north-001");let output=FormDocument::parse(&session(bytes)).unwrap();let ids=field_ids(&original);let changed=output.document.get_dictionary(ids[0]).unwrap();assert_eq!(text(changed.get(b"V").unwrap()).unwrap(),"north-001");assert_eq!(changed.get(b"I").unwrap().as_array().unwrap(),&vec![Object::Integer(0)]);for key in[b"Opt".as_slice(),b"DV",b"BS",b"MK",b"Rect",b"DA"]{assert_eq!(changed.get(key).unwrap(),original.get_dictionary(ids[0]).unwrap().get(key).unwrap());}assert_eq!(output.document.get_object(ids[1]).unwrap(),original.get_object(ids[1]).unwrap());let replaced=normal_appearances(&original,&ids[..1]);for(id,value)in&original.objects{if replaced.contains(id){if let Ok(kept)=output.document.get_object(*id){assert_eq!(kept,value);}continue;}assert_eq!(output.document.get_object(*id).unwrap(),if *id==ids[0]{output.document.get_object(*id).unwrap()}else{value});}assert_eq!(source.source,CHOICE);
     }
     #[test]
     fn choices_unchanged_patches_keep_original_appearance_and_blank_state() {
@@ -45,7 +50,7 @@ mod tests {
     }
     #[test]
     fn choices_mixed_kinds_unchanged_patches_validate_and_preserve_original_objects() {
-        let mut doc=Document::load_mem(CHOICE).unwrap();let pages=doc.catalog().unwrap().get(b"Pages").unwrap().as_reference().unwrap();let form=doc.catalog().unwrap().get(b"AcroForm").unwrap().as_reference().unwrap();let mut roots=field_ids(&doc).into_iter().map(Object::Reference).collect::<Vec<_>>();for fixture in[MIXED,RADIO]{let mut extra=Document::load_mem(fixture).unwrap();extra.renumber_objects_with(doc.max_id+1);let field_roots=field_ids(&extra);roots.extend(field_roots.into_iter().map(Object::Reference));let page=*extra.get_pages().values().next().unwrap();extra.get_dictionary_mut(page).unwrap().set("Parent",pages);doc.objects.extend(extra.objects);doc.max_id=doc.objects.keys().map(|id|id.0).max().unwrap();doc.get_dictionary_mut(pages).unwrap().get_mut(b"Kids").unwrap().as_array_mut().unwrap().push(Object::Reference(page));}doc.get_dictionary_mut(pages).unwrap().set("Count",3);doc.get_dictionary_mut(form).unwrap().set("Fields",roots);let mut bytes=Vec::new();doc.save_to(&mut bytes).unwrap();let source=EditSession::new(bytes.clone(),3);let parsed=FormDocument::parse(&source).unwrap();let original=parsed.document.clone();assert_eq!(parsed.fields.len(),5);let mut patches=Vec::new();let mut changed_id=None;for field in &parsed.fields{let dto=&field.dto;patches.push(if let Some(choice)=&dto.choice{let index=if choice.presentation=="list"{changed_id=Some(field.object);0}else{1};FieldValue::Choice {field_id:dto.field_id.clone(),option_id:Some(choice.options[index].option_id.clone())}}else if let Some(radio)=&dto.radio{FieldValue::Radio {field_id:dto.field_id.clone(),option_id:radio.selected_option_id.clone()}}else if let Some(checked)=dto.checked{FieldValue::Checkbox {field_id:dto.field_id.clone(),checked}}else{FieldValue::Text {field_id:dto.field_id.clone(),value:dto.value.clone()}});}let(output,_)=parsed.prepare(&patches).unwrap();let output=Document::load_mem(&output).unwrap();for(id,value)in&original.objects{if Some(*id)!=changed_id{assert_eq!(output.get_object(*id).unwrap(),value,"Only the semantically changed field may alter an original object");}}
+        let mut doc=Document::load_mem(CHOICE).unwrap();let pages=doc.catalog().unwrap().get(b"Pages").unwrap().as_reference().unwrap();let form=doc.catalog().unwrap().get(b"AcroForm").unwrap().as_reference().unwrap();let mut roots=field_ids(&doc).into_iter().map(Object::Reference).collect::<Vec<_>>();for fixture in[MIXED,RADIO]{let mut extra=Document::load_mem(fixture).unwrap();extra.renumber_objects_with(doc.max_id+1);let field_roots=field_ids(&extra);roots.extend(field_roots.into_iter().map(Object::Reference));let page=*extra.get_pages().values().next().unwrap();extra.get_dictionary_mut(page).unwrap().set("Parent",pages);doc.objects.extend(extra.objects);doc.max_id=doc.objects.keys().map(|id|id.0).max().unwrap();doc.get_dictionary_mut(pages).unwrap().get_mut(b"Kids").unwrap().as_array_mut().unwrap().push(Object::Reference(page));}doc.get_dictionary_mut(pages).unwrap().set("Count",3);doc.get_dictionary_mut(form).unwrap().set("Fields",roots);let mut bytes=Vec::new();doc.save_to(&mut bytes).unwrap();let source=EditSession::new(bytes.clone(),3);let parsed=FormDocument::parse(&source).unwrap();let original=parsed.document.clone();assert_eq!(parsed.fields.len(),5);let mut patches=Vec::new();let mut changed_id=None;for field in &parsed.fields{let dto=&field.dto;patches.push(if let Some(choice)=&dto.choice{let index=if choice.presentation=="list"{changed_id=Some(field.object);0}else{1};FieldValue::Choice {field_id:dto.field_id.clone(),option_id:Some(choice.options[index].option_id.clone())}}else if let Some(radio)=&dto.radio{FieldValue::Radio {field_id:dto.field_id.clone(),option_id:radio.selected_option_id.clone()}}else if let Some(checked)=dto.checked{FieldValue::Checkbox {field_id:dto.field_id.clone(),checked}}else{FieldValue::Text {field_id:dto.field_id.clone(),value:dto.value.clone()}});}let(output,_)=parsed.prepare(&patches).unwrap();let output=Document::load_mem(&output).unwrap();let replaced=normal_appearances(&original,&changed_id.into_iter().collect::<Vec<_>>());let live=reachable(&original);for(id,value)in&original.objects{if !live.contains(id){assert!(output.get_object(*id).is_err(),"Objects unreachable in the source are not carried into the copy");continue;}if replaced.contains(id){if let Ok(kept)=output.get_object(*id){assert_eq!(kept,value);}continue;}if Some(*id)!=changed_id{assert_eq!(output.get_object(*id).unwrap(),value,"Only the semantically changed field may alter an original object");}}
         let fields=FormDocument::parse(&source).unwrap().fields;let changed=patches[1].clone();for field in &fields{let dto=&field.dto;let wrong=if dto.checked.is_some(){FieldValue::Choice {field_id:dto.field_id.clone(),option_id:Some("forged".into())}}else if dto.radio.is_some(){FieldValue::Text {field_id:dto.field_id.clone(),value:dto.value.clone()}}else if dto.choice.is_some(){FieldValue::Checkbox {field_id:dto.field_id.clone(),checked:false}}else{FieldValue::Radio {field_id:dto.field_id.clone(),option_id:Some("forged".into())}};assert!(FormDocument::parse(&source).unwrap().prepare(&[changed.clone(),wrong]).is_err());}assert!(FormDocument::parse(&source).unwrap().prepare(&[changed.clone(),patches[0].clone(),patches[0].clone()]).is_err());assert!(FormDocument::parse(&source).unwrap().prepare(&[changed,FieldValue::Choice {field_id:"unknown".into(),option_id:Some("unknown".into())}]).is_err());assert_eq!(source.source,bytes);
     }
     #[test]
@@ -67,7 +72,7 @@ mod tests {
         let(bytes,fields)=parsed.prepare(&patches).unwrap();assert!(fields.iter().all(|field|field.value.is_empty()&&field.choice.as_ref().unwrap().selected_option_id.is_none()));
         let output=Document::load_mem(&bytes).unwrap();
         for id in &ids{let field=output.get_dictionary(*id).unwrap();let before=original.get_dictionary(*id).unwrap();assert!(field.get(b"V").is_err()&&field.get(b"I").is_err(),"A cleared choice must write neither /V nor /I");assert_ne!(field.get(b"AP").unwrap(),before.get(b"AP").unwrap());for key in[b"Opt".as_slice(),b"DV",b"DA",b"Ff",b"Rect",b"MK",b"BS"]{assert_eq!(field.get(key).ok(),before.get(key).ok());}}
-        for(id,value)in&original.objects{if !ids.contains(id){assert_eq!(output.get_object(*id).unwrap(),value);}}
+        let replaced=normal_appearances(&original,&ids);for(id,value)in&original.objects{if replaced.contains(id){if let Ok(kept)=output.get_object(*id){assert_eq!(kept,value);}continue;}if !ids.contains(id){assert_eq!(output.get_object(*id).unwrap(),value);}}
         let reparsed=FormDocument::parse(&session(bytes.clone())).unwrap();
         for field in &reparsed.fields{let choice=field.dto.choice.as_ref().unwrap();assert!(choice.selected_option_id.is_none());let normal=reparsed.document.get_dictionary(field.object).unwrap().get(b"AP").unwrap().as_dict().unwrap().get(b"N").unwrap().as_reference().unwrap();let stream=reparsed.document.get_object(normal).unwrap().as_stream().unwrap();let content=stream.decompressed_content().unwrap_or_else(|_|stream.content.clone());assert_eq!(content,choice_appearance(field.style.as_ref().unwrap(),choice).unwrap().encode().unwrap(),"Cleared {} appearance must be the regenerated blank appearance",choice.presentation);}
         assert_eq!(reparsed.prepare(&patches).err().unwrap(),"Change at least one form value before saving a new copy.");
@@ -283,6 +288,9 @@ mod tests {
         let blank_without_ap=mutated(|doc| {let id=field_ids(doc)[1]; doc.get_dictionary_mut(id).unwrap().remove(b"AP");}); assert_eq!(FormDocument::query(&blank_without_ap,1).status,"supported");
     }
 }
+#[cfg(test)]
+#[path = "forms_hardening_tests.rs"]
+pub(crate) mod hardening;
 #[derive(Clone, Debug)]
 pub struct FormField { pub field_id: String, pub name: String, pub page: usize, pub value: String, pub max_length: Option<usize>, pub checked: Option<bool>, pub(crate) on_state: Option<String>, pub radio: Option<RadioInfo>, pub choice:Option<ChoiceInfo> }
 #[derive(Clone,Debug)]
@@ -343,6 +351,16 @@ fn appearance(style: &Style, value: &str) -> Content<Vec<Operation>> {
     if !value.is_empty() { operations.extend([op("BT", &[]), Operation::new("Tf", vec![Object::Name(style.font.as_bytes().to_vec()), Object::Real(style.size)]), paint(&style.text_color, false), op("Tm", &[1.0, 0.0, 0.0, 1.0, style.border * 4.0, style.height - style.size - inset]), Operation::new("Tj", vec![Object::string_literal(value.as_bytes().to_vec())]), op("ET", &[])]); }
     operations.extend([op("Q", &[]), op("EMC", &[])]);
     Content { operations }
+}
+// A filled copy keeps only objects reachable from the trailer, so replaced appearances and superseded revisions do not carry old values.
+fn reachable(document: &Document) -> HashSet<ObjectId> {
+    fn references(value: &Object, out: &mut Vec<ObjectId>) {
+        match value { Object::Reference(id) => out.push(*id), Object::Array(values) => for value in values { references(value, out); }, Object::Dictionary(dict) => for (_, value) in dict { references(value, out); }, Object::Stream(stream) => for (_, value) in &stream.dict { references(value, out); }, _ => {} }
+    }
+    let mut pending = Vec::new(); for (_, value) in &document.trailer { references(value, &mut pending); }
+    let mut live = HashSet::new();
+    while let Some(id) = pending.pop() { if live.insert(id) { if let Some(value) = document.objects.get(&id) { references(value, &mut pending); } } }
+    live
 }
 fn same_object(a: &Object, b: &Object) -> bool {
     match (a, b) { (Object::Integer(_) | Object::Real(_), Object::Integer(_) | Object::Real(_)) => number(a).ok().zip(number(b).ok()).is_some_and(|(a, b)| (a - b).abs() < 0.0001), _ => a == b }
@@ -557,6 +575,7 @@ impl FormDocument {
         let document = Document::load_mem_with_options(&session.source, LoadOptions::with_max_decompressed_size(MAX_TEXT)).map_err(|_| "The PDF cannot be parsed within the form-loading limits.")?;
         if document.is_encrypted() || document.encryption_state.is_some() { return Err("Encrypted PDFs cannot be filled in this build.".into()); }
         if document.objects.len() > 50000 { return Err("This PDF exceeds the form object-count limit.".into()); }
+        if document.reference_table.entries.iter().any(|(number, entry)| match entry { XrefEntry::Normal { generation, .. } => !document.objects.contains_key(&(*number, *generation)), XrefEntry::Compressed { .. } => !document.objects.contains_key(&(*number, 0)), _ => false }) { return Err("Some PDF objects could not be loaded within the form-loading limits; a filled copy would drop them.".into()); }
         let catalog = document.catalog().map_err(|_| "The PDF catalog is invalid.")?;
         if catalog.has(b"Perms") { return Err("Signed or certified PDFs cannot be filled in this build.".into()); }
         let mut nodes = 0;
@@ -673,6 +692,7 @@ impl FormDocument {
             let widget = self.document.get_dictionary_mut(field.object).map_err(|_| "The form field disappeared during preparation.")?; widget.set("V", Object::string_literal(field.dto.value.as_bytes().to_vec())); widget.set("AP", dictionary! { "N" => ap });
             if let Some(choice)=&field.dto.choice{if choice.selected_option_id.is_none(){widget.remove(b"V");widget.remove(b"I");continue;}let index=choice.options.iter().position(|option|Some(&option.option_id)==choice.selected_option_id.as_ref()).ok_or("A choice patch must select one source option.")?;widget.set("I",vec![Object::Integer(index as i64)]);}
         }
+        let live = reachable(&self.document); self.document.objects.retain(|id, _| live.contains(id));
         let mut bytes = Vec::new(); self.document.save_to(&mut bytes).map_err(|_| "Could not serialize the filled form.")?; if bytes.len() > MAX_OUTPUT { return Err("The filled form output exceeds 256 MiB.".into()); } Ok((bytes, self.fields.into_iter().map(|field| field.dto).collect()))
     }
 }
