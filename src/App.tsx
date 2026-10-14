@@ -269,7 +269,7 @@ export default function App() {
     setBusy(true); setError('');
     try {
       acceptOpen(await reopenDocument(path), false);
-    } catch (e) { if (mounted.current) setError(String(e).includes('This path cannot be opened') ? `Could not reopen this file. ${String(e)}` : `Could not reopen this file. It may have moved or been deleted. ${String(e)}`); }
+    } catch (e) { if (mounted.current) setError(/This path cannot be opened|Nothing was opened\./.test(String(e)) ?`Could not reopen this file. ${String(e)}` : `Could not reopen this file. It may have moved or been deleted. ${String(e)}`); }
     finally { if (mounted.current) setBusy(false); }
   };
   const recoveryBlocked = busy || recoveryOffer !== null || redactionDraft !== null || searchableOcrTarget !== null || newCopyModalOpen || updatesOpen || pageTextOpen || pageOcrTarget !== null || printOpen || propertiesOpen || noticesOpen || passwordRequest !== null || pendingClose !== null || createOpen || pageImageTarget !== null || combineOpen || insertOpen || replaceOpen || formsOpen || commentEditor !== null || closingDocument.current !== null;

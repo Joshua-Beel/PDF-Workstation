@@ -621,7 +621,7 @@ impl PdfService {
                             let path = pending.get(&request_id).ok_or("Password request expired. Open the PDF again.")?.clone();
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
                             if password.contains('\0') { return Err("Passwords cannot contain a null character.".into()); }
-                            let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+                            let bytes = crate::open_limits::read_open_source(&path, sessions.values().map(|(session, _)| session.source.len() as u64))?;
                             let document = match engine.load_pdf_from_byte_vec(bytes.clone(), Some(&password)) {
                                 Ok(document) => document,
                                 Err(PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError)) => return Ok(OpenResult::PasswordRequired { request_id, name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), incorrect: !password.is_empty() }),
@@ -656,7 +656,7 @@ impl PdfService {
                         if reply.is_closed() { continue; }
                         let result = (|| {
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
-                            let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+                            let bytes = crate::open_limits::read_open_source(&path, sessions.values().map(|(session, _)| session.source.len() as u64))?;
                             let document = engine.load_pdf_from_byte_vec(bytes.clone(), None).map_err(|e| format!("Unable to open PDF: {e}"))?;
                             let pages = page_sizes(&document)?;
                             let id = next_id; next_id += 1;
@@ -690,7 +690,7 @@ impl PdfService {
                         if reply.is_closed() { continue; }
                         let result = (|| {
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
-                            let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+                            let bytes = crate::open_limits::read_open_source(&path, sessions.values().map(|(session, _)| session.source.len() as u64))?;
                             let source = recovery_source_identity(&bytes)?;
                             let Some(record) = crate::recovery_store::read_recovery(&root, source, None, 1)? else { return Ok(None); };
                             if !record.active { return Ok(None); }
@@ -783,7 +783,7 @@ impl PdfService {
                                 if current.revision != revision { return Err("Recovery discard is stale.".into()); }
                                 return Ok(());
                             }
-                            let disk = std::fs::read(&original.path).map_err(|_| "The source PDF changed or became unavailable; recovery was not discarded.".to_owned())?;
+                            let disk = crate::open_limits::read_bounded(std::path::Path::new(&original.path), session.source.len() as u64).map_err(|_| "The source PDF changed or became unavailable; recovery was not discarded.".to_owned())?;
                             if disk != session.source { return Err("The source PDF changed outside the app; recovery was not discarded.".into()); }
                             if recovery_heads.get(&id) != Some(&(source, current.generation)) { return Err("Recovery edits are owned by another session.".into()); }
                             let tombstone = crate::recovery_journal::RecoveryRecord { active: false, generation: current.generation.checked_add(1).ok_or("Recovery generation is exhausted.")?, revision, current_page: 0, source_pages: u32::try_from(original.pages.len()).map_err(|_| "Recovery source has too many pages.")?, source, edit_state: crate::recovery_journal::RecoveryEditState { pages: Vec::new() } };
@@ -1739,7 +1739,7 @@ fn write_recovery_verified(root: &std::path::Path, record: &crate::recovery_jour
 }
 fn persist_recovery_state(root: Option<&std::path::Path>, floors: &mut HashMap<crate::recovery_journal::SourceIdentity, crate::recovery_journal::RecoveryRecord>, session: &EditSession, original: &DocumentInfo, current_page: u32) -> Result<Option<crate::recovery_journal::RecoveryRecord>, String> {
     let Some(root) = root else { return Ok(None); };
-    let disk = std::fs::read(&original.path).map_err(|_| "The source PDF changed or became unavailable; recovery was not updated.".to_owned())?;
+    let disk = crate::open_limits::read_bounded(std::path::Path::new(&original.path), session.source.len() as u64).map_err(|_| "The source PDF changed or became unavailable; recovery was not updated.".to_owned())?;
     if disk != session.source { return Err("The source PDF changed outside the app; recovery was not updated.".into()); }
     let source = recovery_source_identity(&session.source)?;
     let current = crate::recovery_store::read_recovery(root, source, None, 0)?;
@@ -1762,7 +1762,7 @@ fn recovery_checkpoint_current(root: &std::path::Path, head: Option<&(crate::rec
     let Some(current) = crate::recovery_store::read_recovery(root, source, None, 0)? else { return Ok(false); };
     if !current.active || head != Some(&(source, current.generation)) || current.revision != session.revision || current.current_page != current_page { return Ok(false); }
     if recovery_record(session, source, current.generation, current_page, original.pages.len())? != current { return Ok(false); }
-    let disk = std::fs::read(&original.path).map_err(|_| "The source PDF changed or became unavailable; recovery was not updated.".to_owned())?;
+    let disk = crate::open_limits::read_bounded(std::path::Path::new(&original.path), session.source.len() as u64).map_err(|_| "The source PDF changed or became unavailable; recovery was not updated.".to_owned())?;
     if disk != session.source { return Err("The source PDF changed outside the app; recovery was not updated.".into()); }
     Ok(true)
 }
@@ -2110,6 +2110,22 @@ mod tests {
         let dimensions = std::str::from_utf8(lines.next().unwrap()).unwrap().split_once(' ').unwrap();
         assert_eq!(lines.next(), Some(b"255".as_slice()));
         (dimensions.0.parse().unwrap(), dimensions.1.parse().unwrap(), lines.next().unwrap())
+    }
+    #[test]
+    fn open_refuses_past_the_document_cap_and_non_files_without_loading_anything() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let path = root.join("resources/welcome.pdf");
+        let service = PdfService::start_worker(root.join("resources/pdfium/bin/pdfium.dll"), 4096, None);
+        let folder = tempfile::tempdir().unwrap();
+        assert!(call(&service, |reply| Request::Open(folder.path().to_path_buf(), reply)).is_err());
+        let ids: Vec<u64> = (0..crate::open_limits::MAX_OPEN_DOCUMENTS).map(|_| call(&service, |reply| Request::Open(path.clone(), reply)).unwrap().id).collect();
+        let error = call(&service, |reply| Request::Open(path.clone(), reply)).err().unwrap();
+        assert!(error.contains("Up to 32 PDFs can be open at once"), "{error}");
+        let error = call(&service, |reply| Request::BeginOpen(path.clone(), reply)).err().unwrap();
+        assert!(error.contains("Up to 32 PDFs can be open at once"), "{error}");
+        call(&service, |reply| Request::Close(ids[0], reply)).unwrap();
+        assert!(matches!(call(&service, |reply| Request::BeginOpen(path.clone(), reply)).unwrap(), OpenResult::Opened { .. }));
+        assert!(call(&service, |reply| Request::Open(path.clone(), reply)).err().unwrap().contains("Up to 32 PDFs"));
     }
     #[test]
     fn page_edit_and_save_reject_stale_revisions_and_accept_the_current_one() {
