@@ -92,12 +92,14 @@ Publish publisher signing as a new version; do not replace the already published
 
 ### Release steps
 
-1. Set the same new stable version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`; refresh both lockfiles. Update `docs/release-notes.md` and README recent changes.
-2. Run `npm test`, `cargo test --manifest-path src-tauri/Cargo.toml`, and `npm run installer`. The installer command uses the configured updater signing key and writes the setup executable, `.sig`, and `latest.json` into `src-tauri/target/release/bundle/nsis/`.
-3. Commit, push, and tag that exact commit `vMAJOR.MINOR.PATCH`. Push the tag. Once all signing secrets are configured, `.github/workflows/release.yml` tests, builds, signs, and creates a draft release. The workflow refuses tag/version mismatches and does not overwrite releases.
-4. Install and exercise the draft installer. Publish the release when verified. Mark it as the latest stable release so installed apps see the new `latest.json`. Upload all three assets before publishing; never publish an incomplete manifest or replace an existing version's files.
+Releases are built, signed and drafted only by the tag-triggered `.github/workflows/release.yml`. There is no local release path.
 
-Local fallback: use `gh release create` with the existing version tag, the three locally built assets, `--draft`, and `--notes-file docs/release-notes.md`. This needs no Actions secret. After testing, use `gh release edit vMAJOR.MINOR.PATCH --draft=false --latest`.
+1. Set the same new stable version in all six version sources: `package.json`, `package-lock.json` (top-level `version` and `packages[""].version`), `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, and the `pdf-workstation` entry in `src-tauri/Cargo.lock`. Then run `node scripts/dependency-notices.mjs` so the inventory records the final input hashes. Update `docs/release-notes.md` and README recent changes.
+2. Run `npm test` and `cargo test --manifest-path src-tauri/Cargo.toml` as a local pre-flight. These local runs do not build or sign release assets.
+3. Merge the reviewed release commit to `master`, push it, then tag that exact commit `vMAJOR.MINOR.PATCH` and push the tag. The workflow refuses a tagged commit that is not on `origin/master`, refuses tag/version mismatches, waits for the required reviewer in the `release` environment, then tests, builds, signs and creates a draft release. It does not overwrite releases.
+4. Install and exercise the draft installer. Publish the release when verified. Mark it as the latest stable release so installed apps see the new `latest.json`. Never publish an incomplete manifest or replace an existing version's files.
+
+Not for releases: a local `npm run installer` is a development build only. Do not upload locally built assets with `gh release create` or `gh release edit`; that would bypass the `release` environment approval, the `master`-ancestor guard, Azure publisher signing and the publish job's asset rechecks, and it would require the updater signing key on a local machine, which must stay in the `release` environment.
 
 The first 0.2.0 installer establishes the updater. Earlier development executables have no updater and must install this release manually. Installation replaces app files only; source PDFs remain outside the installation folder.
 
