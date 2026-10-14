@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { renderPage, type Annotation, type CommentRect } from './bridge';
 import { clampPage, currentPageAt, fitPageScale, maxPageWidth, pageLayout, scaleAnchoredTop, visiblePageRange, type DocumentInfo } from './model';
 import type { FitMode } from './preferences';
+import { planDestination, type BookmarkDestination, type DestinationPlan } from './bookmarkDestination';
 import TextLayer from './TextLayer';
 import CommentLayer from './CommentLayer';
 import type { TextHighlightSelection, TextHighlightSelectionSource } from './textHighlightSelection';
@@ -30,7 +31,7 @@ function Page({ id, index, width, height, scale, revision, selectable, search, a
   </div>;
 }
 
-export default function Viewer({ document, zoom, fit, target, onPage, hand, search, annotations = [], commentMode = false, highlightMode = false, redactionPage = null, redactions = [], annotationAvailable = false, annotationInteractive = false, onCommentCreate = () => {}, onHighlightCreate = () => {}, onRedactionCreate = () => {}, onAnnotationSelect = () => {}, onTextSelection }: { document: DocumentInfo; zoom: number; fit: FitMode; target: { page: number; token: number }; onPage: (page: number) => void; hand: boolean; search?: ActiveSearch | null; annotations?: Annotation[]; commentMode?: boolean; highlightMode?: boolean; redactionPage?: number | null; redactions?: CommentRect[]; annotationAvailable?: boolean; annotationInteractive?: boolean; onCommentCreate?: (page: number, rect: CommentRect) => void; onHighlightCreate?: (page: number, rect: CommentRect) => void; onRedactionCreate?: (page: number, rect: CommentRect) => void; onAnnotationSelect?: (annotation: Annotation) => void; onTextSelection?: (selection: TextHighlightSelection | null, source: TextHighlightSelectionSource) => void }) {
+export default function Viewer({ document, zoom, fit, target, onPage, onView, hand, search, annotations = [], commentMode = false, highlightMode = false, redactionPage = null, redactions = [], annotationAvailable = false, annotationInteractive = false, onCommentCreate = () => {}, onHighlightCreate = () => {}, onRedactionCreate = () => {}, onAnnotationSelect = () => {}, onTextSelection }: { document: DocumentInfo; zoom: number; fit: FitMode; target: { page: number; token: number; destination?: BookmarkDestination | null }; onPage: (page: number) => void; onView?: (fit: FitMode, zoom: number) => void; hand: boolean; search?: ActiveSearch | null; annotations?: Annotation[]; commentMode?: boolean; highlightMode?: boolean; redactionPage?: number | null; redactions?: CommentRect[]; annotationAvailable?: boolean; annotationInteractive?: boolean; onCommentCreate?: (page: number, rect: CommentRect) => void; onHighlightCreate?: (page: number, rect: CommentRect) => void; onRedactionCreate?: (page: number, rect: CommentRect) => void; onAnnotationSelect?: (annotation: Annotation) => void; onTextSelection?: (selection: TextHighlightSelection | null, source: TextHighlightSelectionSource) => void }) {
   const viewport = useRef<HTMLDivElement>(null);
   const [bounds, setBounds] = useState({ width: 900, height: 800 });
   const [top, setTop] = useState(0);
@@ -45,6 +46,7 @@ export default function Viewer({ document, zoom, fit, target, onPage, hand, sear
   const scale = fit === 'width' ? Math.max(0.1, (bounds.width - 144) / maxWidth) : fit === 'page' ? fitPageScale(document.pages[targetPage], bounds.width, bounds.height) : zoom / 100 * 96 / 72;
   const layout = useMemo(() => pageLayout(document.pages, scale, maxWidth), [document, scale, maxWidth]);
   const previousLayout = useRef({ layout, scale });
+  const pendingView = useRef<DestinationPlan | null>(null);
   const range = visiblePageRange(layout, top, bounds.height);
   const visible = Array.from({ length: range.end - range.start }, (_, index) => range.start + index);
   useLayoutEffect(() => {
@@ -54,9 +56,25 @@ export default function Viewer({ document, zoom, fit, target, onPage, hand, sear
       element.scrollTop = scaleAnchoredTop(old.layout, layout, old.scale, scale, element.scrollTop);
       setTop(element.scrollTop);
     }
+    const pending = pendingView.current;
+    if (pending && old.scale !== scale) {
+      pendingView.current = null;
+      if (Math.abs(pending.scale - scale) < 1e-9) {
+        element.scrollTop = pending.top;
+        if (pending.left !== null) element.scrollLeft = pending.left;
+        setTop(element.scrollTop);
+      }
+    }
     previousLayout.current = { layout, scale };
   }, [layout, scale]);
-  useEffect(() => { viewport.current?.scrollTo({ top: layout.offsets[targetPage] - 24 }); }, [target]);
+  useEffect(() => {
+    pendingView.current = null;
+    if (!target.destination) { viewport.current?.scrollTo({ top: layout.offsets[targetPage] - 24 }); return; }
+    const plan = planDestination(target.destination, document.pages, targetPage, bounds, { fit, zoom, scale }, maxWidth);
+    if (plan.fit !== fit || plan.zoom !== zoom) onView?.(plan.fit, plan.zoom);
+    if (Math.abs(plan.scale - scale) < 1e-9) viewport.current?.scrollTo(plan.left === null ? { top: plan.top } : { top: plan.top, left: plan.left });
+    else pendingView.current = plan;
+  }, [target]);
   return <div ref={viewport} className={`${styles.viewport} ${hand ? styles.hand : ''}`} onScroll={event => {
     const scrollTop = event.currentTarget.scrollTop;
     setTop(scrollTop);

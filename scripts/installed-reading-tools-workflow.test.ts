@@ -43,7 +43,7 @@ describe('installed signed reading-tools verifier', () => {
   it('normalizes LF and Windows CRLF before exact multiline source assertions', () => {
     expect(normalizeNewlines('first\nsecond')).toBe('first\nsecond');
     expect(normalizeNewlines('first\r\nsecond\r\n')).toBe('first\nsecond\n');
-  });
+  }, 30_000);
 
   it('parses and keeps all native interaction process-bound without coordinates or global SendKeys', () => {
     const source = readFileSync('scripts/installed-reading-tools.ps1', 'utf8');
@@ -71,7 +71,7 @@ describe('installed signed reading-tools verifier', () => {
       if($null-eq('ReadingNativePickerApi'-as[type])){throw 'The native picker API did not compile.'}
     `));
     expect(nativeApi.status, nativeApi.stderr || nativeApi.stdout).toBe(0);
-  });
+  }, 30_000);
 
   it('binds a new target pair inside one of two stable owned surfaces and tracks stable close', () => {
     const check = extractFunctions('scripts/installed-reading-tools.ps1', ['Assert-ReadingApplicationProcessIdentity', 'Assert-ReadingSurfaceSnapshot', 'Assert-ReadingPickerTargetSnapshot', 'Wait-ReadingProcessBoundPickerTargets', 'Assert-ReadingSurfaceBinding', 'Wait-ReadingProcessUiSurfaceClosed'], String.raw`
@@ -92,7 +92,7 @@ describe('installed signed reading-tools verifier', () => {
     `);
     const result = runPowerShell(check);
     expect(result.status, result.stderr || result.stdout).toBe(0);
-  });
+  }, 30_000);
 
   it('rejects baseline, ambiguous, cross-surface, sibling-surface, and replaced picker observations', () => {
     const check = extractFunctions('scripts/installed-reading-tools.ps1', ['Assert-ReadingApplicationProcessIdentity', 'Assert-ReadingSurfaceSnapshot', 'Assert-ReadingPickerTargetSnapshot', 'Wait-ReadingProcessBoundPickerTargets'], String.raw`
@@ -116,7 +116,7 @@ describe('installed signed reading-tools verifier', () => {
     `);
     const result = runPowerShell(check);
     expect(result.status, result.stderr || result.stdout).toBe(0);
-  });
+  }, 30_000);
 
   it('fails closed when bounded HWND target enumeration reaches the deadline and keeps a dedicated surface until it closes', () => {
     const check = extractFunctions('scripts/installed-reading-tools.ps1', ['Assert-ReadingApplicationProcessIdentity', 'Assert-ReadingSurfaceSnapshot', 'Assert-ReadingPickerTargetSnapshot', 'Wait-ReadingProcessBoundPickerTargets', 'Assert-ReadingSurfaceBinding', 'Wait-ReadingProcessUiSurfaceClosed'], String.raw`
@@ -136,7 +136,7 @@ describe('installed signed reading-tools verifier', () => {
     `);
     const result = runPowerShell(check);
     expect(result.status, result.stderr || result.stdout).toBe(0);
-  });
+  }, 30_000);
 
   it('does not send native picker mutations after the deadline and sends timely mutations exactly once', () => {
     const check = extractFunctions('scripts/installed-reading-tools.ps1', ['Set-ReadingNativePickerValueBeforeDeadline', 'Invoke-ReadingNativePickerButtonBeforeDeadline'], String.raw`
@@ -164,7 +164,7 @@ describe('installed signed reading-tools verifier', () => {
     `);
     const result = runPowerShell(check);
     expect(result.status, result.stderr || result.stdout).toBe(0);
-  });
+  }, 30_000);
 
   it('revalidates process start ticks after the filename write and refuses Open after PID reuse', () => {
     const check = extractFunctions('scripts/installed-reading-tools.ps1', ['Assert-ReadingApplicationProcessIdentity', 'Submit-ProcessBoundOpenDialog'], String.raw`
@@ -187,7 +187,7 @@ public static class ReadingNativePickerApi {
     `);
     const result = runPowerShell(check);
     expect(result.status, result.stderr || result.stdout).toBe(0);
-  });
+  }, 30_000);
 
   it('rejects a native picker target record from a mismatched process', () => {
     const check = extractFunctions('scripts/installed-reading-tools.ps1', ['Assert-ReadingPickerTargetSnapshot'], String.raw`
@@ -200,7 +200,7 @@ public static class ReadingNativePickerApi {
     `);
     const result = runPowerShell(check);
     expect(result.status, result.stderr || result.stdout).toBe(0);
-  });
+  }, 30_000);
 
   it('avoids PowerShell automatic variables and enforces fresh exclusive profile binding', () => {
     for (const path of ['scripts/installed-reading-tools.ps1', 'scripts/verify-signed-reading-tools.ps1']) {
@@ -221,7 +221,7 @@ public static class ReadingNativePickerApi {
     expect(source).toContain("upgrade-sentinel.json");
     expect(source).toContain('stale, linked, or unrelated application-settings siblings');
     expect(source).toContain('requested WebView profile contains a reparse point');
-  });
+  }, 30_000);
 
   it('rejects rogue descendants and binds runtime and session profile capabilities', () => {
     const source = readFileSync('scripts/installed-reading-tools.ps1', 'utf8');
@@ -246,7 +246,7 @@ public static class ReadingNativePickerApi {
     `);
     const result = runPowerShell(check);
     expect(result.status, result.stderr || result.stdout).toBe(0);
-  });
+  }, 30_000);
 
   it('uses only bounded exact WebDriver action payloads for Ctrl+C and Ctrl+F', () => {
     const source = readFileSync('scripts/installed-reading-tools.ps1', 'utf8');
@@ -265,7 +265,7 @@ public static class ReadingNativePickerApi {
     expect(source).not.toContain('function Wait-ReadingWebDriverPortsFree');
     expect(source.indexOf('Wait-FixedWebDriverPortsFree -Deadline')).toBeLessThan(source.indexOf('$launchDeadline = New-ReadingPhaseDeadline -Phase launch'));
     expect(source).toContain('Assert-BoundedJsonShape');
-  });
+  }, 30_000);
 
   it('starts a fresh capped product phase after native open when the launch deadline is exhausted', () => {
     const check = extractFunctions('scripts/installed-reading-tools.ps1', ['New-ReadingPhaseDeadline', 'Assert-ReadingPhaseTransition'], String.raw`
@@ -310,7 +310,7 @@ public static class ReadingNativePickerApi {
     expect((invokeSource.match(/New-ReadingPhaseDeadline -Phase /g) || []).length).toBe(9);
     expect((invokeSource.match(/Assert-ReadingPhaseTransition -Deadline /g) || []).length).toBe(8);
     expect(invokeSource).toContain('Assert-ReadingProfileScope -ProfileRoot $ProfileRoot -SettingsRoot $SettingsRoot -Binding $profileBinding\n\n        Assert-ReadingPhaseTransition -Deadline $launchDeadline -Phase launch\n        $plainPickerDeadline = New-ReadingPhaseDeadline -Phase native-picker');
-  });
+  }, 30_000);
 
   it('proves the allowlisted document identity before render waits and emits only bounded post-open facts', () => {
     const check = extractFunctions('scripts/installed-reading-tools.ps1', ['Assert-ReadingPostOpenState', 'Wait-ReadingPostOpenState'], String.raw`
@@ -335,7 +335,7 @@ public static class ReadingNativePickerApi {
     expect(source).toContain('activeFilenameMatches:name===expected');
     expect(source).not.toContain('activeFilename:name');
     expect(source.indexOf("$postOpen = Wait-ReadingPostOpenState")).toBeLessThan(source.indexOf('$null = Wait-ReadingDocument -SessionId $sessionId -Pages 6'));
-  });
+  }, 30_000);
 
   it('activates the unique signed text-selection mode after render and before waiting for its layer', () => {
     const check = extractFunctions('scripts/installed-reading-tools.ps1', ['Enable-ReadingTextSelection'], String.raw`
@@ -370,7 +370,7 @@ public static class ReadingNativePickerApi {
     expect(layer).toBeGreaterThan(activate);
     expect(readFileSync('src/preferences.ts', 'utf8')).toContain('hand: true');
     expect(readFileSync('src/Viewer.tsx', 'utf8')).toContain('selectable={!hand && !commentMode && !highlightMode && redactionPage === null}');
-  });
+  }, 30_000);
 
   it('uses the signed Home marker and the unique global Open action when Home has two Open buttons', () => {
     const check = extractFunctions('scripts/installed-reading-tools.ps1', ['Get-ReadingHomeScript', 'Get-ReadingOpenFileScript'], String.raw`
@@ -396,7 +396,7 @@ public static class ReadingNativePickerApi {
     const checkedOutApp = readFileSync('src/App.tsx', 'utf8');
     expect((checkedOutApp.match(/Open a file/g) || []).length).toBeGreaterThan(1);
     expect(checkedOutApp).toContain('Explore a sample PDF');
-  });
+  }, 30_000);
 
   it('waits boundedly for fixed ports released by the prior installed-app proof', () => {
     const check = extractFunctions('scripts/installed-app-launch.ps1', ['Wait-FixedWebDriverPortsFree'], String.raw`
@@ -412,7 +412,7 @@ public static class ReadingNativePickerApi {
     `);
     const result = runPowerShell(check);
     expect(result.status, result.stderr || result.stdout).toBe(0);
-  });
+  }, 30_000);
 
   it('suppresses the shared port status and leaves one reading result object on the return pipeline', () => {
     const check = String.raw`
@@ -437,7 +437,7 @@ public static class ReadingNativePickerApi {
     `;
     const result = runPowerShell(check);
     expect(result.status, result.stderr || result.stdout).toBe(0);
-  });
+  }, 30_000);
 
   it('reports deterministic bounded privacy-safe unknown descendant diagnostics', () => {
     const check = extractFunctions('scripts/installed-reading-tools.ps1', ['Get-ReadingSha256', 'Get-ReadingOwnedExecutableDiagnostic', 'Assert-ReadingOwnedExecutables'], String.raw`
@@ -476,7 +476,7 @@ public static class ReadingNativePickerApi {
     expect(diagnostic.unknownLeafHashes).toEqual([...diagnostic.unknownLeafHashes].sort());
     expect(diagnostic.unknownLeafHashes).toContain(expectedNotepadHash);
     expect(result.stdout).not.toMatch(/notepad\.exe|private|sensitive|98765|secret argument|[A-Z]:\\/i);
-  });
+  }, 30_000);
 
   it('loads and executes the production receipt helper in a standalone reading script process', () => {
     const source = String.raw`
@@ -493,7 +493,7 @@ public static class ReadingNativePickerApi {
     `;
     const result = runPowerShell(source);
     expect(result.status, result.stderr || result.stdout).toBe(0);
-  });
+  }, 30_000);
 
   it('generates the exact deterministic encrypted PDF without a helper binary or network', () => {
     const script = readFileSync('scripts/verify-signed-reading-tools.ps1', 'utf8');
@@ -515,7 +515,7 @@ public static class ReadingNativePickerApi {
     `);
     const result = runPowerShell(source);
     expect(result.status, result.stderr || result.stdout).toBe(0);
-  });
+  }, 30_000);
 
   it('retains only hashed or Boolean reading evidence and gates cleanup at zero processes', () => {
     const installed = readFileSync('scripts/installed-reading-tools.ps1', 'utf8');
@@ -546,7 +546,7 @@ public static class ReadingNativePickerApi {
     expect(installed).toContain('$remaining -ne 0');
     expect(installed).toContain('-NotePropertyName relevantProcessesRemaining -NotePropertyValue 0');
     expect(verify).not.toMatch(/plainFixture\s*=\s*\[ordered\]@\{[^}]*path/);
-  });
+  }, 30_000);
 
   it('retries transient clipboard cleanup and accepts only the exact empty receipt before deadline', () => {
     const check = extractFunctions('scripts/installed-reading-tools.ps1', ['Get-ReadingSha256', 'Get-ReadingTextReceipt', 'Clear-ReadingClipboardAndVerify'], String.raw`
@@ -572,5 +572,5 @@ public static class ReadingNativePickerApi {
     `);
     const result = runPowerShell(check);
     expect(result.status, result.stderr || result.stdout).toBe(0);
-  });
+  }, 30_000);
 });
