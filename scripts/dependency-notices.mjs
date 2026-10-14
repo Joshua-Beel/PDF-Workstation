@@ -91,11 +91,6 @@ export function collectInventory(root) {
     const pkg = JSON.parse(readFileSync(join(folder, 'package.json'), 'utf8'));
     if (pkg.version !== entry.version) throw new Error(`Installed npm version differs from lockfile: ${path}`);
     const files = noticeFiles(folder);
-    if (pkg.name === '@tauri-apps/plugin-updater') {
-      const matching = records.find(record => record.name === 'tauri-plugin-updater' && record.version === pkg.version);
-      if (!matching) throw new Error('Matching updater crate license source is unavailable.');
-      for (const file of matching.files.filter(file => /LICENSE_(MIT|APACHE-2.0)$/.test(file.path))) files.push({ ...file, path: `matching-rust-crate/${file.path}` });
-    }
     records.push({ ecosystem: 'npm', name: pkg.name, version: pkg.version, license: entry.license ?? pkg.license ?? null, source: entry.resolved ?? null, scope: 'production-lock-entry', files });
   }
   records.sort((a, b) => `${a.ecosystem}/${a.name}/${a.version}`.localeCompare(`${b.ecosystem}/${b.name}/${b.version}`, 'en'));
