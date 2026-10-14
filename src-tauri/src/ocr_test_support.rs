@@ -33,10 +33,6 @@ pub(crate) fn require_local_setup(test: &str) -> Option<&'static LocalOcrSetup> 
 fn load() -> Option<LocalOcrSetup> {
     let value = std::env::var_os(SETUP_ROOT_ENV).filter(|value| !value.is_empty())?;
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("repository root");
-    if !Path::new(&value).exists() && !repository.join(&value).exists() {
-        eprintln!("{SETUP_ROOT_ENV} points at a path that does not exist");
-        return None;
-    }
     let root = absolute_from(repository, Path::new(&value)).unwrap_or_else(|error| panic!("{SETUP_ROOT_ENV}: {error}"));
     let manifest = root.join("engine/ocr-engine-manifest.json");
     let verified = verify_setup(&root, repository, &manifest).unwrap_or_else(|error| panic!("{SETUP_ROOT_ENV} failed validation: {error}"));

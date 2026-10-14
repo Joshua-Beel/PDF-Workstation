@@ -1427,6 +1427,27 @@ fn main() {
         assert!(!case.directory.join("child.pid").exists());
     }
 
+    #[test]
+    fn wrong_declared_size_is_refused_for_engine_and_model_before_process_creation() {
+        let _serial = test_lock();
+        let case = fake_case("exact");
+        let engine_path = case.directory.join("tesseract.exe");
+        let engine_bytes = std::fs::read(&engine_path).unwrap();
+        let model_bytes = std::fs::read(case.directory.join("tessdata/eng.traineddata")).unwrap();
+        let engine = OcrExecutableIdentity { bytes: engine_bytes.len() as u64, sha256: sha256(&engine_bytes).unwrap() };
+        let model = OcrExecutableIdentity { bytes: model_bytes.len() as u64, sha256: sha256(&model_bytes).unwrap() };
+        let wrong_engine = OcrExecutableIdentity { bytes: engine.bytes + 1, ..engine };
+        let wrong_model = OcrExecutableIdentity { bytes: model.bytes + 1, ..model };
+        for (engine, model) in [(wrong_engine, model), (engine, wrong_model)] {
+            let error = match OcrProcessRunner::new_with_model_identity(engine_path.clone(), case.directory.join("tessdata"), engine, model) {
+                Ok(_) => panic!("a wrong declared size was accepted"),
+                Err(error) => error,
+            };
+            assert!(matches!(&error, OcrProcessError::AssetIntegrity(message) if message.contains("size does not match")), "{error:?}");
+        }
+        assert!(!case.directory.join("child.pid").exists());
+    }
+
     fn verified_recipe_root() -> PathBuf {
         crate::ocr_test_support::local_setup().expect("the test must call require_local_setup first").root.clone()
     }
