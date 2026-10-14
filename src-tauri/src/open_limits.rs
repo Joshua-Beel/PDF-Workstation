@@ -22,21 +22,23 @@ fn too_large(len: Option<u64>, limit: u64) -> String {
     }
 }
 
-fn capacity(open: impl IntoIterator<Item = u64>, incoming: u64, retry: &str) -> Result<(), String> {
+fn capacity(open: impl IntoIterator<Item = u64>, incoming: u64, max_documents: usize, retry: &str) -> Result<(), String> {
     let (count, total) = open.into_iter().fold((0usize, 0u64), |(count, total), len| (count + 1, total.saturating_add(len)));
-    if count >= MAX_OPEN_DOCUMENTS { return Err(format!("Up to {MAX_OPEN_DOCUMENTS} PDFs can be open at once. Close a tab, then {retry} Nothing was opened.")); }
+    if count >= max_documents { return Err(format!("Up to {max_documents} PDFs can be open at once. Close a tab, then {retry} Nothing was opened.")); }
     if total.saturating_add(incoming) > MAX_OPEN_SOURCE_TOTAL { return Err(format!("Open PDFs are limited to {} in total. Close a large tab, then {retry} Nothing was opened.", size_text(MAX_OPEN_SOURCE_TOTAL))); }
     Ok(())
 }
 
 /// Refuses a new document when the worker already holds the maximum count, or when adding `incoming`
 /// bytes would take the open sources past the total budget. `open` yields the source size of each open document.
-pub fn ensure_open_capacity(open: impl IntoIterator<Item = u64>, incoming: u64) -> Result<(), String> { capacity(open, incoming, "open this PDF again.") }
+/// `max_documents` is `MAX_OPEN_DOCUMENTS` in the app; the worker passes it in so the shared in-process test
+/// worker, which many parallel tests use without closing their documents, can run with a larger count.
+pub fn ensure_open_capacity(open: impl IntoIterator<Item = u64>, incoming: u64, max_documents: usize) -> Result<(), String> { capacity(open, incoming, max_documents, "open this PDF again.") }
 
 /// The same limits for a copy that opens as a new tab, checked with the produced bytes before the copy is written.
-pub fn ensure_copy_capacity(open: impl IntoIterator<Item = u64>, len: u64) -> Result<(), String> {
+pub fn ensure_copy_capacity(open: impl IntoIterator<Item = u64>, len: u64, max_documents: usize) -> Result<(), String> {
     if len > MAX_OPEN_SOURCE_BYTES { return Err(format!("The new PDF would be {} MiB, over the {} size limit for an open file. No file was written. Nothing was opened.", mib(len), size_text(MAX_OPEN_SOURCE_BYTES))); }
-    capacity(open, len, "try again. No file was written.")
+    capacity(open, len, max_documents, "try again. No file was written.")
 }
 
 /// Reads a whole file of at most `limit` bytes. The size is checked from the open handle's metadata before any
@@ -59,15 +61,15 @@ fn read_limited(reader: impl Read, expected: u64, limit: u64) -> Result<Vec<u8>,
 }
 
 /// Reads a document source for opening: capacity first (before touching the file), then size from metadata, then the bytes.
-pub fn read_open_source(path: &Path, open: impl IntoIterator<Item = u64> + Clone) -> Result<Vec<u8>, String> { read_open_source_within(path, open, MAX_OPEN_SOURCE_BYTES) }
+pub fn read_open_source(path: &Path, open: impl IntoIterator<Item = u64> + Clone, max_documents: usize) -> Result<Vec<u8>, String> { read_open_source_within(path, open, max_documents, MAX_OPEN_SOURCE_BYTES) }
 
-fn read_open_source_within(path: &Path, open: impl IntoIterator<Item = u64> + Clone, limit: u64) -> Result<Vec<u8>, String> {
-    ensure_open_capacity(open.clone(), 0)?;
+fn read_open_source_within(path: &Path, open: impl IntoIterator<Item = u64> + Clone, max_documents: usize, limit: u64) -> Result<Vec<u8>, String> {
+    ensure_open_capacity(open.clone(), 0, max_documents)?;
     let len = std::fs::metadata(path).map_err(|error| error.to_string())?.len();
     if len > limit { return Err(too_large(Some(len), limit)); }
-    ensure_open_capacity(open.clone(), len)?;
+    ensure_open_capacity(open.clone(), len, max_documents)?;
     let bytes = read_bounded(path, limit)?;
-    ensure_open_capacity(open, bytes.len() as u64)?;
+    ensure_open_capacity(open, bytes.len() as u64, max_documents)?;
     Ok(bytes)
 }
 
@@ -104,9 +106,9 @@ mod tests {
         let dir = temp("oversized");
         let path = dir.join("big.pdf");
         std::fs::write(&path, vec![b'%'; 3 * 1024 * 1024 + 1]).unwrap();
-        let error = read_open_source_within(&path, std::iter::empty(), 3 * 1024 * 1024).unwrap_err();
+        let error = read_open_source_within(&path, std::iter::empty(), MAX_OPEN_DOCUMENTS, 3 * 1024 * 1024).unwrap_err();
         assert!(error.contains("This PDF is 4 MiB") && error.contains("3 MiB size limit") && error.contains("Nothing was opened"), "{error}");
-        assert_eq!(read_open_source_within(&path, std::iter::empty(), 4 * 1024 * 1024).unwrap().len(), 3 * 1024 * 1024 + 1);
+        assert_eq!(read_open_source_within(&path, std::iter::empty(), MAX_OPEN_DOCUMENTS, 4 * 1024 * 1024).unwrap().len(), 3 * 1024 * 1024 + 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -120,13 +122,20 @@ mod tests {
 
     #[test]
     fn copies_obey_the_size_count_and_total_limits_before_writing() {
-        let error = ensure_copy_capacity(std::iter::empty(), MAX_OPEN_SOURCE_BYTES + 1).unwrap_err();
+        let error = ensure_copy_capacity(std::iter::empty(), MAX_OPEN_SOURCE_BYTES + 1, MAX_OPEN_DOCUMENTS).unwrap_err();
         assert!(error.contains("over the 1 GiB size limit") && error.contains("No file was written. Nothing was opened."), "{error}");
-        assert!(ensure_copy_capacity(std::iter::empty(), MAX_OPEN_SOURCE_BYTES).is_ok());
-        let error = ensure_copy_capacity(vec![1; MAX_OPEN_DOCUMENTS], 1).unwrap_err();
+        assert!(ensure_copy_capacity(std::iter::empty(), MAX_OPEN_SOURCE_BYTES, MAX_OPEN_DOCUMENTS).is_ok());
+        let error = ensure_copy_capacity(vec![1; MAX_OPEN_DOCUMENTS], 1, MAX_OPEN_DOCUMENTS).unwrap_err();
         assert!(error.contains("Up to 32 PDFs") && error.contains("No file was written. Nothing was opened."), "{error}");
-        let error = ensure_copy_capacity(vec![MAX_OPEN_SOURCE_BYTES; 4], 1).unwrap_err();
+        let error = ensure_copy_capacity(vec![MAX_OPEN_SOURCE_BYTES; 4], 1, MAX_OPEN_DOCUMENTS).unwrap_err();
         assert!(error.contains("4 GiB in total") && error.ends_with("Nothing was opened."), "{error}");
+    }
+
+    #[test]
+    fn the_document_count_is_the_one_the_worker_passes() {
+        assert_eq!(MAX_OPEN_DOCUMENTS, 32);
+        assert!(ensure_open_capacity(vec![1; MAX_OPEN_DOCUMENTS], 1, 4096).is_ok());
+        assert!(ensure_open_capacity(vec![1; 4096], 1, 4096).unwrap_err().contains("Up to 4096 PDFs"));
     }
 
     #[test]
@@ -138,18 +147,18 @@ mod tests {
 
     #[test]
     fn open_count_and_total_budget_refuse_as_a_whole() {
-        assert!(ensure_open_capacity(vec![1; MAX_OPEN_DOCUMENTS - 1], 1).is_ok());
-        let error = ensure_open_capacity(vec![1; MAX_OPEN_DOCUMENTS], 1).unwrap_err();
+        assert!(ensure_open_capacity(vec![1; MAX_OPEN_DOCUMENTS - 1], 1, MAX_OPEN_DOCUMENTS).is_ok());
+        let error = ensure_open_capacity(vec![1; MAX_OPEN_DOCUMENTS], 1, MAX_OPEN_DOCUMENTS).unwrap_err();
         assert!(error.contains("Up to 32 PDFs"), "{error}");
-        assert!(ensure_open_capacity(vec![MAX_OPEN_SOURCE_BYTES; 3], MAX_OPEN_SOURCE_BYTES).is_ok());
-        let error = ensure_open_capacity(vec![MAX_OPEN_SOURCE_BYTES; 3], MAX_OPEN_SOURCE_BYTES + 1).unwrap_err();
+        assert!(ensure_open_capacity(vec![MAX_OPEN_SOURCE_BYTES; 3], MAX_OPEN_SOURCE_BYTES, MAX_OPEN_DOCUMENTS).is_ok());
+        let error = ensure_open_capacity(vec![MAX_OPEN_SOURCE_BYTES; 3], MAX_OPEN_SOURCE_BYTES + 1, MAX_OPEN_DOCUMENTS).unwrap_err();
         assert!(error.contains("4 GiB in total"), "{error}");
         let dir = temp("capacity");
         let path = dir.join("doc.pdf");
         std::fs::write(&path, b"%PDF-1.4").unwrap();
-        assert!(read_open_source(&path, vec![1u64; MAX_OPEN_DOCUMENTS]).unwrap_err().contains("Up to 32 PDFs"));
-        assert!(read_open_source(&path, vec![MAX_OPEN_SOURCE_TOTAL]).unwrap_err().contains("4 GiB in total"));
-        assert_eq!(read_open_source(&path, vec![1u64; MAX_OPEN_DOCUMENTS - 1]).unwrap(), b"%PDF-1.4");
+        assert!(read_open_source(&path, vec![1u64; MAX_OPEN_DOCUMENTS], MAX_OPEN_DOCUMENTS).unwrap_err().contains("Up to 32 PDFs"));
+        assert!(read_open_source(&path, vec![MAX_OPEN_SOURCE_TOTAL], MAX_OPEN_DOCUMENTS).unwrap_err().contains("4 GiB in total"));
+        assert_eq!(read_open_source(&path, vec![1u64; MAX_OPEN_DOCUMENTS - 1], MAX_OPEN_DOCUMENTS).unwrap(), b"%PDF-1.4");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
