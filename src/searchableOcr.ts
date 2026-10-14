@@ -17,7 +17,7 @@ export type CancelSearchableOcr = (requestId: string) => Promise<OcrCancelAck>;
 
 export function validateSearchableOcrCapability(value: SearchableOcrCapability): string | null {
   if (!value.searchablePdfAvailable) return value.searchablePdfReason?.trim() || 'Searchable OCR is unavailable in this build.';
-  if (value.searchablePdfReason !== null || value.searchablePdfDpi !== 150 || value.searchablePdfMaxPages !== 32 || value.searchablePdfMaxPixels !== 33_554_432 || value.searchablePdfMaxWords !== 100_000 || value.searchablePdfMaxTextBytes !== 8_388_608 || value.searchablePdfCharacters !== 'printable ASCII words only') return 'Searchable OCR capability does not match the supported fixed profile.';
+  if (value.searchablePdfReason !== null || value.searchablePdfDpi !== 150 || value.searchablePdfMaxPages !== 32 || value.searchablePdfMaxPixels !== 33_554_432 || value.searchablePdfMaxWords !== 100_000 || value.searchablePdfMaxTextBytes !== 8_388_608 || value.searchablePdfCharacters !== 'Unicode words without control or whitespace characters') return 'Searchable OCR capability does not match the supported fixed profile.';
   return null;
 }
 
