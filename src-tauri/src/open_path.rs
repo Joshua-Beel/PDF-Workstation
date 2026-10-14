@@ -26,7 +26,7 @@ pub(crate) enum OpenOrigin { Webview, UserChosen }
 
 const UNC_ONLY_PICKED: &str = "network (UNC) paths are not supported unless you pick the file in the Open dialog or drop it onto the window";
 
-const UNC_LOSSY_NAME: &str = "this file's name contains characters PDF Workstation can't handle when it is dropped onto the window; pick the file in the Open dialog instead";
+const UNC_LOSSY_NAME: &str = "this file's name contains characters PDF Workstation cannot handle for a network path. Pick the file in the Open dialog instead";
 
 fn webview_unc_refusal(text: &str) -> String { reject(if text.contains('\u{fffd}') { UNC_LOSSY_NAME } else { UNC_ONLY_PICKED }) }
 
