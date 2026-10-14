@@ -291,10 +291,10 @@ fn cancel_text_replacement(selections:State<'_,text_edit_commands::TextReplaceme
 
 #[tauri::command]
 async fn split_document(app: tauri::AppHandle, service: State<'_, PdfService>, id: u64, revision: u64, pages_per_file: usize) -> Result<Option<split::SplitOutput>, String> {
-    service.check_revision(id, revision).await?;
-    let window = app.get_webview_window("main").ok_or("Application window is unavailable")?;
-    let folder = tauri::async_runtime::spawn_blocking(move || rfd::FileDialog::new().set_parent(&window).set_title("Choose a new folder for split PDFs").set_file_name("Split PDFs").save_file()).await.map_err(|error| error.to_string())?;
-    match folder { Some(folder) => service.split(id, revision, pages_per_file, folder).await.map(Some), None => Ok(None) }
+    service.split_via(id, revision, pages_per_file, || async move {
+        let window = app.get_webview_window("main").ok_or("Application window is unavailable")?;
+        tauri::async_runtime::spawn_blocking(move || rfd::FileDialog::new().set_parent(&window).set_title("Choose a new folder for split PDFs").set_file_name("Split PDFs").save_file()).await.map_err(|error| error.to_string())
+    }).await
 }
 
 #[tauri::command]

@@ -46,6 +46,7 @@ pub struct BookmarkList { items: Vec<BookmarkInfo>, truncated: bool }
 const MAX_READ_TEXT_BYTES: usize = 1_048_576;
 const MAX_PASSWORD_BYTES: usize = 1024;
 const STALE_PAGE_PLAN: &str = "Document changed. Reload the page list and try again.";
+const STALE_SPLIT: &str = "Document changed. Start splitting again.";
 #[derive(Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum OpenResult {
@@ -1113,7 +1114,7 @@ impl PdfService {
                         if reply.is_closed() { continue; }
                         let result = (|| {
                             let (session, _) = sessions.get(&id).ok_or("Document is closed")?;
-                            if session.revision != revision { return Err("Document changed. Start splitting again.".into()); }
+                            if session.revision != revision { return Err(STALE_SPLIT.into()); }
                             let parent = folder.parent().ok_or("Choose a new folder for the split PDFs.")?;
                             let name = folder.file_name().ok_or("Choose a new folder name for the split PDFs.")?;
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
@@ -1556,6 +1557,10 @@ impl PdfService {
         self.check_revision(id, revision).await?;
         let suggested = if pages.is_some() { "extracted-pages.pdf" } else { "organized-copy.pdf" };
         match pick(suggested).await? { Some(path) => self.save_at(id, revision, pages, path).await.map(Some), None => Ok(None) }
+    }
+    pub async fn split_via<F, Fut>(&self, id: u64, revision: u64, pages_per_file: usize, pick: F) -> Result<Option<crate::split::SplitOutput>, String> where F: FnOnce() -> Fut, Fut: std::future::Future<Output = Result<Option<PathBuf>, String>> {
+        self.check_revision(id, revision).await.map_err(|error| if error == STALE_PAGE_PLAN { STALE_SPLIT.into() } else { error })?;
+        match pick().await? { Some(folder) => self.split(id, revision, pages_per_file, folder).await.map(Some), None => Ok(None) }
     }
     pub async fn split(&self, id: u64, revision: u64, pages_per_file: usize, folder: PathBuf) -> Result<crate::split::SplitOutput, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Split(id, revision, pages_per_file, folder, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
@@ -2160,8 +2165,46 @@ mod tests {
         assert!(output.exists());
         let cancelled = tauri::async_runtime::block_on(service.save_copy_via(info.id, edited.revision, None, |_| async { Ok(None) }));
         assert!(cancelled.unwrap().is_none());
-        let closed = tauri::async_runtime::block_on(service.save_copy_via(info.id + 99, 0, None, |_| async { Ok(None) }));
+        let closed = tauri::async_runtime::block_on(service.save_copy_via(u64::MAX, 0, None, |_| async { Ok(None) }));
         assert!(closed.is_err());
+        call(&service, |reply| Request::Close(info.id, reply)).unwrap();
+    }
+    #[test]
+    fn split_refuses_a_stale_revision_before_the_dialog_opens_with_its_own_message() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let folder = tempfile::tempdir().unwrap();
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let info = call(&service, |reply| Request::Open(root.join("resources/welcome.pdf"), reply)).unwrap();
+        let stale = info.revision;
+        let edited = call(&service, |reply| Request::DurableEditAt(info.id, stale, PageEdit::Rotate { pages: vec![0], clockwise: true }, 0, reply)).unwrap();
+        let dialogs = std::sync::atomic::AtomicUsize::new(0);
+        let output = folder.path().join("split-out");
+        let refused = tauri::async_runtime::block_on(service.split_via(info.id, stale, 1, || { dialogs.fetch_add(1, std::sync::atomic::Ordering::SeqCst); let output = output.clone(); async move { Ok(Some(output)) } }));
+        assert_eq!(refused.err().unwrap(), "Document changed. Start splitting again.");
+        assert_eq!(dialogs.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(!output.exists());
+        let cancelled = tauri::async_runtime::block_on(service.split_via(info.id, edited.revision, 1, || { dialogs.fetch_add(1, std::sync::atomic::Ordering::SeqCst); async { Ok(None) } }));
+        assert!(cancelled.unwrap().is_none());
+        assert_eq!(dialogs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let closed = tauri::async_runtime::block_on(service.split_via(u64::MAX, 0, 1, || async { Ok(None) }));
+        assert_eq!(closed.err().unwrap(), "Document is closed");
+        call(&service, |reply| Request::Close(info.id, reply)).unwrap();
+    }
+    #[test]
+    fn save_copy_refuses_when_the_revision_changes_while_the_dialog_is_open() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let folder = tempfile::tempdir().unwrap();
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let info = call(&service, |reply| Request::Open(root.join("resources/welcome.pdf"), reply)).unwrap();
+        let output = folder.path().join("late.pdf");
+        let result = tauri::async_runtime::block_on(service.save_copy_via(info.id, info.revision, None, |_| {
+            let (tx, rx) = oneshot::channel(); service.sender.send(Request::DurableEditAt(info.id, info.revision, PageEdit::Rotate { pages: vec![0], clockwise: true }, 0, tx)).unwrap();
+            let output = output.clone();
+            async move { rx.await.unwrap().unwrap(); Ok(Some(output)) }
+        }));
+        assert_eq!(result.err().unwrap(), STALE_PAGE_PLAN);
+        assert!(!output.exists());
+        call(&service, |reply| Request::Close(info.id, reply)).unwrap();
     }
     #[test]
     #[ignore = "uses an isolated worker and must run alone because PDFium binding is process-global"]
