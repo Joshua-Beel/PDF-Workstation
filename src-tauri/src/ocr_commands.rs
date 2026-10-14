@@ -488,8 +488,16 @@ mod tests {
     fn root() -> PathBuf { PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf() }
 
     #[cfg(ocr_opt_in)]
+    fn profile_dir() -> PathBuf {
+        let exe = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let deps = exe.parent().unwrap();
+        assert_eq!(deps.file_name().and_then(|name| name.to_str()), Some("deps"), "the test binary is expected under <target>/<profile>/deps");
+        deps.parent().unwrap().to_path_buf()
+    }
+
+    #[cfg(ocr_opt_in)]
     fn runtime_runner() -> OcrProcessRunner {
-        configured_runner(&root().join("src-tauri/target/debug")).unwrap().expect("opt-in OCR resources")
+        configured_runner(&profile_dir()).unwrap().expect("opt-in OCR resources")
     }
 
     #[cfg(ocr_opt_in)]
@@ -569,7 +577,7 @@ mod tests {
         let service = PdfService::start(root().join("src-tauri/resources/pdfium/bin/pdfium.dll"));
         let folder = tempfile::tempdir().unwrap();
         let (request, source_path, source) = tauri::async_runtime::block_on(known_page(&service, folder.path()));
-        let commands = OcrCommands::new(service.clone(), root().join("src-tauri/target/debug"));
+        let commands = OcrCommands::new(service.clone(), profile_dir());
         assert_eq!(commands.capability(), available_capability(true, None));
         let receipt = tauri::async_runtime::block_on(commands.recognize(
             "command-exact".into(), request.document_id, request.revision, request.page,
@@ -665,7 +673,7 @@ mod tests {
 
     #[cfg(ocr_opt_in)]
     fn copy_runtime_resources(destination_root: &Path) {
-        let source = root().join("src-tauri/target/debug").join(runtime_resource_relative());
+        let source = profile_dir().join(runtime_resource_relative());
         let destination = destination_root.join(runtime_resource_relative());
         std::fs::create_dir_all(destination.join("bin")).unwrap();
         std::fs::create_dir_all(destination.join("tessdata")).unwrap();
@@ -705,7 +713,7 @@ mod tests {
         assert_eq!(commands.capability(), unavailable_capability(UNAVAILABLE_RESOURCES));
 
         let linked = tempfile::tempdir().unwrap();
-        let actual_resources = root().join("src-tauri/target/debug/resources").canonicalize().unwrap();
+        let actual_resources = profile_dir().join("resources").canonicalize().unwrap();
         let link = linked.path().join("resources");
         create_junction(&link, &actual_resources);
         let commands = OcrCommands::new(service, linked.path().to_path_buf());
