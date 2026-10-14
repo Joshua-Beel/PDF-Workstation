@@ -7,7 +7,18 @@ export type DownloadEvent =
 
 export type InstallOutcome = 'cancelled' | 'started';
 
-type UpdateOffer = { currentVersion: string; version: string; body: string | null; signature: string; check: number };
+export class InstallRefused extends Error {
+  readonly offerKept = true;
+}
+
+const installError = (reason: unknown) => {
+  if (reason && typeof reason === 'object' && 'message' in reason && typeof reason.message === 'string') {
+    return 'offerKept' in reason && reason.offerKept === true ? new InstallRefused(reason.message) : reason.message;
+  }
+  return reason;
+};
+
+type UpdateOffer ={ currentVersion: string; version: string; body: string | null; signature: string; check: number };
 
 export type Update = {
   version: string;
@@ -29,7 +40,7 @@ export async function checkForUpdate(): Promise<Update | null> {
       channel.onmessage = onEvent;
       return invoke<void>('download_update', { update, onEvent: channel });
     },
-    install: () => invoke<InstallOutcome>('install_update', { update }),
+    install: () => invoke<InstallOutcome>('install_update', { update }).catch(reason => { throw installError(reason); }),
     close: () => invoke<void>('release_update', { update })
   };
 }

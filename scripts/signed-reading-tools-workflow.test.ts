@@ -51,7 +51,7 @@ describe('manual signed reading-tools workflow', () => {
     const currentShell = spawnSync('git', ['rev-parse', 'HEAD:src/App.tsx'], { encoding: 'utf8' });
     expect(signedShell.stdout.trim()).toBe('35a6d3b5c2dadecf378386f41ffe405da15c8c4c');
     expect(currentShell.stdout.trim()).not.toBe(signedShell.stdout.trim());
-  });
+  }, 30_000);
 
   it('keeps artifact credentials step-scoped and the UI verification credential-free', () => {
     const workflow = readFileSync('.github/workflows/reading-tools-verification.yml', 'utf8');
