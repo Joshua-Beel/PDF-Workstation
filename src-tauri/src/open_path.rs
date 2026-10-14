@@ -32,7 +32,9 @@ fn bad_unc_part(part: &str) -> bool { part.is_empty() || part == "." || part == 
 fn classify_unc(rest: &str) -> Result<(), String> {
     let parts: Vec<&str> = rest.split('\\').collect();
     if parts.len() < 3 || parts.iter().any(|part| bad_unc_part(part)) { return Err(reject("a network path must look like \\\\server\\share\\folder\\file.pdf")); }
-    if ["pipe", "ipc$", "mailslot"].iter().any(|name| parts[1].eq_ignore_ascii_case(name)) { return Err(reject("pipe and IPC shares are not files and cannot be opened")); }
+    if parts[0].starts_with(';') { return Err(reject("a network path must look like \\\\server\\share\\folder\\file.pdf")); }
+    let share = parts[1].trim_end_matches(['.', ' ']);
+    if ["pipe", "ipc$", "mailslot"].iter().any(|name| share.eq_ignore_ascii_case(name)) { return Err(reject("pipe and IPC shares are not files and cannot be opened")); }
     if parts[1..].iter().any(|part| reserved_device_component(part)) { return Err(reject("device names such as CON, NUL and COM1 are not supported")); }
     Ok(())
 }
@@ -104,10 +106,11 @@ pub(crate) struct OpenPathGrants(Mutex<Vec<(String, Instant)>>);
 fn grant_key(path: &Path) -> Option<String> {
     let text = path.to_string_lossy().replace('/', "\\");
     let key = match text.get(..8) { Some(prefix) if prefix.eq_ignore_ascii_case("\\\\?\\UNC\\") => format!("\\\\{}", text.get(8..).unwrap_or("")), _ => text };
+    if key.contains('\u{fffd}') { return None; }
     let rest = key.strip_prefix("\\\\")?;
     let mut parts = rest.splitn(3, '\\');
     let (host, share, tail) = (parts.next()?, parts.next()?, parts.next().unwrap_or(""));
-    Some(format!("\\\\{}\\{}\\{}", host.to_lowercase(), share.to_lowercase(), tail))
+    Some(format!("\\\\{}\\{}\\{}", host.to_ascii_lowercase(), share.to_ascii_lowercase(), tail))
 }
 
 impl OpenPathGrants {
@@ -284,6 +287,21 @@ mod tests {
         assert_eq!(grant_key(Path::new(r"\\?\UNC\H\S\X\y.pdf")).as_deref(), Some(r"\\h\s\X\y.pdf"));
         assert_eq!(grant_key(Path::new(r"C:\x\y.pdf")), None);
         assert_eq!(grant_key(Path::new(r"\\only")), None);
+    }
+
+    #[test]
+    fn grant_key_is_ascii_folded_and_never_lossy() {
+        assert_ne!(grant_key(Path::new("\\\\\u{212a}\\s\\a.pdf")), grant_key(Path::new(r"\\k\s\a.pdf")), "Kelvin sign must not fold to k");
+        assert_ne!(grant_key(Path::new("\\\\h\\\u{212a}\\a.pdf")), grant_key(Path::new(r"\\h\k\a.pdf")));
+        assert_eq!(grant_key(Path::new("\\\\h\\s\\\u{fffd}.pdf")), None, "lossy U+FFFD names are never granted");
+        assert_eq!(grant_key(Path::new("\\\\h\u{fffd}\\s\\a.pdf")), None);
+    }
+
+    #[test]
+    fn dialog_provenance_refuses_trimmed_pipe_shares_and_redirector_hosts() {
+        for text in [r"\\host\pipe.\a.pdf", r"\\host\IPC$ \a.pdf", r"\\host\pipe. .\a.pdf", r"\\host\mailslot..\a.pdf", r"\\;LanmanRedirector\host\pipe\x", r"\\;x\host\share\a.pdf"] {
+            assert!(classify_open_path_for(Path::new(text), OpenOrigin::UserChosen).is_err(), "should refuse {text:?}");
+        }
     }
 
     #[test]
