@@ -48,15 +48,19 @@ A third manual source-only workflow is prepared for installed comments and forms
 
 Store the private updater signing key outside Git and preserve a secure backup. Replacing or losing it prevents existing installations from accepting future updates. Never commit it or print it in logs. The public key lives in `src-tauri/tauri.conf.json`.
 
-Store the private key in the repository Actions secret `TAURI_SIGNING_PRIVATE_KEY`. Set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` only when the chosen key is password-protected. Do not generate a replacement key for each release.
+Store the private key as the `TAURI_SIGNING_PRIVATE_KEY` secret of the GitHub Actions environment `release`, not as a repository secret. The current key has no password, and the release workflow passes an empty `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; a password-protected replacement key would need a workflow change to read a password secret. Do not generate a replacement key for each release.
+
+### Release environment and gates
+
+The release workflow's `installer` job runs in the `release` environment and waits there until a required reviewer approves the deployment. A maintainer must create that environment in the repository settings before the next tag: required reviewer Joshua Beel, deployment rule limited to tags matching `v*`, and the signing secrets moved into it. If the environment does not exist when the workflow runs, GitHub creates it automatically with no reviewer, so the job is not gated. The job refuses to run unless the tagged commit is already on `origin/master`. It holds a read-only token with no persisted checkout credentials. Only the signing build step receives `TAURI_SIGNING_PRIVATE_KEY`; the validation step sees only whether the secret is set. A separate `publish` job, which checks out no source and runs no npm, Cargo, or repository script, downloads the verified assets and is the only job with `contents: write`, used only by the step that creates the draft. Before upload, the workflow also requires the updater signature's trusted comment to name exactly `PDF Workstation_<version>_x64-setup.exe`, because clients from this change on refuse an update whose signature names another installer.
 
 ## Publish a new version
 
 ### Azure publisher signing setup
 
-Set these repository Actions secrets for Azure publisher signing: `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, and `AZURE_SIGNING_PROFILE`. For a local Azure-signed build, supply the same three names as environment variables before running `npm run installer -- -AzureSigning`. Do not put their values in tracked configuration or release notes.
+Set these Actions secrets in the `release` environment for Azure publisher signing: `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, and `AZURE_SIGNING_PROFILE`. For a local Azure-signed build, supply the same three names as environment variables before running `npm run installer -- -AzureSigning`. Do not put their values in tracked configuration or release notes.
 
-The other repository Actions secrets are `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, and `TAURI_SIGNING_PRIVATE_KEY`. No credentials should be pasted into this document or a chat.
+The other `release` environment secrets are `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, and `TAURI_SIGNING_PRIVATE_KEY`. The manual signed OCR artifact workflow still reads the six Azure secrets at repository level and has no environment, so keep repository copies of those six until it gets its own; the updater key needs no repository copy. No credentials should be pasted into this document or a chat.
 
 The release workflow installs pinned `artifact-signing-cli` 0.11.0 and invokes `npm run installer -- -AzureSigning`. The Tauri signing hook applies Azure Authenticode signatures during bundling, before the final installer receives its Tauri updater signature. It then requires valid timestamped publisher signatures on both the app executable and installer before generating the manifest or uploading assets. Missing configuration or invalid signatures fail the release; the workflow never falls back to unsigned publishing. Local `npm run installer` remains a development build without Azure publisher signing. See [Tauri's Azure signing integration](https://v2.tauri.app/distribute/sign/windows/#azure-artifact-signing).
 

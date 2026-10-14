@@ -35,6 +35,9 @@ describe('release workflow contract', () => {
       'dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d',
       'actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9',
       'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
+      'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
+      'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093',
+      'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093',
     ]);
     for (const use of uses) expect(use).toMatch(/^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/);
     expect(workflow).not.toMatch(/uses:\s*[^\s]+@(?:v\d+|stable|main|master)\b/);
@@ -53,6 +56,46 @@ describe('release workflow contract', () => {
     expect(workflow).toContain('-not $release.isDraft');
     expect(workflow).toContain('$release.targetCommitish -cne $env:GITHUB_SHA');
     expect(workflow).not.toMatch(/gh release (?:edit|upload).*--latest|gh release edit.*--draft=false/);
+  });
+
+  it('signs only reviewed master commits behind the release environment, with least-privilege tokens', () => {
+    const publishStart = workflow.indexOf('\n  publish:\n');
+    expect(publishStart).toBeGreaterThan(0);
+    const installer = workflow.slice(0, publishStart);
+    const publish = workflow.slice(publishStart);
+    expect(workflow).toMatch(/^permissions: \{\}$/m);
+    expect(workflow.match(/^\s+environment:/gm)).toHaveLength(1);
+    expect(installer).toContain('    environment: release\n    permissions:\n      contents: read\n');
+    expect(installer).toContain('persist-credentials: false');
+    expect(installer).not.toContain('contents: write');
+    expect(installer).not.toContain('github.token');
+    expect(installer).not.toContain('gh release');
+    const ancestor = installer.indexOf('git merge-base --is-ancestor $env:GITHUB_SHA refs/remotes/origin/master');
+    expect(ancestor).toBeGreaterThan(installer.indexOf('$head -cne $env:GITHUB_SHA -or $tagCommit -cne $env:GITHUB_SHA'));
+    expect(ancestor).toBeLessThan(installer.indexOf('- run: npm ci'));
+    expect(installer).toContain("if ($LASTEXITCODE -ne 0) { throw 'The release tag must point to a commit that is already on origin/master.' }");
+    expect(installer).toContain('git rev-parse --verify --quiet refs/remotes/origin/master');
+    expect(publish).toContain('    needs: installer\n    runs-on: windows-latest\n    permissions:\n      contents: write\n');
+    for (const forbidden of ['actions/checkout', 'npm ', 'cargo ', 'scripts/', 'secrets.', 'node ']) expect(publish).not.toContain(forbidden);
+    expect(workflow.match(/GH_TOKEN: \$\{\{ github\.token \}\}/g)).toHaveLength(1);
+    const createStep = publish.indexOf('- name: Create draft release');
+    expect(publish.indexOf('GH_TOKEN: ${{ github.token }}')).toBeGreaterThan(createStep);
+    expect(publish).toContain('--notes-file release-notes/release-notes.md');
+    expect(publish).toContain("throw 'Downloaded updater manifest is not bound to the exact version, detached signature, and release notes.'");
+  });
+
+  it('gives the updater key only to the signing build step and checks the signed installer name', () => {
+    expect(workflow.match(/secrets\.TAURI_SIGNING_PRIVATE_KEY\b/g)).toHaveLength(2);
+    expect(workflow.match(/TAURI_SIGNING_PRIVATE_KEY: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY \}\}/g)).toHaveLength(1);
+    expect(workflow).toContain("UPDATER_KEY_PRESENT: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}");
+    const build = workflow.indexOf('- name: Build publisher-signed installer and signed update manifest');
+    const key = workflow.indexOf('TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}');
+    expect(key).toBeGreaterThan(build);
+    expect(key).toBeLessThan(workflow.indexOf('- name: Verify exact release asset inventory'));
+    expect(workflow).not.toContain('secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD');
+    expect(workflow).toContain("TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''");
+    expect(workflow).toContain('$signedFiles[0] -cne $installerName');
+    expect(workflow).toContain("throw 'Updater signature does not name the exact installer in its trusted comment; installed clients would refuse this update.'");
   });
 
   it('executes the exact six-source validator for LF, CRLF, mismatches, missing roots, and duplicate Cargo packages', () => {
