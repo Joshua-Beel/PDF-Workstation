@@ -494,7 +494,8 @@ mod tests {
 
     #[cfg(ocr_opt_in)]
     fn write_smoke_png(path: &Path) {
-        let p6 = std::fs::read(root().join("target/ocr-recipe-verified-20260924/smoke/known-text.pnm")).unwrap();
+        let setup = crate::ocr_test_support::local_setup().expect("set PDF_WORKSTATION_OCR_SETUP_ROOT to the setup root used for this opt-in build");
+        let p6 = std::fs::read(setup.smoke_pnm()).unwrap();
         let mut lines = p6.splitn(4, |byte| *byte == b'\n');
         assert_eq!(lines.next(), Some(b"P6".as_slice()));
         let dimensions = std::str::from_utf8(lines.next().unwrap()).unwrap().split_once(' ').unwrap();

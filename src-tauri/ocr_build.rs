@@ -26,10 +26,10 @@ const LICENSES: &[&str] = &[
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct Receipt {
-    path: String,
-    bytes: u64,
-    sha256: String,
+pub(crate) struct Receipt {
+    pub(crate) path: String,
+    pub(crate) bytes: u64,
+    pub(crate) sha256: String,
 }
 
 pub(crate) fn configure() -> Result<(), String> {
@@ -75,10 +75,10 @@ pub(crate) fn configure() -> Result<(), String> {
     Ok(())
 }
 
-struct VerifiedSetup {
-    executable: Receipt,
-    model: Receipt,
-    licenses: Vec<Receipt>,
+pub(crate) struct VerifiedSetup {
+    pub(crate) executable: Receipt,
+    pub(crate) model: Receipt,
+    pub(crate) licenses: Vec<Receipt>,
 }
 
 fn license_environment(licenses: &[Receipt]) -> Result<Vec<(&'static str, &Receipt)>, String> {
@@ -95,7 +95,7 @@ fn license_environment(licenses: &[Receipt]) -> Result<Vec<(&'static str, &Recei
     Ok(ordered)
 }
 
-fn verify_setup(root: &Path, repository: &Path, manifest_path: &Path) -> Result<VerifiedSetup, String> {
+pub(crate) fn verify_setup(root: &Path, repository: &Path, manifest_path: &Path) -> Result<VerifiedSetup, String> {
     reject_reparse_ancestors(root)?;
     reject_reparse_ancestors(manifest_path)?;
     let bytes = fs::read(manifest_path).map_err(|error| format!("could not read the OCR setup manifest: {error}"))?;
@@ -225,7 +225,7 @@ fn require_u64(value: &Value, path: &[&str], expected: u64) -> Result<(), String
     Ok(())
 }
 
-fn absolute_from(base: &Path, path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn absolute_from(base: &Path, path: &Path) -> Result<PathBuf, String> {
     let path = if path.is_absolute() { path.to_path_buf() } else { base.join(path) };
     reject_reparse_ancestors(&path)?;
     let canonical = path.canonicalize().map_err(|error| format!("could not resolve OCR setup root: {error}"))?;

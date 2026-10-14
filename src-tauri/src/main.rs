@@ -44,6 +44,12 @@ mod ocr_process;
 mod ocr;
 #[cfg(windows)]
 mod ocr_commands;
+#[cfg(all(test, windows))]
+#[path = "../ocr_build.rs"]
+#[allow(dead_code, unused_imports)]
+mod ocr_build;
+#[cfg(all(test, windows))]
+mod ocr_test_support;
 use service::{DocumentInfo, PdfService};
 use tauri::{Manager, State};
 

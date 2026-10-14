@@ -232,24 +232,18 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    const VERIFIED_ENGINE: crate::ocr_process::OcrExecutableIdentity = crate::ocr_process::OcrExecutableIdentity {
-        bytes: 4_391_424,
-        sha256: [
-            0x1d, 0x0f, 0x85, 0xd0, 0x65, 0x5e, 0xd8, 0xc0, 0xb5, 0xf6, 0x47, 0x2c, 0xd2,
-            0x92, 0x13, 0xbb, 0xd7, 0x9d, 0xc5, 0x27, 0x5c, 0xcb, 0xee, 0x73, 0x36, 0x36,
-            0x06, 0x65, 0xa9, 0x4f, 0x8c, 0x16,
-        ],
-    };
+    use crate::ocr_test_support::{local_setup, require_local_setup};
 
     fn root() -> PathBuf { PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf() }
 
     fn verified_runner() -> OcrProcessRunner {
-        let engine = root().join("target/ocr-recipe-verified-20260924/engine");
-        OcrProcessRunner::new(engine.join("bin/tesseract.exe"), engine.join("tessdata"), VERIFIED_ENGINE).unwrap()
+        let setup = local_setup().expect("the test must call require_local_setup first");
+        let engine = setup.engine_directory();
+        OcrProcessRunner::new(engine.join("bin/tesseract.exe"), engine.join("tessdata"), setup.engine).unwrap()
     }
 
     fn write_smoke_png(path: &Path) {
-        let p6 = std::fs::read(root().join("target/ocr-recipe-verified-20260924/smoke/known-text.pnm")).unwrap();
+        let p6 = std::fs::read(local_setup().expect("the test must call require_local_setup first").smoke_pnm()).unwrap();
         let mut lines = p6.splitn(4, |byte| *byte == b'\n');
         assert_eq!(lines.next(), Some(b"P6".as_slice()));
         let dimensions = std::str::from_utf8(lines.next().unwrap()).unwrap().split_once(' ').unwrap();
@@ -317,8 +311,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "uses target/ocr-recipe-verified-20260924 produced by scripts/setup-ocr.ps1"]
+    #[ignore = "needs PDF_WORKSTATION_OCR_SETUP_ROOT pointing at a scripts/setup-ocr.ps1 output root"]
     fn retained_engine_recognizes_the_tagged_current_worker_snapshot() {
+        if require_local_setup("retained_engine_recognizes_the_tagged_current_worker_snapshot").is_none() { return; }
         let _ocr_guard = crate::ocr_process::test_lock();
         let service = PdfService::start(root().join("src-tauri/resources/pdfium/bin/pdfium.dll"));
         let folder = tempfile::tempdir().unwrap();
@@ -348,8 +343,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "uses target/ocr-recipe-verified-20260924 produced by scripts/setup-ocr.ps1"]
+    #[ignore = "needs PDF_WORKSTATION_OCR_SETUP_ROOT pointing at a scripts/setup-ocr.ps1 output root"]
     fn retained_engine_result_rechecks_stale_and_closed_documents() {
+        if require_local_setup("retained_engine_result_rechecks_stale_and_closed_documents").is_none() { return; }
         let _ocr_guard = crate::ocr_process::test_lock();
         let service = PdfService::start(root().join("src-tauri/resources/pdfium/bin/pdfium.dll"));
         let folder = tempfile::tempdir().unwrap();
@@ -377,9 +373,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "uses target/ocr-recipe-verified-20260924 produced by scripts/setup-ocr.ps1"]
+    #[ignore = "needs PDF_WORKSTATION_OCR_SETUP_ROOT pointing at a scripts/setup-ocr.ps1 output root"]
     fn retained_engine_cancellation_and_aborted_coordinator_release_every_resource() {
         use std::sync::atomic::{AtomicUsize, Ordering};
+        if require_local_setup("retained_engine_cancellation_and_aborted_coordinator_release_every_resource").is_none() { return; }
         let _ocr_guard = crate::ocr_process::test_lock();
         let service = PdfService::start(root().join("src-tauri/resources/pdfium/bin/pdfium.dll"));
         let folder = tempfile::tempdir().unwrap();
