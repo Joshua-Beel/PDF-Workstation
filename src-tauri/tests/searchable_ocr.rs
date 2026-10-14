@@ -1,5 +1,8 @@
 #[path = "../src/searchable_ocr.rs"]
 mod searchable_ocr;
+#[allow(dead_code)]
+#[path = "../src/searchable_pdf.rs"]
+mod searchable_pdf;
 
 use searchable_ocr::{map_words_to_display, parse_tesseract_tsv, MAX_TSV_BYTES_PER_PAGE};
 
@@ -40,9 +43,27 @@ fn parses_decimal_confidence_and_maps_non_square_geometry() {
     assert_eq!(parsed.extracted_text, "Hello world!\nAgain");
     let display = map_words_to_display(&parsed, 612.0, 792.0).unwrap();
     assert!((display[0].x - 61.2).abs() < 1e-9);
-    assert!((display[0].y - 79.2).abs() < 1e-9);
     assert!((display[0].width - 122.4).abs() < 1e-9);
-    assert!((display[0].height - 158.4).abs() < 1e-9);
+    assert_eq!((parsed.words[0].top, parsed.words[0].height), (50, 100));
+    assert_eq!((parsed.words[0].line_top, parsed.words[0].line_height), (0, 300));
+    assert!((display[0].y - 0.0).abs() < 1e-9);
+    assert!((display[0].height - 475.2).abs() < 1e-9);
+    assert_eq!((parsed.words[2].line_top, parsed.words[2].line_height), (300, 100));
+    assert!((display[2].y - 475.2).abs() < 1e-9);
+    assert!((display[2].height - 158.4).abs() < 1e-9);
+}
+
+#[test]
+fn thin_words_take_their_line_band() {
+    let tsv = one_line(&[
+        "5\t1\t1\t1\t1\t1\t100\t50\t200\t100\t90\tword",
+        "5\t1\t1\t1\t1\t2\t320\t104\t23\t1\t90\t—",
+    ]);
+    let parsed = parse_tesseract_tsv(tsv.as_bytes(), 1000, 500).unwrap();
+    let display = map_words_to_display(&parsed, 1000.0, 500.0).unwrap();
+    assert_eq!((display[1].x, display[1].width), (320.0, 23.0));
+    assert_eq!((display[1].y, display[1].height), (0.0, 500.0));
+    assert_eq!((display[0].y, display[0].height), (display[1].y, display[1].height));
 }
 
 #[test]
@@ -66,12 +87,44 @@ fn rejects_wrong_header_and_malformed_rows() {
 }
 
 #[test]
-fn rejects_non_ascii_control_and_whitespace_word_text() {
-    for text in ["café", "two words", "bad\tfield"] {
+fn accepts_unicode_word_text_including_non_bmp() {
+    for text in ["café", "“quoted”", "naïve—final…", "Ærø’s", "Łódź", "𝔄𝔅", "a😀b"] {
         let row = format!("5\t1\t1\t1\t1\t1\t0\t0\t5\t5\t90\t{text}");
         let tsv = one_line(&[&row]);
-        assert!(parse_tesseract_tsv(tsv.as_bytes(), 1000, 500).is_err());
+        let parsed = parse_tesseract_tsv(tsv.as_bytes(), 1000, 500).unwrap();
+        assert_eq!(parsed.words[0].text, text);
+        assert_eq!(parsed.extracted_text, text);
     }
+}
+
+#[test]
+fn expands_latin_ligatures_before_limits_and_oracle_text() {
+    let row = "5\t1\t1\t1\t1\t1\t0\t0\t5\t5\t90\tﬀﬁﬂﬃﬄﬅﬆ";
+    let parsed = parse_tesseract_tsv(one_line(&[row]).as_bytes(), 1000, 500).unwrap();
+    assert_eq!(parsed.words[0].text, "fffiflffifflſtst");
+    assert_eq!(parsed.extracted_text, "fffiflffifflſtst");
+    let max = searchable_pdf::MAX_SEARCHABLE_WORD_CHARS;
+    let fits = format!("5\t1\t1\t1\t1\t1\t0\t0\t5\t5\t90\t{}", "ﬁ".repeat(max / 2));
+    assert!(parse_tesseract_tsv(one_line(&[&fits]).as_bytes(), 1000, 500).is_ok());
+    let over = format!("5\t1\t1\t1\t1\t1\t0\t0\t5\t5\t90\t{}", "ﬃ".repeat(max / 3 + 1));
+    assert!(parse_tesseract_tsv(one_line(&[&over]).as_bytes(), 1000, 500).is_err());
+}
+
+#[test]
+fn rejects_control_whitespace_invisible_and_oversize_word_text() {
+    let long = "é".repeat(searchable_pdf::MAX_SEARCHABLE_WORD_CHARS + 1);
+    for text in [
+        "two words", "bad\tfield", "nb\u{a0}sp", "bell\u{7}", "c1\u{85}", "zero\u{200b}width",
+        "bidi\u{202e}x", "bom\u{feff}", "soft\u{ad}hyphen", "bad\u{fffd}", "pua\u{e000}",
+        "non\u{fffe}", "plane16\u{10fffd}", "ideo\u{3000}space", long.as_str(),
+    ] {
+        let row = format!("5\t1\t1\t1\t1\t1\t0\t0\t5\t5\t90\t{text}");
+        let tsv = one_line(&[&row]);
+        assert!(parse_tesseract_tsv(tsv.as_bytes(), 1000, 500).is_err(), "{text:?}");
+    }
+    let exact = "é".repeat(searchable_pdf::MAX_SEARCHABLE_WORD_CHARS);
+    let row = format!("5\t1\t1\t1\t1\t1\t0\t0\t5\t5\t90\t{exact}");
+    assert!(parse_tesseract_tsv(one_line(&[&row]).as_bytes(), 1000, 500).is_ok());
 }
 
 #[test]
@@ -191,6 +244,8 @@ fn forged_pages_cannot_produce_invalid_display_geometry() {
         top: 0,
         width: 2,
         height: 1,
+        line_top: 0,
+        line_height: 1,
         confidence: 90.0,
         text: "A".into(),
     };
@@ -204,8 +259,21 @@ fn forged_pages_cannot_produce_invalid_display_geometry() {
     let outside = ParsedTsvPage {
         raster_width: 10,
         raster_height: 10,
-        words: vec![word],
+        words: vec![word.clone()],
         extracted_text: "A".into(),
     };
     assert!(map_words_to_display(&outside, 100.0, 100.0).is_err());
+    let inside = OcrWord { left: 0, ..word };
+    let page = |word: OcrWord| ParsedTsvPage { raster_width: 10, raster_height: 10, words: vec![word], extracted_text: "A".into() };
+    assert!(map_words_to_display(&page(inside.clone()), 100.0, 100.0).is_ok());
+    for bad in [
+        OcrWord { line_height: 0, ..inside.clone() },
+        OcrWord { top: 2, height: 1, line_top: 0, line_height: 2, ..inside.clone() },
+        OcrWord { top: 0, line_top: 1, line_height: 3, ..inside.clone() },
+        OcrWord { line_top: 5, line_height: 6, top: 5, ..inside.clone() },
+        OcrWord { line_top: u32::MAX, line_height: 2, ..inside.clone() },
+        OcrWord { text: "a\u{200b}".into(), ..inside.clone() },
+    ] {
+        assert!(map_words_to_display(&page(bad), 100.0, 100.0).is_err());
+    }
 }

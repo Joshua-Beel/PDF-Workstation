@@ -19,7 +19,7 @@ The images fed to the engine are used at their own pixel size with `--dpi 150`. 
 ## What the harness cannot do
 
 - It does not read PDFs. Export the page you want as a PNG at 150 DPI (the app's export-as-image) and score that. Pages that came from a PDF scan are therefore measured through the export path, not through the app's in-memory render.
-- It scores the engine's plain text, not the searchable-PDF output, and not the printable-ASCII filtering used for searchable copies.
+- It scores the engine's plain text, not the searchable-PDF output or its text layer (`docs/ocr-feasibility.md`, Searchable copy text layer). Its normalisation folds curly quotes and dashes, which the text layer keeps as emitted.
 - PNG: non-interlaced, 1 to 16 bits, gray, RGB, palette, with or without alpha. PNM: binary P5 and P6, 8-bit.
 
 ## Supplying real scans (kept outside the repository)

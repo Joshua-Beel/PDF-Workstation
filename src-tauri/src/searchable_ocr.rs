@@ -1,3 +1,5 @@
+use crate::searchable_pdf::is_supported_word_text;
+
 const TSV_HEADER: &str =
     "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext";
 
@@ -14,6 +16,8 @@ pub struct OcrWord {
     pub top: u32,
     pub width: u32,
     pub height: u32,
+    pub line_top: u32,
+    pub line_height: u32,
     pub confidence: f32,
     pub text: String,
 }
@@ -26,6 +30,10 @@ pub struct ParsedTsvPage {
     pub extracted_text: String,
 }
 
+/// A word placed on the displayed page: `x`/`width` are the word's own box,
+/// `y`/`height` are its text line's band, so a thin glyph (a dash, a period)
+/// shares the line's height and baseline the way tesseract's own PDF text
+/// layer places words, and extraction keeps it on its line.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DisplayWord {
     pub x: f64,
@@ -145,10 +153,9 @@ pub fn parse_tesseract_tsv(
                 "OCR TSV row {row_number} has an invalid word record"
             ));
         }
-        if confidence < 0.0
-            || text.is_empty()
-            || !text.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
-        {
+        let text = expand_latin_ligatures(text);
+        let text = text.as_str();
+        if confidence < 0.0 || !is_supported_word_text(text) {
             return Err(format!(
                 "OCR TSV row {row_number} contains unsupported word text"
             ));
@@ -157,7 +164,7 @@ pub fn parse_tesseract_tsv(
             return Err("OCR TSV exceeds the per-page word limit".to_string());
         }
 
-        hierarchy.accept_word(block, paragraph, line, word, bounds, row_number)?;
+        let line_bounds = hierarchy.accept_word(block, paragraph, line, word, bounds, row_number)?;
 
         let position = (block, paragraph, line, word);
         if let Some(previous) = previous_position {
@@ -181,6 +188,8 @@ pub fn parse_tesseract_tsv(
             top,
             width,
             height,
+            line_top: line_bounds.top,
+            line_height: line_bounds.height,
             confidence,
             text: text.to_string(),
         });
@@ -226,9 +235,9 @@ pub fn map_words_to_display(
         .iter()
         .map(|word| DisplayWord {
             x: f64::from(word.left) * x_scale,
-            y: f64::from(word.top) * y_scale,
+            y: f64::from(word.line_top) * y_scale,
             width: f64::from(word.width) * x_scale,
-            height: f64::from(word.height) * y_scale,
+            height: f64::from(word.line_height) * y_scale,
             confidence: word.confidence,
             text: word.text.clone(),
         })
@@ -369,7 +378,7 @@ impl Hierarchy {
         word: u32,
         bounds: Bounds,
         row: usize,
-    ) -> Result<(), String> {
+    ) -> Result<Bounds, String> {
         let valid = self.line.is_some()
             && block == self.last_block
             && paragraph == self.last_paragraph
@@ -382,7 +391,7 @@ impl Hierarchy {
             ));
         }
         self.last_word = word;
-        Ok(())
+        Ok(self.line.unwrap().1)
     }
 }
 
@@ -395,11 +404,7 @@ fn validate_word(word: &OcrWord, raster_width: u32, raster_height: u32) -> Resul
         || word.height == 0
         || !word.confidence.is_finite()
         || !(0.0..=100.0).contains(&word.confidence)
-        || word.text.is_empty()
-        || !word
-            .text
-            .bytes()
-            .all(|byte| (0x21..=0x7e).contains(&byte))
+        || !is_supported_word_text(&word.text)
     {
         return Err("OCR word is outside the supported profile".to_string());
     }
@@ -414,7 +419,38 @@ fn validate_word(word: &OcrWord, raster_width: u32, raster_height: u32) -> Resul
     if right > raster_width || bottom > raster_height {
         return Err("OCR word box is outside the raster".to_string());
     }
+    let line_bottom = word
+        .line_top
+        .checked_add(word.line_height)
+        .ok_or_else(|| "OCR line box overflows".to_string())?;
+    if word.line_height == 0
+        || line_bottom > raster_height
+        || word.top < word.line_top
+        || bottom > line_bottom
+    {
+        return Err("OCR word is outside its line band".to_string());
+    }
     Ok(())
+}
+
+/// PDF text extraction (PDFium included) reports the Latin presentation-form
+/// ligatures U+FB00..U+FB06 as their letter sequences, so the text layer and
+/// its extraction oracle carry the letters instead of the ligature code point.
+pub fn expand_latin_ligatures(text: &str) -> String {
+    let mut expanded = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '\u{FB00}' => expanded.push_str("ff"),
+            '\u{FB01}' => expanded.push_str("fi"),
+            '\u{FB02}' => expanded.push_str("fl"),
+            '\u{FB03}' => expanded.push_str("ffi"),
+            '\u{FB04}' => expanded.push_str("ffl"),
+            '\u{FB05}' => expanded.push_str("\u{17F}t"),
+            '\u{FB06}' => expanded.push_str("st"),
+            other => expanded.push(other),
+        }
+    }
+    expanded
 }
 
 fn parse_u32(value: &str, row: usize, field: &str) -> Result<u32, String> {

@@ -25,7 +25,7 @@ fn available_capability(searchable: bool, searchable_reason: Option<String>) -> 
         searchable_pdf_max_pixels: crate::searchable_pdf::MAX_SEARCHABLE_PIXELS,
         searchable_pdf_max_words: crate::searchable_pdf::MAX_SEARCHABLE_WORDS,
         searchable_pdf_max_text_bytes: crate::searchable_pdf::MAX_SEARCHABLE_TEXT_BYTES,
-        searchable_pdf_characters: searchable.then(|| "printable ASCII words only".into()),
+        searchable_pdf_characters: searchable.then(|| "Unicode words without control or whitespace characters".into()),
     }
 }
 
