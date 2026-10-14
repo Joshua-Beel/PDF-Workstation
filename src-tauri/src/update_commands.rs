@@ -168,6 +168,46 @@ pub fn is_upgrade(current: &semver::Version, offered: &str) -> bool {
     semver::Version::parse(offered).map(|offered| offered > *current).unwrap_or(false)
 }
 
+/// The product part of the installer name the release signs:
+/// `<productName>_<version><suffix>`, as Tauri's NSIS bundler names it.
+const PRODUCT_FILE_NAME: &str = "PDF Workstation";
+
+/// The installer suffix this build installs. Releases publish only a Windows
+/// x64 NSIS installer, so other builds accept no update.
+const INSTALLER_SUFFIX: Option<&str> = if cfg!(all(windows, target_arch = "x86_64")) { Some("_x64-setup.exe") } else { None };
+
+pub fn signed_installer_name(version: &str, suffix: &str) -> String {
+    format!("{PRODUCT_FILE_NAME}_{version}{suffix}")
+}
+
+/// The file name in the trusted comment of a base64 minisign updater signature
+/// (`timestamp:<n>\tfile:<name>`). The plugin verifies the global signature,
+/// which covers this comment, before it accepts the downloaded bytes, so a
+/// changed comment fails the download.
+pub fn signed_file_name(signature: &str) -> Result<String, String> {
+    use base64::Engine;
+    let refuse = || "The update signature does not name a signed installer. Nothing was downloaded.".to_string();
+    let decoded = base64::engine::general_purpose::STANDARD.decode(signature).map_err(|_| refuse())?;
+    let text = String::from_utf8(decoded).map_err(|_| refuse())?;
+    let parsed = minisign_verify::Signature::decode(&text).map_err(|_| refuse())?;
+    let mut files = parsed.trusted_comment().split('\t').filter_map(|field| field.strip_prefix("file:"));
+    match (files.next(), files.next()) {
+        (Some(file), None) => Ok(file.to_string()),
+        _ => Err(refuse()),
+    }
+}
+
+/// Refuses an offer unless its signature was made for exactly the offered
+/// version's installer on this platform, so an older signed build relabelled
+/// with a higher version is not offered.
+pub fn require_signed_for(signature: &str, version: &str, suffix: Option<&str>) -> Result<(), String> {
+    let suffix = suffix.ok_or_else(|| "Updates are published only for Windows x64. Nothing was downloaded.".to_string())?;
+    if signed_file_name(signature)? != signed_installer_name(version, suffix) {
+        return Err(format!("The update signature does not match the offered version {version}. Nothing was downloaded."));
+    }
+    Ok(())
+}
+
 pub type PendingUpdate = Mutex<UpdateSlot<Update, Vec<u8>>>;
 
 fn lock<'a>(state: &'a State<'_, PendingUpdate>) -> Result<std::sync::MutexGuard<'a, UpdateSlot<Update, Vec<u8>>>, String> {
@@ -187,6 +227,7 @@ pub async fn check_for_update<R: Runtime>(app: AppHandle<R>, state: State<'_, Pe
     if !is_upgrade(&app.package_info().version, &update.version) {
         return Ok(None);
     }
+    require_signed_for(&update.signature, &update.version, INSTALLER_SUFFIX)?;
     let offer = UpdateOffer { current_version: update.current_version.clone(), version: update.version.clone(), body: update.body.clone(), signature: update.signature.clone(), check };
     lock(&state)?.offer(UpdateKey { version: offer.version.clone(), signature: offer.signature.clone(), check }, update)?;
     Ok(Some(offer))
@@ -633,5 +674,86 @@ mod tests {
         assert!(!is_upgrade(&current, "0.2.0"));
         assert!(!is_upgrade(&current, "not-a-version"));
         assert!(!is_upgrade(&current, ""));
+    }
+
+    /// The updater signature published for 0.2.0 in its `latest.json`.
+    const PUBLISHED_0_2_0_SIGNATURE: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSMTE2dXVOQXlYaGViUmlhTnIwMHNWZXBxQ0hNTGVtdTAvMVRKTktvbXR4Qk44aTQ5emRjT1JjRWtyeWMzQjFjMUFPWE1DNUJFNk4xekRBWnJXNmFYK21VSHhZNGc4dkFBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NjA3NTY5CWZpbGU6UERGIFdvcmtzdGF0aW9uXzAuMi4wX3g2NC1zZXR1cC5leGUKb1hMSnB1bmxHbDYwU1pZVnFBZEx4V01xeVM3VGF4T1duS3VheGNvNFpieUJhRVFobzVsWHp3eEx6TnY4eFBkQXYwbURCMndWZGEzUDliQ1pqS1hHQnc9PQo=";
+    const X64: Option<&str> = Some("_x64-setup.exe");
+
+    /// The published signature with its third line (the trusted comment) replaced.
+    fn with_trusted_comment(line: &str) -> String {
+        use base64::Engine;
+        let engine = base64::engine::general_purpose::STANDARD;
+        let text = String::from_utf8(engine.decode(PUBLISHED_0_2_0_SIGNATURE).unwrap()).unwrap();
+        let mut lines: Vec<&str> = text.lines().collect();
+        lines[2] = line;
+        engine.encode(format!("{}\n", lines.join("\n")))
+    }
+
+    #[test]
+    fn the_published_signature_names_its_own_version_and_platform() {
+        assert_eq!(signed_file_name(PUBLISHED_0_2_0_SIGNATURE).unwrap(), "PDF Workstation_0.2.0_x64-setup.exe");
+        assert_eq!(require_signed_for(PUBLISHED_0_2_0_SIGNATURE, "0.2.0", X64), Ok(()));
+    }
+
+    #[test]
+    fn an_older_signed_build_relabelled_with_a_higher_version_is_refused() {
+        for label in ["9.9.9", "0.2.1", "0.2.13", "0.3.0", "0.2.0-beta", "0.2", ""] {
+            let refused = require_signed_for(PUBLISHED_0_2_0_SIGNATURE, label, X64).unwrap_err();
+            assert!(refused.contains("does not match the offered version"), "{label}: {refused}");
+        }
+    }
+
+    #[test]
+    fn a_signature_for_another_platform_or_on_an_unpublished_platform_is_refused() {
+        assert!(require_signed_for(PUBLISHED_0_2_0_SIGNATURE, "0.2.0", Some("_x64_en-US.msi")).is_err());
+        assert!(require_signed_for(PUBLISHED_0_2_0_SIGNATURE, "0.2.0", Some("_arm64-setup.exe")).is_err());
+        assert!(require_signed_for(PUBLISHED_0_2_0_SIGNATURE, "0.2.0", None).unwrap_err().contains("only for Windows x64"));
+    }
+
+    #[test]
+    fn a_signature_without_exactly_one_file_name_is_refused() {
+        for comment in [
+            "trusted comment: timestamp:1789607569",
+            "trusted comment: timestamp:1789607569\tfile:PDF Workstation_0.2.0_x64-setup.exe\tfile:PDF Workstation_9.9.9_x64-setup.exe",
+            "trusted comment: timestamp:1789607569\tfile:PDF Workstation_9.9.9_x64-setup.exe\tfile:PDF Workstation_0.2.0_x64-setup.exe",
+            "trusted comment: file:PDF Workstation_0.2.0_x64-setup.exe.old",
+            "trusted comment: timestamp:1789607569 file:PDF Workstation_0.2.0_x64-setup.exe",
+            "trusted comment: timestamp:1789607569\tFile:PDF Workstation_0.2.0_x64-setup.exe",
+        ] {
+            assert!(require_signed_for(&with_trusted_comment(comment), "0.2.0", X64).is_err(), "{comment}");
+        }
+        let rebuilt = with_trusted_comment("trusted comment: timestamp:1789607569\tfile:PDF Workstation_0.2.0_x64-setup.exe");
+        assert_eq!(require_signed_for(&rebuilt, "0.2.0", X64), Ok(()), "the helper must rebuild a well-formed signature");
+    }
+
+    #[test]
+    fn a_malformed_signature_is_refused() {
+        use base64::Engine;
+        let engine = base64::engine::general_purpose::STANDARD;
+        for signature in [
+            String::new(),
+            "not base64!".to_string(),
+            format!(" {PUBLISHED_0_2_0_SIGNATURE}"),
+            engine.encode("trusted comment: timestamp:1\tfile:PDF Workstation_0.2.0_x64-setup.exe"),
+            engine.encode([0xff, 0xfe, 0xfd]),
+            with_trusted_comment("comment: timestamp:1789607569\tfile:PDF Workstation_0.2.0_x64-setup.exe"),
+        ] {
+            assert!(signed_file_name(&signature).is_err(), "{signature:?}");
+            assert!(require_signed_for(&signature, "0.2.0", X64).is_err());
+        }
+    }
+
+    #[test]
+    fn the_signed_name_matches_the_product_name_and_the_release_workflow() {
+        let config: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(config["productName"], PRODUCT_FILE_NAME);
+        let workflow = include_str!("../../.github/workflows/release.yml");
+        assert!(workflow.contains("$installerName = \"PDF Workstation_$($env:RELEASE_VERSION)_x64-setup.exe\""));
+        assert!(workflow.contains("$signedFiles[0] -cne $installerName"), "the release must refuse to publish a signature clients would refuse");
+        assert_eq!(signed_installer_name("1.2.3", "_x64-setup.exe"), "PDF Workstation_1.2.3_x64-setup.exe");
+        if cfg!(all(windows, target_arch = "x86_64")) {
+            assert_eq!(INSTALLER_SUFFIX, X64);
+        }
     }
 }
