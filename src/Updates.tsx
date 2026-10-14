@@ -8,6 +8,7 @@ import s from './Updates.module.css';
 export default function Updates({ dirty, busy, setBusy, close }: { dirty: boolean; busy: boolean; setBusy: (value: boolean) => void; close: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const pending = useRef<Update | null>(null);
+  const downloadedOffer = useRef<Update | null>(null);
   const [version, setVersion] = useState('');
   const [available, setAvailable] = useState<Update | null>(null);
   const [checking, setChecking] = useState(true);
@@ -46,24 +47,28 @@ export default function Updates({ dirty, busy, setBusy, close }: { dirty: boolea
   }, []);
   const install = async () => {
     if (!available || dirty || busy || installing || recoveryBlocked) return;
-    setInstalling(true); setBusy(true); setError(''); setRecovery(''); setStatus('Downloading signed update…');
+    const alreadyDownloaded = downloadedOffer.current === available;
+    setInstalling(true); setBusy(true); setError(''); setRecovery(''); setStatus(alreadyDownloaded ? 'Starting installer…' : 'Downloading signed update…');
     let downloaded = 0, total = 0;
-    let downloadComplete = false;
+    let downloadComplete = alreadyDownloaded;
     try {
-      try {
-        await writeUpdateAttempt({ schemaVersion: 1, fromVersion: version, targetVersion: available.version, phase: 'downloading' });
-      } catch (reason) {
-        throw new Error(`Update recovery state could not be saved. The update was not started. You can retry. ${String(reason)}`);
-      }
-      await available.download(event => {
-        if (event.event === 'Started') total = event.data.contentLength || 0;
-        if (event.event === 'Progress') {
-          downloaded += event.data.chunkLength;
-          setStatus(total ? `Downloading update: ${Math.min(100, Math.round(downloaded / total * 100))}%` : `Downloaded ${(downloaded / 1048576).toFixed(1)} MB`);
+      if (!alreadyDownloaded) {
+        try {
+          await writeUpdateAttempt({ schemaVersion: 1, fromVersion: version, targetVersion: available.version, phase: 'downloading' });
+        } catch (reason) {
+          throw new Error(`Update recovery state could not be saved. The update was not started. You can retry. ${String(reason)}`);
         }
-        if (event.event === 'Finished') setStatus('Verifying update and starting installer…');
-      });
-      downloadComplete = true;
+        await available.download(event => {
+          if (event.event === 'Started') total = event.data.contentLength || 0;
+          if (event.event === 'Progress') {
+            downloaded += event.data.chunkLength;
+            setStatus(total ? `Downloading update: ${Math.min(100, Math.round(downloaded / total * 100))}%` : `Downloaded ${(downloaded / 1048576).toFixed(1)} MB`);
+          }
+          if (event.event === 'Finished') setStatus('Verifying update and starting installer…');
+        });
+        downloadComplete = true;
+        downloadedOffer.current = available;
+      }
       try {
         await writeUpdateAttempt({ schemaVersion: 1, fromVersion: version, targetVersion: available.version, phase: 'installing' });
       } catch (reason) {
@@ -81,7 +86,7 @@ export default function Updates({ dirty, busy, setBusy, close }: { dirty: boolea
       setError(`Update failed: ${String(e)}`);
       if (!downloadComplete) setStatus('Your installed version is unchanged. You can retry.');
       else {
-        pending.current = null; setAvailable(null);
+        pending.current = null; downloadedOffer.current = null; setAvailable(null);
         try {
           await available.close();
         } catch {

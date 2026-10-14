@@ -189,6 +189,31 @@ describe('software updates', () => {
     act(() => ui.unmount());
     expect(release).toHaveBeenCalledOnce();
   });
+  it('installs the kept download after a declined confirmation without downloading again', async () => {
+    const download = vi.fn().mockResolvedValue(undefined);
+    const install = vi.fn().mockResolvedValueOnce('cancelled').mockRejectedValueOnce(new Error('No downloaded update is available. Check for updates again.'));
+    const release = vi.fn().mockResolvedValue(undefined);
+    const refreshedDownload = vi.fn().mockResolvedValue(undefined);
+    const refreshedInstall = vi.fn().mockResolvedValue('cancelled');
+    vi.mocked(checkForUpdate)
+      .mockResolvedValueOnce({ version: '0.3.0', download, install, close: release } as never)
+      .mockResolvedValueOnce({ version: '0.3.0', download: refreshedDownload, install: refreshedInstall, close: vi.fn().mockResolvedValue(undefined) } as never);
+    const { ui } = await mount();
+    const installButton = () => ui.root.findAllByType('button').find(node => node.children.includes('Install update and restart'))!;
+    await act(async () => installButton().props.onClick());
+    expect(download).toHaveBeenCalledOnce();
+    expect(JSON.stringify(ui.toJSON())).toContain('Version 0.3.0 was not installed');
+    await act(async () => installButton().props.onClick());
+    expect(download).toHaveBeenCalledOnce();
+    expect(install).toHaveBeenCalledTimes(2);
+    expect(attemptBridge.write.mock.calls.map(([attempt]) => attempt.phase)).toEqual(['downloading', 'installing', 'installing']);
+    expect(ui.root.findByProps({ role: 'alert' }).children.join('')).toContain('No downloaded update is available');
+    expect(release).toHaveBeenCalledOnce();
+    await act(async () => installButton().props.onClick());
+    expect(refreshedDownload).toHaveBeenCalledOnce();
+    expect(refreshedInstall).toHaveBeenCalledOnce();
+    act(() => ui.unmount());
+  });
   it('treats an installer promise resolving on Windows as a retryable failure', async () => {
     const download = vi.fn().mockResolvedValue(undefined);
     const install = vi.fn().mockResolvedValue(undefined);
