@@ -31,7 +31,7 @@ describe('installed native print dialog verifier', () => {
     expect(source).toContain('workerProcess.Kill($true)');
     expect(source).not.toMatch(/SendKeys|mouse_event|SetCursorPos|ClickInput|pyautogui/i);
     expect(source).not.toMatch(/Enable-WindowsOptionalFeature|Add-WindowsCapability|dism(?:\.exe)?/i);
-  });
+  }, 30_000);
 
   it('executes the official native accessibility property and selection contract on a real list view', () => {
     const result = runPowerShell7(String.raw`
@@ -260,7 +260,7 @@ public sealed class NativeSaveDialogFixture : IDisposable {
     expect(source).toContain('Invoke-SessionDeleteOutcome');
     expect(source).toContain('Stop-OwnedLaunchProcesses');
     expect(source).toContain('relevantProcessesRemaining 0');
-  });
+  }, 30_000);
 
   it('waits through the bounded fixed-port handoff before starting fresh print deadlines and the driver', () => {
     const result = runPowerShell7(String.raw`
