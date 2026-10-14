@@ -1,12 +1,16 @@
 import { execFileSync } from 'node:child_process';
 import { deflateSync } from 'node:zlib';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, symlinkSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { LICENSES, MODEL_BYTES, MODEL_SHA256, OCR_ARGS, PINS, RECIPE_INPUTS, aggregate, decodePng, decodePnm, formatTable, levenshtein, normalizeText, parseManifest, resampleToDpi, resolveInside, runManifest, scoreText, toP6, verifyEngine } from './accuracy-lib.mjs';
 
 const repo = resolve(__dirname, '../..');
-const scratch = () => mkdtempSync(join(process.env.TEMP ?? process.env.TMP ?? repo, 'ocr-accuracy-'));
+const scratch = () => {
+  const base = process.env.TEMP || process.env.TMP;
+  if (!base) throw new Error('TEMP or TMP must be set; refusing to write scratch files into the repository.');
+  return mkdtempSync(join(base, 'ocr-accuracy-'));
+};
 
 function crc32(bytes: Buffer) { let crc = 0xffffffff; for (const byte of bytes) { crc ^= byte; for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0); } return (crc ^ 0xffffffff) >>> 0; }
 function chunk(type: string, data: Buffer) { const name = Buffer.from(type, 'ascii'); const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(Buffer.concat([name, data]))); return Buffer.concat([len, name, data, crc]); }
@@ -147,6 +151,17 @@ describe('engine identity', () => {
       await expect(verifyEngine(dir, repo)).rejects.toThrow(/schemaVersion/);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
+  it('refuses an oversize manifest and a root reached through a link', async () => {
+    const dir = scratch();
+    try {
+      mkdirSync(join(dir, 'real', 'engine'), { recursive: true });
+      writeFileSync(join(dir, 'real', 'engine', 'ocr-engine-manifest.json'), ' '.repeat(1024 * 1024 + 1));
+      await expect(verifyEngine(join(dir, 'real'), repo)).rejects.toThrow(/too large/);
+      let linked = true;
+      try { symlinkSync(join(dir, 'real'), join(dir, 'link'), 'junction'); } catch { linked = false; }
+      if (linked) await expect(verifyEngine(join(dir, 'link'), repo)).rejects.toThrow(/symbolic links or junctions/);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
   it('scores a manifest run with a stubbed recognizer', async () => {
     const dir = scratch();
     try {
@@ -177,7 +192,7 @@ describe.skipIf(!engineRoot)('opt-in end to end run on generated synthetic fixtu
   it('verifies the engine, renders the fixtures and measures them', async () => {
     const dir = scratch();
     try {
-      execFileSync('pwsh', ['-NoProfile', '-File', join(repo, 'scripts/ocr/generate-accuracy-fixtures.ps1'), '-OutputDir', dir], { stdio: 'pipe' });
+      execFileSync('pwsh', ['-NoProfile', '-File', join(repo, 'scripts/ocr/generate-accuracy-fixtures.ps1'), '-OutputDir', dir], { stdio: 'pipe', timeout: 60000 });
       const engine = await verifyEngine(resolve(engineRoot as string), repo);
       const report = await runManifest(join(dir, 'manifest.json'), engine);
       expect(report.results).toHaveLength(6);

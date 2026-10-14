@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { readFile, stat } from 'node:fs/promises';
+import { lstat, readFile, stat } from 'node:fs/promises';
 import { dirname, extname, isAbsolute, join, resolve, sep } from 'node:path';
 import { inflateSync } from 'node:zlib';
 
@@ -286,8 +286,25 @@ function requireValue(manifest, path, expected) {
   if (actual !== expected) throw new Error(`OCR manifest field ${path.join('.')} is not the supported value.`);
 }
 
+export async function rejectReparseAncestors(path) {
+  let current = resolve(path);
+  for (;;) {
+    try {
+      if ((await lstat(current)).isSymbolicLink()) throw new Error('OCR paths may not contain symbolic links or junctions.');
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    const parent = dirname(current);
+    if (parent === current) return;
+    current = parent;
+  }
+}
+
+export const MANIFEST_LIMIT = 1024 * 1024;
+
 async function verifyReceiptFile(root, item) {
   const full = resolveInside(root, item.path);
+  await rejectReparseAncestors(full);
   const info = await stat(full).catch(() => null);
   if (!info || !info.isFile() || info.size !== item.bytes) throw new Error(`OCR receipt size mismatch for ${item.path}.`);
   if ((await sha256File(full)) !== item.sha256) throw new Error(`OCR receipt hash mismatch for ${item.path}.`);
@@ -296,6 +313,10 @@ async function verifyReceiptFile(root, item) {
 
 export async function verifyEngine(root, repository) {
   const manifestPath = join(root, 'engine', 'ocr-engine-manifest.json');
+  await rejectReparseAncestors(root);
+  await rejectReparseAncestors(manifestPath);
+  const manifestInfo = await stat(manifestPath).catch(() => null);
+  if (manifestInfo && manifestInfo.size > MANIFEST_LIMIT) throw new Error('The OCR setup manifest is too large.');
   let manifest;
   try { manifest = JSON.parse(await readFile(manifestPath, 'utf8')); } catch { throw new Error('Could not read the OCR setup manifest; run scripts/setup-ocr.ps1 and pass its output root.'); }
   requireValue(manifest, ['schemaVersion'], 1);
