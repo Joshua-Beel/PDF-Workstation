@@ -5,8 +5,9 @@ import s from './PasswordDialog.module.css';
 
 const MAX_PASSWORD_BYTES = 1024;
 const TOO_LONG = 'Passwords cannot be longer than 1 KiB.';
+const REFUSED = /^[^\n]*Nothing was opened\.$/;
 
-export default function PasswordDialog({ challenge, onOpened, onClose }: { challenge: PasswordChallenge; onOpened: (document: DocumentInfo) => void; onClose: () => void }) {
+export default function PasswordDialog({ challenge, onOpened, onClose, onRefused }: { challenge: PasswordChallenge; onOpened: (document: DocumentInfo) => void; onClose: () => void; onRefused?: (message: string) => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const active = useRef(true), submitting = useRef(false);
   const currentRequest = useRef(challenge.request_id);
@@ -40,6 +41,7 @@ export default function PasswordDialog({ challenge, onOpened, onClose }: { chall
       if (result.status === 'opened') onOpened(result.document);
       else setError('Incorrect password. Try again.');
     } catch (e) {
+      if (active.current && REFUSED.test(String(e))) { active.current = false; setPassword(''); if (onRefused) onRefused(String(e)); else onClose(); return; }
       if (active.current) setError(String(e).includes(TOO_LONG) ? TOO_LONG : 'Unable to unlock this PDF. Cancel and open the file again.');
     } finally {
       submitting.current = false;

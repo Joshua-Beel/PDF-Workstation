@@ -468,6 +468,7 @@ impl PdfService {
                                 if !parsed.extract_text(&[page_number]).map_err(|error| format!("Could not inspect redacted page text: {error}"))?.is_empty() { return Err("Redacted output unexpectedly retains extractable text.".into()); }
                             }
                             if reply.is_closed() { return Err("Redaction was canceled.".into()); }
+                            ensure_copy_capacity(&sessions, prepared.bytes.len())?;
                             write_new_file(&path, &prepared.bytes)?;
                             let pages = page_sizes(&check)?;
                             let new_id = next_id; next_id += 1;
@@ -530,6 +531,7 @@ impl PdfService {
                             }
                             ensure_active()?;
                             if reply.is_closed() { return Err("OCR was cancelled.".into()); }
+                            ensure_copy_capacity(&sessions, prepared.bytes.len())?;
                             publish_searchable_file(&path, &prepared.bytes, prepared.deadline, &prepared.cancellation, None, None)?;
                             let pages = page_sizes(&check)?;
                             let new_id = next_id; next_id += 1;
@@ -1170,6 +1172,7 @@ impl PdfService {
                                 if reply.is_closed() { return Err("Fill form was canceled.".into()); }
                             }
                             if reply.is_closed() { return Err("Fill form was canceled.".into()); }
+                            ensure_copy_capacity(&sessions, bytes.len())?;
                             write_new_file(&path, &bytes)?;
                             let id = next_id; next_id += 1;
                             let info = DocumentInfo { id, name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), pages, revision: 0, dirty: false, can_undo: false, can_redo: false };
@@ -1199,6 +1202,7 @@ impl PdfService {
                     Request::CreateCopy(first, second, copy, path, reply) => {
                         if reply.is_closed() { continue; }
                         let result = (|| {
+                            ensure_copy_capacity(&sessions, 0)?;
                             let (first, second) = match copy {
                                 CopyOperation::Combine => combine_sessions(&sessions, first, second)?,
                                 CopyOperation::Insert { .. } => insertion_sessions(&sessions, first, second)?,
@@ -1209,6 +1213,7 @@ impl PdfService {
                             let mut prepared = None;
                             let validate = |bytes: &[u8], expected| {
                                 if reply.is_closed() { return Err(format!("{operation} was canceled.")); }
+                                ensure_copy_capacity(&sessions, bytes.len())?;
                                 let document = engine.load_pdf_from_byte_vec(bytes.to_vec(), None).map_err(|error| format!("Output could not be opened: {error}"))?;
                                 let pages = page_sizes(&document)?;
                                 if pages.len() != expected { return Err(format!("Output page count differs from the {operation} plan.")); }
@@ -1239,6 +1244,7 @@ impl PdfService {
                     Request::CreateImagePdf(source, path, options, reply) => {
                         if reply.is_closed() { continue; }
                         let result = (|| {
+                            ensure_copy_capacity(&sessions, 0)?;
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
                             let mut prepared_document = None;
                             let prepared = crate::image_pdf::prepare_and_write(&source, &path, options, |prepared| {
@@ -1250,6 +1256,7 @@ impl PdfService {
                                 let bitmap = page.render_with_config(&PdfRenderConfig::new().set_target_width(64).set_maximum_height(64)).map_err(|error| format!("Output page could not be rendered: {error}"))?;
                                 if bitmap.width() <= 0 || bitmap.height() <= 0 { return Err("Output page has an invalid bitmap.".into()); }
                                 if reply.is_closed() { return Err("Create PDF was canceled.".into()); }
+                                ensure_copy_capacity(&sessions, prepared.bytes.len())?;
                                 prepared_document = Some((document, pages));
                                 Ok(())
                             })?;
@@ -1278,6 +1285,7 @@ impl PdfService {
                                 if bitmap.width() <= 0 || bitmap.height() <= 0 { return Err(format!("Output page {} has an invalid bitmap.", index + 1)); }
                             }
                             if reply.is_closed() { return Err("Create PDF was canceled.".into()); }
+                            ensure_copy_capacity(&sessions, prepared.bytes.len())?;
                             write_new_file(&path, &prepared.bytes)?;
                             let id = next_id; next_id += 1;
                             let info = DocumentInfo { id, name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), pages, revision: 0, dirty: false, can_undo: false, can_redo: false };
@@ -1321,6 +1329,7 @@ impl PdfService {
                                 else if actual != render(original)? { return Err(format!("Image replacement changed unselected page {}.", index + 1)); }
                             }
                             if reply.is_closed() { return Err("Image replacement was canceled.".into()); }
+                            ensure_copy_capacity(&sessions, output_bytes.len())?;
                             write_new_file(&path, &output_bytes)?;
                             let pages = page_sizes(&output)?;
                             let new_id = next_id; next_id += 1;
@@ -1341,7 +1350,7 @@ impl PdfService {
                             let bytes=crate::text_edit::replace_text_run(&session.source,u32::from(page)+1,&replacement)?;let engine=pdfium.as_ref().map_err(Clone::clone)?;let output=engine.load_pdf_from_byte_vec(bytes.clone(),None).map_err(|e|format!("Text replacement output could not be opened: {e}"))?;
                             let after_target=crate::text_edit::inspect_text_run(&bytes,u32::from(page)+1)?;let after=text_replacement_geometry(&output,id,revision,page,after_target)?;if after.target.text!=replacement{return Err("Text replacement extraction does not match the requested text.".into())}
                             verify_text_pixels(original,&output,page,&current.bounds,&after.bounds)?;
-                            if reply.is_closed(){return Err("Text replacement was canceled.".into())} write_new_file(&path,&bytes)?;let pages=page_sizes(&output)?;let new_id=next_id;next_id+=1;let info=DocumentInfo{id:new_id,name:path.file_name().unwrap_or_default().to_string_lossy().into_owned(),path:path.to_string_lossy().into_owned(),pages,revision:0,dirty:false,can_undo:false,can_redo:false};sessions.insert(new_id,(EditSession::new(bytes,info.pages.len()),info.clone()));documents.insert(new_id,std::rc::Rc::new(output));Ok(SavedCopy{path:path.to_string_lossy().into_owned(),document:info})
+                            if reply.is_closed(){return Err("Text replacement was canceled.".into())} ensure_copy_capacity(&sessions,bytes.len())?; write_new_file(&path,&bytes)?;let pages=page_sizes(&output)?;let new_id=next_id;next_id+=1;let info=DocumentInfo{id:new_id,name:path.file_name().unwrap_or_default().to_string_lossy().into_owned(),path:path.to_string_lossy().into_owned(),pages,revision:0,dirty:false,can_undo:false,can_redo:false};sessions.insert(new_id,(EditSession::new(bytes,info.pages.len()),info.clone()));documents.insert(new_id,std::rc::Rc::new(output));Ok(SavedCopy{path:path.to_string_lossy().into_owned(),document:info})
                         })();let result=result.map(|saved|{let saved_id=saved.document.id;ReplyLease::new(saved,UnclaimedReply::Document(saved_id),resource_cleanup.clone())});if let Err(Ok(saved))=reply.send(result){documents.remove(&saved.document.id);sessions.remove(&saved.document.id);}
                     }
                     Request::Save(id, pages, path, reply) => {
@@ -1732,6 +1741,9 @@ fn record_recovery_lock(root: Option<&std::path::Path>, locks: &mut HashMap<u64,
     locks.insert(id, lock.clone());
     Some(lock)
 }
+fn ensure_copy_capacity(sessions: &HashMap<u64, (EditSession, DocumentInfo)>, len: usize) -> Result<(), String> {
+    crate::open_limits::ensure_copy_capacity(sessions.values().map(|(session, _)| session.source.len() as u64), len as u64)
+}
 fn write_recovery_verified(root: &std::path::Path, record: &crate::recovery_journal::RecoveryRecord) -> Result<(), String> {
     crate::recovery_store::write_recovery_detailed(root, record).map(|_| ()).map_err(|error| {
         if error.published { format!("{RECOVERY_COMMITTED_REOPEN_REQUIRED}: Recovery was published but could not be verified. Close and reopen this PDF.") } else { error.message }
@@ -2112,13 +2124,30 @@ mod tests {
         (dimensions.0.parse().unwrap(), dimensions.1.parse().unwrap(), lines.next().unwrap())
     }
     #[test]
+    #[ignore = "uses an isolated worker and must run alone because PDFium binding is process-global"]
     fn open_refuses_past_the_document_cap_and_non_files_without_loading_anything() {
+        let _password_lock = password_test_lock();
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let path = root.join("resources/welcome.pdf");
         let service = PdfService::start_worker(root.join("resources/pdfium/bin/pdfium.dll"), 4096, None);
         let folder = tempfile::tempdir().unwrap();
         assert!(call(&service, |reply| Request::Open(folder.path().to_path_buf(), reply)).is_err());
+        let mut locked = lopdf::Document::load(&path).unwrap();
+        locked.trailer.set("ID", vec![lopdf::Object::string_literal("cap-test-id"), lopdf::Object::string_literal("cap-test-id")]);
+        let state = lopdf::EncryptionState::try_from(lopdf::EncryptionVersion::V2 { document: &locked, owner_password: "owner password", user_password: "test password", key_length: 128, permissions: lopdf::Permissions::all() }).unwrap();
+        locked.encrypt(&state).unwrap();
+        let locked_path = folder.path().join("locked.pdf");
+        locked.save(&locked_path).unwrap();
+        let request_id = match call(&service, |reply| Request::BeginOpen(locked_path.clone(), reply)).unwrap() { OpenResult::PasswordRequired { request_id, .. } => request_id, _ => panic!("expected a password challenge") };
         let ids: Vec<u64> = (0..crate::open_limits::MAX_OPEN_DOCUMENTS).map(|_| call(&service, |reply| Request::Open(path.clone(), reply)).unwrap().id).collect();
+        let error = call(&service, |reply| Request::Unlock(request_id, "test password".into(), reply)).err().unwrap();
+        assert!(error.contains("Up to 32 PDFs can be open at once") && error.ends_with("Nothing was opened."), "{error}");
+        assert!(call(&service, |reply| Request::Unlock(request_id, "test password".into(), reply)).err().unwrap().contains("Password request expired"));
+        let copy_path = folder.path().join("combined.pdf");
+        let source = |id| CombineSource { id, revision: 0 };
+        let error = call(&service, |reply| Request::Combine(source(ids[0]), source(ids[1]), copy_path.clone(), reply)).err().unwrap();
+        assert!(error.contains("Up to 32 PDFs") && error.contains("No file was written. Nothing was opened."), "{error}");
+        assert!(!copy_path.exists());
         let error = call(&service, |reply| Request::Open(path.clone(), reply)).err().unwrap();
         assert!(error.contains("Up to 32 PDFs can be open at once"), "{error}");
         let error = call(&service, |reply| Request::BeginOpen(path.clone(), reply)).err().unwrap();
