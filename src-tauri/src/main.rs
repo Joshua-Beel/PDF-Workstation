@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod service;
 mod open_path;
+mod open_limits;
 mod editor;
 mod printing;
 mod print_commands;

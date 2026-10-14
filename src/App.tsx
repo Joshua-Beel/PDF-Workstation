@@ -269,7 +269,7 @@ export default function App() {
     setBusy(true); setError('');
     try {
       acceptOpen(await reopenDocument(path), false);
-    } catch (e) { if (mounted.current) setError(String(e).includes('This path cannot be opened') ? `Could not reopen this file. ${String(e)}` : `Could not reopen this file. It may have moved or been deleted. ${String(e)}`); }
+    } catch (e) { if (mounted.current) setError(/This path cannot be opened|Nothing was opened\./.test(String(e)) ?`Could not reopen this file. ${String(e)}` : `Could not reopen this file. It may have moved or been deleted. ${String(e)}`); }
     finally { if (mounted.current) setBusy(false); }
   };
   const recoveryBlocked = busy || recoveryOffer !== null || redactionDraft !== null || searchableOcrTarget !== null || newCopyModalOpen || updatesOpen || pageTextOpen || pageOcrTarget !== null || printOpen || propertiesOpen || noticesOpen || passwordRequest !== null || pendingClose !== null || createOpen || pageImageTarget !== null || combineOpen || insertOpen || replaceOpen || formsOpen || commentEditor !== null || closingDocument.current !== null;
@@ -773,7 +773,7 @@ export default function App() {
     {pageTextOpen && doc && <PageText key={`${doc.id}-${doc.revision}-${page}`} document={doc} page={page} close={() => setPageTextOpen(false)} />}
     {pageOcrTarget && <PageOcrDialog key={`${pageOcrTarget.id}-${pageOcrTarget.revision}-${pageOcrTarget.page}`} target={pageOcrTarget} setBusy={setBusy} close={() => setPageOcrTarget(null)} />}
     {searchableOcrTarget && <SearchableOcrDialog key={`${searchableOcrTarget.documentId}-${searchableOcrTarget.revision}`} capability={searchableCapability} target={searchableOcrTarget} createRequestId={() => crypto.randomUUID()} create={createSearchableCopy} cancel={cancelPageOcr} opened={copy => opened(copy.document, false)} close={() => setSearchableOcrTarget(null)} />}
-    {passwordRequest && <PasswordDialog key={passwordRequest.challenge.request_id} challenge={passwordRequest.challenge} onOpened={info => { passwordBlocking.current = false; opened(info, passwordRequest.organize); setPasswordRequest(null); }} onClose={() => { passwordBlocking.current = false; setPasswordRequest(null); }} />}
+    {passwordRequest && <PasswordDialog key={passwordRequest.challenge.request_id} challenge={passwordRequest.challenge} onOpened={info => { passwordBlocking.current = false; opened(info, passwordRequest.organize); setPasswordRequest(null); }} onClose={() => { passwordBlocking.current = false; setPasswordRequest(null); }} onRefused={message => { passwordBlocking.current = false; setPasswordRequest(null); setError(message); }} />}
     {printOpen && doc && <PrintDialog document={doc} page={page} setBusy={setBusy} close={() => setPrintOpen(false)} />}
     {propertiesOpen && doc && <DocumentProperties key={`${doc.id}-${doc.revision}`} document={doc} close={() => setPropertiesOpen(false)} />}
     {noticesOpen && <DependencyNotices close={() => setNoticesOpen(false)} />}

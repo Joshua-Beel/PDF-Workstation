@@ -54,6 +54,16 @@ it('shows a gate refusal on its own without the moved-or-deleted wording', async
   expect(text).toContain('network (UNC) paths are not supported'); expect(text).not.toContain('moved or been deleted');
   act(() => ui.unmount());
 });
+it('shows a size or open-count refusal without the moved-or-deleted wording', async () => {
+  saveRecentFiles([file]); vi.mocked(reopenDocument).mockRejectedValue('Up to 32 PDFs can be open at once. Close a tab, then open this PDF again. Nothing was opened.');
+  let ui!: ReactTestRenderer;
+  await act(async () => { ui = create(<App />); });
+  const row = ui.root.findAllByType('button').find(button => button.findAllByType('small').some(small => small.children.includes('PDF document')))!;
+  await act(async () => row.props.onClick());
+  const text = JSON.stringify(ui.toJSON());
+  expect(text).toContain('Could not reopen this file. Up to 32 PDFs can be open at once.'); expect(text).not.toContain('moved or been deleted');
+  act(() => ui.unmount());
+});
 it('reports missing files and clears history without closing tabs or deleting PDFs', async () => {
   saveRecentFiles([file]); vi.mocked(reopenDocument).mockRejectedValue(new Error('File not found'));
   let ui!: ReactTestRenderer;

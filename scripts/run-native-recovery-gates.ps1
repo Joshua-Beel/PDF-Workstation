@@ -11,6 +11,7 @@ $required = @(
   @{ Name = 'service::tests::explicit_discard_is_idempotent_and_resolves_post_publish_lock'; Target = @('--bin', 'pdf-workstation'); Ignored = $true },
   @{ Name = 'service::recovery_restart_tests::restart_recovery_survives_fresh_workers'; Target = @('--bin', 'pdf-workstation'); Ignored = $true },
   @{ Name = 'recovery_store::process_tests::cross_process_lock_serializes_admission_and_generations'; Target = @('--bin', 'pdf-workstation'); Ignored = $true },
+  @{ Name = 'service::tests::open_refuses_past_the_document_cap_and_non_files_without_loading_anything'; Target = @('--bin', 'pdf-workstation'); Ignored = $true },
   @{ Name = 'aggregate_record_count_rejects_new_sources_but_allows_exact_replacement'; Target = @('--test', 'recovery_store'); Ignored = $false }
 )
 foreach ($probe in $required) {

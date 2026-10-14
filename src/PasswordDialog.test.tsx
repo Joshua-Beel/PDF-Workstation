@@ -56,6 +56,17 @@ it('shows the backend over-1-KiB message and limits the input to 1024 UTF-8 byte
   expect(JSON.stringify(ui.toJSON())).toContain('1 KiB'); expect(JSON.stringify(ui.toJSON())).not.toContain('Unable to unlock');
   act(() => ui.unmount());
 });
+it('closes on a size or open-count refusal and hands the backend message to the app', async () => {
+  const refusal = 'Up to 32 PDFs can be open at once. Close a tab, then open this PDF again. Nothing was opened.';
+  vi.mocked(unlockDocument).mockRejectedValue(refusal);
+  const onRefused = vi.fn(), onClose = vi.fn(), onOpened = vi.fn(); let ui!: ReactTestRenderer;
+  act(() => { ui = create(<PasswordDialog challenge={challenge} onOpened={onOpened} onClose={onClose} onRefused={onRefused} />); });
+  act(() => ui.root.findByType('input').props.onChange({ target: { value: 'right' } }));
+  await act(async () => ui.root.findByType('form').props.onSubmit({ preventDefault() {} }));
+  expect(onRefused).toHaveBeenCalledWith(refusal); expect(onClose).not.toHaveBeenCalled(); expect(onOpened).not.toHaveBeenCalled();
+  expect(JSON.stringify(ui.toJSON())).not.toContain('Unable to unlock');
+  await act(async () => ui.unmount()); expect(cancelPasswordRequest).toHaveBeenCalledWith(42);
+});
 it('does not display native errors that might contain entered secrets', async () => {
   vi.mocked(unlockDocument).mockRejectedValue(new Error('sensitive password'));
   let ui!: ReactTestRenderer; act(() => { ui = create(<PasswordDialog challenge={challenge} onOpened={vi.fn()} onClose={vi.fn()} />); });
