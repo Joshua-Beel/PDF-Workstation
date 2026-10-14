@@ -5097,7 +5097,9 @@ mod tests {
     }
     #[test]
     fn unchanged_recovery_checkpoint_skips_the_journal_write(){
-        let manifest=PathBuf::from(env!("CARGO_MANIFEST_DIR"));let folder=tempfile::tempdir().unwrap();let recovery=folder.path().join("recovery");std::fs::create_dir(&recovery).unwrap();let source_path=folder.path().join("source.pdf");let source=std::fs::read(manifest.join("resources/welcome.pdf")).unwrap();std::fs::write(&source_path,&source).unwrap();let identity=recovery_source_identity(&source).unwrap();
+        let manifest=PathBuf::from(env!("CARGO_MANIFEST_DIR"));let folder=tempfile::tempdir().unwrap();let recovery=folder.path().join("recovery");std::fs::create_dir(&recovery).unwrap();let source_path=folder.path().join("source.pdf");
+        // The shared worker refuses edits to every other open tab with the same source bytes while this one owns recovery, so the source must not be byte-identical to a fixture other tests edit.
+        let mut source=std::fs::read(manifest.join("resources/welcome.pdf")).unwrap();source.extend_from_slice(b"\n% unique source for unchanged_recovery_checkpoint_skips_the_journal_write\n");std::fs::write(&source_path,&source).unwrap();let identity=recovery_source_identity(&source).unwrap();
         let service=PdfService::start(manifest.join("resources/pdfium/bin/pdfium.dll"));let opened=call(&service,|reply|Request::Open(source_path.clone(),reply)).unwrap();
         let journal=|revision:u64|{let record=crate::recovery_store::read_recovery(&recovery,identity,None,revision).unwrap().unwrap();(record.generation,record.current_page)};
         let edited=call(&service,|reply|Request::Edit(opened.id,PageEdit::Rotate{pages:vec![0],clockwise:true},reply)).unwrap();
