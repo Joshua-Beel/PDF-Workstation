@@ -26,6 +26,10 @@ pub(crate) enum OpenOrigin { Webview, UserChosen }
 
 const UNC_ONLY_PICKED: &str = "network (UNC) paths are not supported unless you pick the file in the Open dialog or drop it onto the window";
 
+const UNC_LOSSY_NAME: &str = "this file's name contains characters PDF Workstation cannot handle for a network path. Pick the file in the Open dialog instead";
+
+fn webview_unc_refusal(text: &str) -> String { reject(if text.contains('\u{fffd}') { UNC_LOSSY_NAME } else { UNC_ONLY_PICKED }) }
+
 fn bad_unc_part(part: &str) -> bool { part.is_empty() || part == "." || part == ".." || part.contains(|c| matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|')) }
 
 /// `rest` is the text after `\\` or `\\?\UNC\`: `server\share\file...`. Plain share paths only.
@@ -51,13 +55,13 @@ pub(crate) fn classify_open_path_for(path: &Path, origin: OpenOrigin) -> Result<
     if text.is_empty() || text.contains('\0') { return Err(reject("the path is empty or contains a null character")); }
     let rest = if let Some(verbatim) = text.strip_prefix("\\\\?\\") {
         if verbatim.get(..4).is_some_and(|prefix| prefix.eq_ignore_ascii_case("UNC\\")) {
-            return if allow_unc { classify_unc(verbatim.get(4..).unwrap_or("")) } else { Err(reject(UNC_ONLY_PICKED)) };
+            return if allow_unc { classify_unc(verbatim.get(4..).unwrap_or("")) } else { Err(webview_unc_refusal(&text)) };
         }
         if !is_drive_letter_path(verbatim) { return Err(reject("device and namespace paths are not supported")); }
         verbatim
     } else if text.starts_with("\\\\") {
         if text.starts_with("\\\\.\\") { return Err(reject("device and pipe paths are not supported")); }
-        return if allow_unc { classify_unc(text.get(2..).unwrap_or("")) } else { Err(reject(UNC_ONLY_PICKED)) };
+        return if allow_unc { classify_unc(text.get(2..).unwrap_or("")) } else { Err(webview_unc_refusal(&text)) };
     } else if is_drive_letter_path(&text) { text.as_str() } else {
         return Err(reject("the path must be absolute and start with a drive letter"));
     };
@@ -312,6 +316,17 @@ mod tests {
         for text in [r"\\host\pipes\a.pdf", r"\\host\share\pipe\a.pdf", r"\\host\ipc\a.pdf"] {
             assert!(classify_open_path_for(Path::new(text), OpenOrigin::UserChosen).is_ok(), "should accept {text:?}");
         }
+    }
+
+    #[test]
+    fn lossy_unc_name_gets_its_own_message_and_is_still_refused() {
+        for text in ["\\\\h\\s\\\u{fffd}.pdf", "\\\\?\\UNC\\h\\s\\a\u{fffd}.pdf"] {
+            let message = classify_open_path(Path::new(text)).unwrap_err();
+            assert!(message.starts_with("This path cannot be opened"), "{message}");
+            assert!(message.contains("Open dialog") && !message.contains("UNC"), "{message}");
+            assert!(classify_open_path_for(Path::new(text), OpenOrigin::UserChosen).is_ok(), "dialog-origin behaviour is unchanged");
+        }
+        assert!(classify_open_path(Path::new(r"\\h\s\a.pdf")).unwrap_err().contains("UNC"));
     }
 
     #[test]
