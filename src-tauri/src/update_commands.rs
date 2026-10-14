@@ -228,6 +228,28 @@ pub enum InstallOutcome {
     Started,
 }
 
+/// An `install_update` failure. `offer_kept` tells the webview the backend
+/// still holds the downloaded offer (nothing was taken or installed), so it
+/// must not release it and download again.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallError {
+    pub message: String,
+    pub offer_kept: bool,
+}
+
+impl InstallError {
+    fn kept(message: impl Into<String>) -> Self {
+        Self { message: message.into(), offer_kept: true }
+    }
+}
+
+impl From<String> for InstallError {
+    fn from(message: String) -> Self {
+        Self { message, offer_kept: false }
+    }
+}
+
 fn lock_slot<U, B>(slot: &Mutex<UpdateSlot<U, B>>) -> Result<std::sync::MutexGuard<'_, UpdateSlot<U, B>>, String> {
     slot.lock().map_err(|_| "The updater state is unavailable. Restart PDF Workstation and try again.".to_string())
 }
@@ -244,8 +266,8 @@ impl<U, B> Drop for ConfirmingGuard<'_, U, B> {
 /// The confirmation must be owned by the main window so it is modal to the app.
 /// Without that window the install is refused rather than shown ownerless.
 #[cfg_attr(not(windows), allow(dead_code))]
-pub fn require_owner(owner: Option<isize>) -> Result<isize, String> {
-    owner.filter(|hwnd| *hwnd != 0).ok_or_else(|| "The update confirmation could not be attached to the PDF Workstation window. Nothing was installed. Close and reopen PDF Workstation, then try again.".to_string())
+pub fn require_owner(owner: Option<isize>) -> Result<isize, InstallError> {
+    owner.filter(|hwnd| *hwnd != 0).ok_or_else(|| InstallError::kept("The update confirmation could not be attached to the PDF Workstation window. Nothing was installed. Close and reopen PDF Workstation, then try again."))
 }
 
 /// Asks before installing the downloaded update the backend holds for `key`.
@@ -253,21 +275,23 @@ pub fn require_owner(owner: Option<isize>) -> Result<isize, String> {
 /// webview. The slot is not locked while the question is open; No leaves the
 /// downloaded offer in place, Yes takes it single use and installs it. Only one
 /// question may be open at a time: a second call while one is pending is refused.
-pub fn install_confirmed<U, B>(slot: &Mutex<UpdateSlot<U, B>>, key: &UpdateKey, current: &semver::Version, confirm: impl FnOnce(&str) -> bool, install: impl FnOnce(U, B) -> Result<(), String>) -> Result<InstallOutcome, String> {
+/// `confirm` returns `Err` when the question could not be shown; that is a
+/// refusal that keeps the offer, never a No.
+pub fn install_confirmed<U, B>(slot: &Mutex<UpdateSlot<U, B>>, key: &UpdateKey, current: &semver::Version, confirm: impl FnOnce(&str) -> Result<bool, String>, install: impl FnOnce(U, B) -> Result<(), String>) -> Result<InstallOutcome, InstallError> {
     let version = {
         let mut held = lock_slot(slot)?;
         if held.confirming {
-            return Err("An update installation is already waiting for your answer.".into());
+            return Err(InstallError::kept("An update installation is already waiting for your answer."));
         }
         let version = held.downloaded_version(key)?;
         if !is_upgrade(current, &version) {
-            return Err("The offered update is not newer than the installed version.".into());
+            return Err("The offered update is not newer than the installed version.".to_string().into());
         }
         held.confirming = true;
         version
     };
     let _confirming = ConfirmingGuard(slot);
-    if !confirm(&version) {
+    if !confirm(&version).map_err(InstallError::kept)? {
         return Ok(InstallOutcome::Cancelled);
     }
     let (update, bytes) = lock_slot(slot)?.take_for_install(key)?;
@@ -282,21 +306,33 @@ pub fn confirmation_text(version: &str) -> String {
 const CONFIRMATION_TITLE: &str = "Install update?";
 
 #[cfg(windows)]
-fn ask_to_install(owner: isize, version: &str) -> bool {
-    use windows::{core::PCWSTR, Win32::{Foundation::HWND, UI::WindowsAndMessaging::{MessageBoxW, IDYES, MB_DEFBUTTON2, MB_ICONWARNING, MB_SETFOREGROUND, MB_YESNO}}};
+fn ask_to_install(owner: isize, version: &str) -> Result<bool, String> {
+    use windows::{core::PCWSTR, Win32::{Foundation::HWND, UI::WindowsAndMessaging::{MessageBoxW, MB_DEFBUTTON2, MB_ICONWARNING, MB_SETFOREGROUND, MB_YESNO}}};
     let wide = |text: &str| text.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
     let (text, title) = (wide(&confirmation_text(version)), wide(CONFIRMATION_TITLE));
     let owner = HWND(owner as *mut _);
-    unsafe { MessageBoxW(Some(owner), PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()), MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND) == IDYES }
+    let answer = unsafe { MessageBoxW(Some(owner), PCWSTR(text.as_ptr()), PCWSTR(title.as_ptr()), MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND) };
+    read_answer(answer.0)
+}
+
+/// Reads a `MessageBoxW` result. 0 means the box could not be shown (for
+/// example its owner window was destroyed): an error, not a No.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn read_answer(answer: i32) -> Result<bool, String> {
+    const IDYES: i32 = 6;
+    match answer {
+        0 => Err("The update confirmation could not be shown. Nothing was installed. Close and reopen PDF Workstation, then try again.".into()),
+        answer => Ok(answer == IDYES),
+    }
 }
 
 #[cfg(not(windows))]
-fn ask_to_install(_owner: (), version: &str) -> bool {
-    rfd::MessageDialog::new().set_title(CONFIRMATION_TITLE).set_description(confirmation_text(version)).set_buttons(rfd::MessageButtons::YesNo).set_level(rfd::MessageLevel::Warning).show() == rfd::MessageDialogResult::Yes
+fn ask_to_install(_owner: (), version: &str) -> Result<bool, String> {
+    Ok(rfd::MessageDialog::new().set_title(CONFIRMATION_TITLE).set_description(confirmation_text(version)).set_buttons(rfd::MessageButtons::YesNo).set_level(rfd::MessageLevel::Warning).show() == rfd::MessageDialogResult::Yes)
 }
 
 #[tauri::command]
-pub async fn install_update<R: Runtime>(app: AppHandle<R>, update: UpdateKey) -> Result<InstallOutcome, String> {
+pub async fn install_update<R: Runtime>(app: AppHandle<R>, update: UpdateKey) -> Result<InstallOutcome, InstallError> {
     #[cfg(windows)]
     let owner = require_owner(app.get_webview_window("main").and_then(|window| window.hwnd().ok()).map(|hwnd| hwnd.0 as isize))?;
     #[cfg(not(windows))]
@@ -307,7 +343,7 @@ pub async fn install_update<R: Runtime>(app: AppHandle<R>, update: UpdateKey) ->
         install_confirmed(&state, &update, &worker.package_info().version, |version| ask_to_install(owner, version), |pending, bytes| pending.restart_after_install(true).install(&bytes).map_err(|error| error.to_string()))
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| InstallError::from(error.to_string()))?
 }
 
 #[tauri::command]
@@ -457,7 +493,7 @@ mod tests {
         let slot = Mutex::new(downloaded(&k));
         let mut asked = Vec::new();
         let mut installed = false;
-        let outcome = install_confirmed(&slot, &k, &current(), |version| { asked.push(version.to_string()); false }, |_, _| { installed = true; Ok(()) });
+        let outcome = install_confirmed(&slot, &k, &current(), |version| { asked.push(version.to_string()); Ok(false) }, |_, _| { installed = true; Ok(()) });
         assert_eq!(outcome, Ok(InstallOutcome::Cancelled));
         assert_eq!(asked, ["0.3.0"]);
         assert!(!installed);
@@ -469,10 +505,10 @@ mod tests {
         let k = key("0.3.0", "sig");
         let slot = Mutex::new(downloaded(&k));
         let mut installed = Vec::new();
-        let outcome = install_confirmed(&slot, &k, &current(), |_| true, |update, bytes| { installed.push((update, bytes)); Ok(()) });
+        let outcome = install_confirmed(&slot, &k, &current(), |_| Ok(true), |update, bytes| { installed.push((update, bytes)); Ok(()) });
         assert_eq!(outcome, Ok(InstallOutcome::Started));
         assert_eq!(installed, [("update", vec![1, 2, 3])]);
-        assert!(install_confirmed(&slot, &k, &current(), |_| true, |_, _| Ok(())).is_err(), "a consumed update must not install twice");
+        assert!(install_confirmed(&slot, &k, &current(), |_| Ok(true), |_, _| Ok(())).is_err(), "a consumed update must not install twice");
     }
 
     #[test]
@@ -480,10 +516,10 @@ mod tests {
         let k = key("0.3.0", "sig");
         let empty: Mutex<UpdateSlot<&str, Vec<u8>>> = Mutex::new(UpdateSlot::default());
         let mut asked = false;
-        assert!(install_confirmed(&empty, &k, &current(), |_| { asked = true; true }, |_, _| Ok(())).is_err());
+        assert!(install_confirmed(&empty, &k, &current(), |_| { asked = true; Ok(true) }, |_, _| Ok(())).is_err());
         let slot = Mutex::new(downloaded(&k));
-        assert!(install_confirmed(&slot, &key("0.9.0", "forged"), &current(), |_| { asked = true; true }, |_, _| Ok(())).is_err());
-        assert!(install_confirmed(&slot, &k, &semver::Version::parse("0.3.0").unwrap(), |_| { asked = true; true }, |_, _| Ok(())).is_err());
+        assert!(install_confirmed(&slot, &key("0.9.0", "forged"), &current(), |_| { asked = true; Ok(true) }, |_, _| Ok(())).is_err());
+        assert!(install_confirmed(&slot, &k, &semver::Version::parse("0.3.0").unwrap(), |_| { asked = true; Ok(true) }, |_, _| Ok(())).is_err());
         assert!(!asked, "the question must only name an update the backend downloaded and that is newer");
     }
 
@@ -492,7 +528,7 @@ mod tests {
         let k = key("0.3.0", "sig");
         let slot = Mutex::new(downloaded(&k));
         let mut installed = false;
-        let outcome = install_confirmed(&slot, &k, &current(), |_| { slot.lock().unwrap().release(&k); true }, |_, _| { installed = true; Ok(()) });
+        let outcome = install_confirmed(&slot, &k, &current(), |_| { slot.lock().unwrap().release(&k); Ok(true) }, |_, _| { installed = true; Ok(()) });
         assert!(outcome.is_err());
         assert!(!installed);
     }
@@ -505,15 +541,15 @@ mod tests {
         let mut asked_twice = false;
         let mut installed = 0;
         let outcome = install_confirmed(&slot, &k, &current(), |_| {
-            second = Some(install_confirmed(&slot, &k, &current(), |_| { asked_twice = true; true }, |_, _| { installed += 1; Ok(()) }));
-            false
+            second = Some(install_confirmed(&slot, &k, &current(), |_| { asked_twice = true; Ok(true) }, |_, _| { installed += 1; Ok(()) }));
+            Ok(false)
         }, |_, _| Ok(()));
         assert_eq!(outcome, Ok(InstallOutcome::Cancelled));
-        assert!(second.unwrap().unwrap_err().contains("already waiting"));
+        assert!(second.unwrap().unwrap_err() == InstallError::kept("An update installation is already waiting for your answer."));
         assert!(!asked_twice, "only one confirmation may be shown at a time");
         assert_eq!(installed, 0);
         let mut asked_again = false;
-        assert_eq!(install_confirmed(&slot, &k, &current(), |_| { asked_again = true; true }, |_, _| Ok(())), Ok(InstallOutcome::Started), "answering the first question frees the next install");
+        assert_eq!(install_confirmed(&slot, &k, &current(), |_| { asked_again = true; Ok(true) }, |_, _| Ok(())), Ok(InstallOutcome::Started), "answering the first question frees the next install");
         assert!(asked_again);
     }
 
@@ -521,14 +557,14 @@ mod tests {
     fn the_open_question_flag_clears_on_every_exit() {
         let k = key("0.3.0", "sig");
         let slot = Mutex::new(downloaded(&k));
-        assert!(install_confirmed(&slot, &k, &current(), |_| true, |_, _| Err("installer failed".into())).is_err());
+        assert!(install_confirmed(&slot, &k, &current(), |_| Ok(true), |_, _| Err("installer failed".into())).is_err());
         assert!(!slot.lock().unwrap().confirming, "a failed install must not leave the question marked open");
         let slot = Mutex::new(downloaded(&k));
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| install_confirmed(&slot, &k, &current(), |_| panic!("dialog failed"), |_, _| Ok(()))));
         assert!(panicked.is_err());
         assert!(!slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).confirming);
         let stale = Mutex::new(downloaded(&k));
-        assert!(install_confirmed(&stale, &k, &semver::Version::parse("0.3.0").unwrap(), |_| true, |_, _| Ok(())).is_err());
+        assert!(install_confirmed(&stale, &k, &semver::Version::parse("0.3.0").unwrap(), |_| Ok(true), |_, _| Ok(())).is_err());
         assert!(!stale.lock().unwrap().confirming, "a refused install never marks the question open");
     }
 
@@ -537,8 +573,36 @@ mod tests {
         assert_eq!(require_owner(Some(0x1234)), Ok(0x1234));
         for missing in [None, Some(0)] {
             let error = require_owner(missing).unwrap_err();
-            assert!(error.contains("Nothing was installed"), "{missing:?} must refuse rather than show an ownerless box");
+            assert!(error.message.contains("Nothing was installed"), "{missing:?} must refuse rather than show an ownerless box");
+            assert!(error.offer_kept, "a refusal before asking keeps the downloaded offer");
         }
+    }
+
+    #[test]
+    fn a_message_box_failure_is_an_error_not_a_decline() {
+        assert!(read_answer(0).unwrap_err().contains("could not be shown"));
+        assert_eq!(read_answer(6), Ok(true));
+        assert_eq!(read_answer(7), Ok(false), "IDNO");
+        #[cfg(windows)]
+        assert_eq!(windows::Win32::UI::WindowsAndMessaging::IDYES.0, 6);
+        let k = key("0.3.0", "sig");
+        let slot = Mutex::new(downloaded(&k));
+        let mut installed = false;
+        let outcome = install_confirmed(&slot, &k, &current(), |_| read_answer(0), |_, _| { installed = true; Ok(()) });
+        assert_eq!(outcome.unwrap_err().offer_kept, true);
+        assert!(!installed);
+        assert!(!slot.lock().unwrap().confirming);
+        assert_eq!(slot.lock().unwrap().take_for_install(&k).unwrap().0, "update", "a box that failed to show keeps the downloaded offer");
+    }
+
+    #[test]
+    fn install_errors_tell_the_webview_whether_the_offer_was_kept() {
+        assert_eq!(serde_json::to_value(InstallError::kept("busy")).unwrap(), serde_json::json!({ "message": "busy", "offerKept": true }));
+        let k = key("0.3.0", "sig");
+        let empty: Mutex<UpdateSlot<&str, Vec<u8>>> = Mutex::new(fresh());
+        assert!(!install_confirmed(&empty, &k, &current(), |_| Ok(true), |_, _| Ok(())).unwrap_err().offer_kept, "no held offer: nothing to keep");
+        let slot = Mutex::new(downloaded(&k));
+        assert!(!install_confirmed(&slot, &k, &current(), |_| Ok(true), |_, _| Err("installer failed".into())).unwrap_err().offer_kept, "Yes took the offer: it is gone");
     }
 
     #[test]

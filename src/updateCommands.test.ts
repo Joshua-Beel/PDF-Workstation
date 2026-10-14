@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
-import { checkForUpdate, type DownloadEvent } from './updateCommands';
+import { checkForUpdate, InstallRefused, type DownloadEvent } from './updateCommands';
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -47,6 +47,19 @@ describe('app-owned updater commands', () => {
     await update.close();
     expect(vi.mocked(invoke).mock.calls[3]).toEqual(['release_update', { update: key }]);
     expect(sentKeys().filter(name => forbidden.includes(name))).toEqual([]);
+  });
+
+  it('marks only install refusals that keep the offer', async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(offer);
+    const update = (await checkForUpdate())!;
+    vi.mocked(invoke).mockRejectedValueOnce({ message: 'An update installation is already waiting for your answer.', offerKept: true });
+    const kept = await update.install().catch(reason => reason);
+    expect(kept).toBeInstanceOf(InstallRefused);
+    expect(kept.message).toBe('An update installation is already waiting for your answer.');
+    vi.mocked(invoke).mockRejectedValueOnce({ message: 'installer failed', offerKept: false });
+    await expect(update.install()).rejects.toBe('installer failed');
+    vi.mocked(invoke).mockRejectedValueOnce('plain failure');
+    await expect(update.install()).rejects.toBe('plain failure');
   });
 
   it('releases only its own offer, so a stale dialog cannot release a newer check', async () => {

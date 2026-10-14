@@ -1,12 +1,12 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { checkForUpdate, type DownloadEvent } from './updateCommands';
+import { checkForUpdate, InstallRefused, type DownloadEvent } from './updateCommands';
 import Updates from './Updates';
 
 const attemptBridge = vi.hoisted(() => ({ read: vi.fn(), write: vi.fn(), clear: vi.fn() }));
 
 vi.mock('@tauri-apps/api/app', () => ({ getVersion: async () => '0.2.0' }));
-vi.mock('./updateCommands', () => ({ checkForUpdate: vi.fn() }));
+vi.mock('./updateCommands', async importOriginal => ({ ...await importOriginal<typeof import('./updateCommands')>(), checkForUpdate: vi.fn() }));
 vi.mock('./bridge', () => ({ native: true }));
 vi.mock('./updateAttempt', () => ({
   readUpdateAttempt: attemptBridge.read,
@@ -213,6 +213,32 @@ describe('software updates', () => {
     expect(refreshedDownload).toHaveBeenCalledOnce();
     expect(refreshedInstall).toHaveBeenCalledOnce();
     act(() => ui.unmount());
+  });
+  it.each([
+    'An update installation is already waiting for your answer.',
+    'The update confirmation could not be attached to the PDF Workstation window. Nothing was installed.',
+    'The update confirmation could not be shown. Nothing was installed.'
+  ])('keeps the downloaded offer when the backend refuses before installing: %s', async refusal => {
+    const download = vi.fn().mockResolvedValue(undefined);
+    const install = vi.fn().mockRejectedValueOnce(new InstallRefused(refusal)).mockResolvedValueOnce('cancelled');
+    const release = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(checkForUpdate).mockResolvedValueOnce({ version: '0.3.0', download, install, close: release } as never);
+    const { ui, setBusy } = await mount();
+    const installButton = () => ui.root.findAllByType('button').find(node => node.children.includes('Install update and restart'))!;
+    await act(async () => installButton().props.onClick());
+    expect(ui.root.findByProps({ role: 'alert' }).children.join('')).toBe(`Update not installed: ${refusal}`);
+    expect(JSON.stringify(ui.toJSON())).toContain('The downloaded update is kept; you can retry.');
+    expect(release).not.toHaveBeenCalled();
+    expect(checkForUpdate).toHaveBeenCalledOnce();
+    expect(attemptBridge.clear).toHaveBeenCalledOnce();
+    expect(installButton().props.disabled).toBe(false);
+    expect(setBusy.mock.calls).toEqual([[true], [false]]);
+    await act(async () => installButton().props.onClick());
+    expect(download).toHaveBeenCalledOnce();
+    expect(install).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(ui.toJSON())).toContain('Version 0.3.0 was not installed');
+    act(() => ui.unmount());
+    expect(release).toHaveBeenCalledOnce();
   });
   it('treats an installer promise resolving on Windows as a retryable failure', async () => {
     const download = vi.fn().mockResolvedValue(undefined);

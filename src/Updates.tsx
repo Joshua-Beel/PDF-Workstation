@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
-import { checkForUpdate, type Update } from './updateCommands';
+import { checkForUpdate, InstallRefused, type Update } from './updateCommands';
 import { native } from './bridge';
 import { clearUpdateAttempt, readUpdateAttempt, writeUpdateAttempt } from './updateAttempt';
 import s from './Updates.module.css';
@@ -83,6 +83,11 @@ export default function Updates({ dirty, busy, setBusy, close }: { dirty: boolea
       throw new Error('Installer returned without closing the app.');
     } catch (e) {
       try { await clearUpdateAttempt(); } catch {}
+      if (e instanceof InstallRefused) {
+        setError(`Update not installed: ${e.message}`);
+        setStatus('Your installed version is unchanged. The downloaded update is kept; you can retry.');
+        return;
+      }
       setError(`Update failed: ${String(e)}`);
       if (!downloadComplete) setStatus('Your installed version is unchanged. You can retry.');
       else {
