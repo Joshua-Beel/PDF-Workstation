@@ -6,12 +6,14 @@ param(
     [string]$PdfiumPath,
     [string[]]$Scenario = @(),
     [int]$TimeoutSeconds = 30,
-    [int]$WaitMinutes = 120,
-    [switch]$DumpTrees
+    [int]$WaitMinutes = 30,
+    [switch]$DumpTrees,
+    [switch]$Strict
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $Scenario = @($Scenario | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+if ($WaitMinutes -lt 1 -or $WaitMinutes -gt 30) { throw 'WaitMinutes must be between 1 and 30.' }
 
 # Drives the native Windows dialogs of SM3's features in a debug build, through UI Automation (and the MSAA actions of
 # the same accessibility stack for the classic dialog controls). No keyboard or mouse input is injected.
@@ -19,23 +21,55 @@ $Scenario = @($Scenario | ForEach-Object { $_ -split ',' } | Where-Object { $_ }
 # and strict-image.pdf are written by two ignored tests, run once with SM3_DIALOG_FIXTURE_DIR set to an existing folder:
 #   cargo test --bins -- --ignored write_dialog_annotation_fixture
 #   cargo test --test dialog_fixtures -- --ignored
-$projectRoot = Split-Path -Parent $PSScriptRoot
+$projectRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+function Get-DirPrefix { param([string]$Path) return ([IO.Path]::GetFullPath($Path).TrimEnd([char]92) + [char]92) }
+function Test-UnderBase {
+    param([string]$Path,[string[]]$Bases)
+    $full = [IO.Path]::GetFullPath($Path)
+    if ($full.StartsWith('\\')) { return $false }
+    foreach ($base in $Bases) {
+        if (-not $base) { continue }
+        if ((Get-DirPrefix $full).StartsWith((Get-DirPrefix $base), [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+$siblingRoot = $null
+for ($ancestor = $projectRoot; $ancestor; $ancestor = Split-Path -Parent $ancestor) {
+    if ((Test-Path -LiteralPath (Join-Path $ancestor 'tmp') -PathType Container) -and (Test-Path -LiteralPath (Join-Path $ancestor 'wt') -PathType Container)) { $siblingRoot = $ancestor; break }
+}
+if (-not $siblingRoot) { throw 'Could not find the Smacrobat tmp folder (a tmp folder next to wt) above the repo.' }
+$tmpBase = [IO.Path]::GetFullPath((Join-Path $siblingRoot 'tmp'))
+$sharedTarget = [IO.Path]::GetFullPath((Join-Path $siblingRoot 'target'))
+$targetBases = @($sharedTarget, $(if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { $null }), (Join-Path $projectRoot 'src-tauri\target'))
 if (-not $AppPath) {
     $targetRoot = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $projectRoot 'src-tauri\target' }
     $AppPath = Join-Path $targetRoot 'debug\pdf-workstation.exe'
 }
 if (-not $PdfiumPath) { $PdfiumPath = Join-Path $projectRoot 'src-tauri\resources\pdfium\bin\pdfium.dll' }
-if (-not $WorkRoot) {
-    $tmpRoot = if ($env:TEMP) { $env:TEMP } else { throw 'Set TEMP (or pass -WorkRoot) to a folder that is not on the system drive.' }
-    $WorkRoot = Join-Path $tmpRoot ('sm3-dialogs-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
-}
-if (-not $FixtureDir) { $FixtureDir = Join-Path $WorkRoot 'fixtures' }
+if (-not $WorkRoot) { $WorkRoot = Join-Path $tmpBase ('sm3-dialogs\run-' + (Get-Date -Format 'yyyyMMdd-HHmmss')) }
+if (-not $FixtureDir) { $FixtureDir = Join-Path $tmpBase 'sm3-dialogs\fixtures' }
 $WorkRoot = [IO.Path]::GetFullPath($WorkRoot)
 $FixtureDir = [IO.Path]::GetFullPath($FixtureDir)
+$AppPath = [IO.Path]::GetFullPath($AppPath)
+$PdfiumPath = [IO.Path]::GetFullPath($PdfiumPath)
 $systemDrive = [IO.Path]::GetPathRoot([Environment]::GetFolderPath('Windows'))
 if ([IO.Path]::GetPathRoot($WorkRoot).Equals($systemDrive, [StringComparison]::OrdinalIgnoreCase)) { throw "WorkRoot must not be on the system drive ($systemDrive): $WorkRoot" }
+if (-not (Test-UnderBase $WorkRoot @($tmpBase)) -or (Get-DirPrefix $WorkRoot) -eq (Get-DirPrefix $tmpBase)) { throw "WorkRoot must be a folder under the sibling tmp folder $(Get-DirPrefix $tmpBase) (no UNC or other drives): $WorkRoot" }
+if (Test-Path -LiteralPath $WorkRoot) { throw "WorkRoot must be a fresh folder: $WorkRoot" }
+if (-not (Test-UnderBase $FixtureDir @($tmpBase, $projectRoot))) { throw "FixtureDir must be under the sibling tmp folder or the repo: $FixtureDir" }
+if (-not (Test-UnderBase $AppPath (@($projectRoot) + $targetBases))) { throw "AppPath must be under the repo or the shared cargo target: $AppPath" }
+if (-not (Test-UnderBase $PdfiumPath @($projectRoot))) { throw "PdfiumPath must be under the repo: $PdfiumPath" }
 if (-not (Test-Path -LiteralPath $AppPath -PathType Leaf)) { throw "App executable not found: $AppPath" }
 if (-not (Test-Path -LiteralPath $PdfiumPath -PathType Leaf)) { throw "PDFium library not found: $PdfiumPath" }
+$recoveryDir = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'local.pdfworkstation.desktop\recovery'
+function Get-RecoveryRecords {
+    if (-not (Test-Path -LiteralPath $recoveryDir -PathType Container)) { return @() }
+    return @(Get-ChildItem -LiteralPath $recoveryDir -File -Filter '*.smacrec' | ForEach-Object { $_.FullName })
+}
+# The debug app shares the real app-data recovery folder with the installed app. Any record present before this run
+# is not ours: refuse to run rather than risk answering or removing someone else's recovered edits.
+$preexisting = @(Get-RecoveryRecords)
+if ($preexisting.Count -gt 0) { throw "Refusing to run: $($preexisting.Count) recovery record(s) already exist in $recoveryDir. Open the app yourself and resolve them first; this verifier never reads, answers or removes records it did not create." }
 foreach ($name in @('annotated.pdf', 'strict-text.pdf', 'strict-image.pdf')) {
     if (-not (Test-Path -LiteralPath (Join-Path $FixtureDir $name) -PathType Leaf)) { throw "Fixture missing: $(Join-Path $FixtureDir $name). See the header of this script for the two cargo commands that write it." }
 }
@@ -176,12 +210,15 @@ $script:MainHwnd = [IntPtr]::Zero
 $script:Process = $null
 $script:Deadline = $TimeoutSeconds
 $script:OpenItem = 'Open' + [char]0x2026 + '*'
-$script:DiagDir = Join-Path $WorkRoot 'diag'
+$script:DiagDir = $null
+$script:RunDir = $null
+$script:OpenedByRun = @{}
+$script:SawForeign = $false
 
 function Add-Result {
-    param([string]$Command,[string]$Check,[ValidateSet('pass','fail','not-automatable','finding')][string]$Status,[string]$Detail = '')
+    param([string]$Command,[string]$Check,[ValidateSet('pass','fail','not-automatable','finding','info')][string]$Status,[string]$Detail = '')
     $script:Results.Add([pscustomobject]@{ command = $Command; check = $Check; status = $Status; detail = $Detail })
-    $mark = switch ($Status) { 'pass' { 'PASS' } 'fail' { 'FAIL' } 'finding' { 'FIND' } default { 'N/A ' } }
+    $mark = switch ($Status) { 'pass' { 'PASS' } 'fail' { 'FAIL' } 'finding' { 'FIND' } 'info' { 'INFO' } default { 'N/A ' } }
     Write-Host ("[{0}] {1} :: {2}{3}" -f $mark, $Command, $Check, $(if ($Detail) { ' - ' + $Detail } else { '' }))
 }
 
@@ -191,10 +228,24 @@ function Assert-Check {
     return $Condition
 }
 
+function Assert-AppPid { if ($script:AppPid -le 4) { throw 'No verifier app process id is set (PID 0 and 4 are never driven).' } }
+
+function Get-OtherDevApps {
+    # Only other dev builds (a copy under the sibling tmp folder or an exe in a cargo target) count; an installed app does not.
+    $found = @()
+    foreach ($process in @(Get-Process -Name 'pdf-workstation' -ErrorAction SilentlyContinue)) {
+        if ($process.Id -eq $script:AppPid) { continue }
+        $path = $null
+        try { $path = $process.Path } catch { }
+        if ($path -and (Test-UnderBase $path (@($tmpBase, $projectRoot) + $targetBases))) { $found += $process }
+    }
+    return $found
+}
+
 function Assert-Exclusive {
-    # Another pdf-workstation process means another stream's verifier started. Abort this run so the two never share a desktop.
-    $others = @(Get-Process -Name 'pdf-workstation' -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $script:AppPid })
-    if ($others.Count -gt 0) { throw ('SM3_FOREIGN_APP: another pdf-workstation process appeared (pid ' + (($others | ForEach-Object Id) -join ',') + ').') }
+    # Another dev build means another stream's verifier started. Abort this run so the two never share a desktop.
+    $others = @(Get-OtherDevApps)
+    if ($others.Count -gt 0) { $script:SawForeign = $true; throw ('SM3_FOREIGN_APP: another pdf-workstation dev build appeared (pid ' + (($others | ForEach-Object Id) -join ',') + ').') }
 }
 
 function Get-UiTreeText {
@@ -287,6 +338,7 @@ function Get-UiValue {
 }
 
 function Get-MainWindow {
+    Assert-AppPid
     $condition = [Windows.Automation.AndCondition]::new(
         [Windows.Automation.PropertyCondition]::new($AE::ProcessIdProperty, $script:AppPid),
         [Windows.Automation.PropertyCondition]::new($AE::ClassNameProperty, 'Tauri Window'))
@@ -381,7 +433,7 @@ function Test-NativeDialogShell {
     } else {
         $name = Get-LegacyValue $edit
         if ($null -ne $ExpectedName) { $ok = (Assert-Check $Command 'default filename' ($name -ceq $ExpectedName) "value='$name' expected='$ExpectedName'") -and $ok }
-        else { Add-Result $Command 'default filename (observed)' 'pass' "value='$name'" }
+        else { Add-Result $Command 'default filename (observed)' 'info' "value='$name'" }
     }
     $filter = Get-DialogFilterText $Dialog
     if ($null -eq $filter) { Add-Result $Command 'file-type filter' 'not-automatable' 'No file-type combo exposed through UI Automation.' }
@@ -507,11 +559,14 @@ function Activate-Tab {
 
 function Open-Pdf {
     param([string]$Path,[string]$TabName)
+    $full = [IO.Path]::GetFullPath($Path)
+    if (-not (Test-UnderBase $full @((Join-Path $script:RunDir 'in')))) { throw "Refusing to open a document outside this run's input folder: $full" }
+    $script:OpenedByRun[$TabName] = $full
     Open-Menu-Item $script:OpenItem
     $dialog = Wait-NativeDialog
-    Complete-NativeDialog $dialog $Path
-    # A recovery record written by an earlier killed run of this verifier for the same fixture path is offered first;
-    # only an offer that names this verifier's own fixture is answered (with "Open original").
+    Complete-NativeDialog $dialog $full
+    # A recovery offer can only name a record this run created (the folder was empty at start). The offer shows just the
+    # file name, so it is answered only when that name maps to a document this run itself opened from its own input folder.
     $limit = [DateTime]::UtcNow.AddSeconds($script:Deadline)
     do {
         Assert-Exclusive
@@ -519,8 +574,9 @@ function Open-Pdf {
         if (Find-Ui -Root $web -Type 'Button' -Name $TabName -EnabledOnly) { break }
         $offer = Find-Ui -Root $web -Name 'A recovery record for*' -Like
         if ($offer) {
-            if (Find-Ui -Root $web -Type 'Text' -Name $TabName) { Add-Result 'recovery' 'stale recovery offer for the verifier fixture answered with Open original' 'finding' $TabName; Click-Button -Name 'Open original' }
-            else { throw ('Recovery offer for a document that is not a verifier fixture (expected ' + $TabName + ').') }
+            $tracked = $script:OpenedByRun[$TabName]
+            if ($tracked -and $tracked -ceq $full -and (Find-Ui -Root $web -Type 'Text' -Name $TabName)) { Add-Result 'recovery' 'recovery offer for a document this run opened answered with Open original' 'finding' $full; Click-Button -Name 'Open original' }
+            else { throw ('Recovery offer for a document this run did not open from its own folder (expected ' + $full + ').') }
         }
         Start-Sleep -Milliseconds 200
     } while ([DateTime]::UtcNow -lt $limit)
@@ -528,23 +584,27 @@ function Open-Pdf {
     Start-Sleep -Milliseconds 800
 }
 
-function Close-AllDocuments {
-    # Closes every document tab, discarding unsaved edits, so no recovery record is left behind by this verifier.
-    for ($i = 0; $i -lt 16; $i++) {
-        $web = Get-WebRoot
-        if (-not $web) { return }
-        $close = @(Find-Ui -Root $web -Type 'Button' -Name 'Close *.pdf' -Like -EnabledOnly -All) | Select-Object -First 1
-        if (-not $close) { return }
-        Invoke-Ui $close
-        $limit = [DateTime]::UtcNow.AddSeconds(3)
-        do {
-            $confirm = Find-Ui -Root (Get-WebRoot) -Type 'Button' -Name 'Discard and close' -EnabledOnly
-            if ($confirm) { Invoke-Ui $confirm; break }
-            Start-Sleep -Milliseconds 150
-        } while ([DateTime]::UtcNow -lt $limit)
-        Start-Sleep -Milliseconds 500
+function Close-OwnDocuments {
+    # Closes only the tabs this run opened (tracked by name from its own input folder), discarding their unsaved edits.
+    Assert-AppPid
+    foreach ($name in @($script:OpenedByRun.Keys)) {
+        for ($i = 0; $i -lt 3; $i++) {
+            $web = Get-WebRoot
+            if (-not $web) { return }
+            $close = Find-Ui -Root $web -Type 'Button' -Name ('Close ' + $name) -EnabledOnly
+            if (-not $close) { break }
+            Invoke-Ui $close
+            $limit = [DateTime]::UtcNow.AddSeconds(3)
+            do {
+                $confirm = Find-Ui -Root (Get-WebRoot) -Type 'Button' -Name 'Discard and close' -EnabledOnly
+                if ($confirm) { Invoke-Ui $confirm; break }
+                Start-Sleep -Milliseconds 150
+            } while ([DateTime]::UtcNow -lt $limit)
+            Start-Sleep -Milliseconds 500
+        }
     }
 }
+
 function Assert-PdfOpens {
     param([string]$Command,[string]$Path,[int]$ExpectedPages)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { Add-Result $Command 'output file exists' 'fail' $Path; return $false }
@@ -613,15 +673,16 @@ function Save-Copy-Cancel-And-Confirm {
 function Wait-ForExclusive {
     $limit = [DateTime]::UtcNow.AddMinutes($WaitMinutes)
     while ($true) {
-        $others = @(Get-Process -Name 'pdf-workstation' -ErrorAction SilentlyContinue)
+        $others = @(Get-OtherDevApps)
         if ($others.Count -eq 0) { return }
-        if ([DateTime]::UtcNow -ge $limit) { throw "Another pdf-workstation process (pid $(($others | ForEach-Object Id) -join ',')) was still running after $WaitMinutes minutes." }
-        Write-Host ("{0:HH:mm:ss} waiting for another pdf-workstation process to exit (pid {1})..." -f (Get-Date), (($others | ForEach-Object Id) -join ','))
+        if ([DateTime]::UtcNow -ge $limit) { throw "Another pdf-workstation dev build (pid $(($others | ForEach-Object Id) -join ',')) was still running after $WaitMinutes minutes." }
+        Write-Host ("{0:HH:mm:ss} waiting for another pdf-workstation dev build to exit (pid {1})..." -f (Get-Date), (($others | ForEach-Object Id) -join ','))
         Start-Sleep -Seconds 30
     }
 }
 
 function Stop-OwnApp {
+    if ($script:AppPid -le 4 -and -not $script:Process) { return }
     try {
         if ($script:Process -and -not $script:Process.HasExited) {
             [void]$script:Process.CloseMainWindow()
@@ -629,19 +690,22 @@ function Stop-OwnApp {
         }
     } catch { }
     try { if ($script:Process -and -not $script:Process.HasExited) { $script:Process.Kill($true); $script:Process.WaitForExit(5000) | Out-Null } } catch { }
-    $leftover = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Id -eq $script:AppPid -and $script:AppPid -ne 0 })
+    $leftover = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Id -eq $script:AppPid -and $script:AppPid -gt 4 })
     Add-Result 'cleanup' 'app process closed' $(if ($leftover.Count -eq 0) { 'pass' } else { 'fail' }) "pid=$($script:AppPid)"
 }
 
 function Invoke-Run {
-    foreach ($name in @('in', 'out', 'app', 'diag')) {
-        $dir = Join-Path $WorkRoot $name
-        if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
-        $null = New-Item -ItemType Directory -Path $dir
-    }
-    $inDir = Join-Path $WorkRoot 'in'; $outDir = Join-Path $WorkRoot 'out'; $appDir = Join-Path $WorkRoot 'app'
-    $script:Results.Clear(); $script:AppPid = 0; $script:Process = $null
+    param([int]$Attempt)
+    # Every attempt gets its own fresh folder under the confined, freshly created WorkRoot; nothing is ever deleted here.
+    $script:RunDir = Join-Path $WorkRoot ('attempt-' + $Attempt)
+    if (-not (Test-UnderBase $script:RunDir @($WorkRoot)) -or (Test-Path -LiteralPath $script:RunDir)) { throw "Run folder is not a fresh folder under WorkRoot: $($script:RunDir)" }
+    $null = New-Item -ItemType Directory -Path $script:RunDir
+    $script:DiagDir = Join-Path $script:RunDir 'diag'
+    foreach ($name in @('in', 'out', 'app', 'diag')) { $null = New-Item -ItemType Directory -Path (Join-Path $script:RunDir $name) }
+    $inDir = Join-Path $script:RunDir 'in'; $outDir = Join-Path $script:RunDir 'out'; $appDir = Join-Path $script:RunDir 'app'
+    $script:Results.Clear(); $script:AppPid = 0; $script:Process = $null; $script:OpenedByRun = @{}; $script:SawForeign = $false
     $foreign = $false
+    $recoverySnapshot = @(Get-RecoveryRecords)
     try {
         Copy-Item -LiteralPath $AppPath -Destination (Join-Path $appDir 'pdf-workstation.exe')
         $resources = Join-Path (Split-Path -Parent $AppPath) 'resources'
@@ -660,9 +724,10 @@ function Invoke-Run {
         $startInfo = [Diagnostics.ProcessStartInfo]::new((Join-Path $appDir 'pdf-workstation.exe'))
         $startInfo.WorkingDirectory = $appDir
         $startInfo.UseShellExecute = $false
+        $startInfo.EnvironmentVariables['WEBVIEW2_USER_DATA_FOLDER'] = (Join-Path $script:RunDir 'webview')
         $script:Process = [Diagnostics.Process]::Start($startInfo)
         $script:AppPid = $script:Process.Id
-        Write-Host "App started (pid $($script:AppPid)) from $appDir; work root $WorkRoot"
+        Write-Host "App started (pid $($script:AppPid)) from $appDir; run folder $($script:RunDir)"
 
         $limit = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
         $main = $null
@@ -670,7 +735,7 @@ function Invoke-Run {
         if (-not $main) { throw 'Main window did not appear.' }
         $script:MainHwnd = [IntPtr]$main.Current.NativeWindowHandle
         Wait-Ui -Root $main -Type 'Button' -Name 'Menu' -Seconds ($TimeoutSeconds + 30) | Out-Null
-        Add-Result 'launch' 'app window reachable through UI Automation' 'pass' "title='$($main.Current.Name)' exe-sha256=$exeHash"
+        Assert-Check 'launch' 'app window reachable through UI Automation and owned by the verifier process' ($main.Current.ProcessId -eq $script:AppPid -and $main.Current.Name -ceq 'PDF Workstation') "title='$($main.Current.Name)' exe-sha256=$exeHash" | Out-Null
         Assert-Check 'launch' 'no native dialog or disabled main window at start' ((Test-MainEnabled) -and @(Get-NativeDialogs).Count -eq 0) | Out-Null
 
         $annotated = Join-Path $inDir 'annotated.pdf'
@@ -804,7 +869,7 @@ function Invoke-Run {
                 $web = Get-WebRoot
                 $combo = Wait-Ui -Root $web -Type 'ComboBox' -Name 'Destination, page 1'
                 $how = Set-ComboChoice $combo 'North Hub'
-                Add-Result 'forms-dropdown' 'dropdown option chosen through UI Automation' 'pass' "via $how pattern"
+                Add-Result 'forms-dropdown' 'dropdown option chosen through UI Automation' 'info' "via $how pattern"
                 Start-Sleep -Milliseconds 300
             } 'forms-dropdown-out.pdf' {
                 param($Path)
@@ -829,7 +894,7 @@ function Invoke-Run {
             Test-NativeDialogShell 'text-replacement' $dialog 'Save PDF with replaced text as a new file' 'text-replaced.pdf' 'PDF documents' | Out-Null
             Stop-NativeDialog $dialog
             $notice = Wait-HtmlText '*Save canceled*'
-            Add-Result 'text-replacement' 'Cancel reports "Save canceled" in the dialog' 'pass' $notice
+            Assert-Check 'text-replacement' 'Cancel reports "Save canceled" in the dialog' ($notice -like 'Save canceled*') $notice | Out-Null
             Assert-StateUnchanged 'text-replacement' $before (Get-AppState $outDir)
             & $trigger
             $dialog = Wait-NativeDialog
@@ -848,7 +913,7 @@ function Invoke-Run {
             Open-Menu-Item 'Replace full-page image*'
             $refusal = Wait-Ui -Root (Get-WebRoot) -Type 'Text' -Name '*image*' -Like -Seconds 10
             Assert-NoNativeDialog 'image-replacement' 'a document without a supported image opens no picker (refused before any native dialog)' | Out-Null
-            Add-Result 'image-replacement' 'refusal text for the unsupported document' 'pass' $refusal.Current.Name
+            Assert-Check 'image-replacement' 'the unsupported document is refused with an image-edit message' ($refusal.Current.Name -like '*image*') $refusal.Current.Name | Out-Null
             Click-Button -Name 'Dismiss message'
             Open-Pdf (Join-Path $inDir 'strict-image.pdf') 'strict-image.pdf'
             Open-Menu-Item 'Replace full-page image*'
@@ -861,7 +926,7 @@ function Invoke-Run {
             Test-NativeDialogShell 'image-replacement(pick)' $dialog 'Choose an exact-size replacement PNG or JPEG' $null 'PNG and JPEG images' | Out-Null
             Stop-NativeDialog $dialog
             $notice = Wait-HtmlText '*Replacement or output selection canceled*'
-            Add-Result 'image-replacement(pick)' 'Cancel at the picker reports the canceled notice' 'pass' $notice
+            Assert-Check 'image-replacement(pick)' 'Cancel at the picker reports the canceled notice' ($notice -like 'Replacement or output selection canceled*') $notice | Out-Null
             Assert-StateUnchanged 'image-replacement(pick)' $before (Get-AppState $outDir)
             & $trigger
             $dialog = Wait-NativeDialog
@@ -890,9 +955,21 @@ function Invoke-Run {
         else { Add-Result 'harness' 'harness completed' 'fail' $_.Exception.Message; try { Save-Diag 'harness-failure' (Get-WebRoot) } catch { } }
     }
     finally {
-        try { if ((Get-Process -Id $script:AppPid -ErrorAction SilentlyContinue) -and -not $foreign) { Close-AllDocuments } } catch { }
+        try { if ($script:AppPid -gt 4 -and (Get-Process -Id $script:AppPid -ErrorAction SilentlyContinue) -and -not $foreign) { Close-OwnDocuments } } catch { }
         Stop-OwnApp
-        try { [IO.File]::WriteAllText((Join-Path $WorkRoot 'results.json'), ($script:Results | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false)) } catch { }
+        try { [IO.File]::WriteAllText((Join-Path $script:RunDir 'results.json'), ($script:Results | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false)) } catch { }
+        # Remove only the recovery record files that appeared during this run (diff against the snapshot taken before launch).
+        try {
+            $created = @(Get-RecoveryRecords | Where-Object { $recoverySnapshot -notcontains $_ })
+            if ($script:SawForeign -or @(Get-OtherDevApps).Count -gt 0) {
+                if ($created.Count -gt 0) { Write-Host "Left $($created.Count) new recovery record(s) in place because another dev build was running." }
+            } else {
+                foreach ($record in $created) {
+                    if ((Split-Path -Parent $record) -ceq $recoveryDir -and $record.EndsWith('.smacrec', [StringComparison]::OrdinalIgnoreCase)) { Remove-Item -LiteralPath $record -Force }
+                }
+                if ($created.Count -gt 0) { Add-Result 'cleanup' 'recovery records created by this run removed' 'info' "$($created.Count) file(s)" }
+            }
+        } catch { Write-Host ('Recovery cleanup failed: ' + $_.Exception.Message) }
     }
     return $foreign
 }
@@ -903,7 +980,7 @@ $attemptLimit = [DateTime]::UtcNow.AddMinutes($WaitMinutes)
 for ($attempt = 1; [DateTime]::UtcNow -lt $attemptLimit -and -not $completed; $attempt++) {
     Wait-ForExclusive
     Write-Host "=== run attempt $attempt"
-    $foreign = Invoke-Run
+    $foreign = Invoke-Run -Attempt $attempt
     if (-not $foreign) { $completed = $true }
 }
 if (-not $completed) { Write-Host 'Gave up: another pdf-workstation process kept appearing.'; exit 2 }
@@ -913,3 +990,4 @@ $notAutomatable = @($script:Results | Where-Object { $_.status -eq 'not-automata
 Write-Host ''
 Write-Host ("Summary: {0} pass, {1} fail, {2} not automatable. Work root: {3}" -f (@($script:Results | Where-Object { $_.status -eq 'pass' }).Count), $failed.Count, $notAutomatable.Count, $WorkRoot)
 if ($failed.Count -gt 0) { exit 1 }
+if ($Strict -and $notAutomatable.Count -gt 0) { Write-Host 'Strict: not-automatable checks present.'; exit 2 }
