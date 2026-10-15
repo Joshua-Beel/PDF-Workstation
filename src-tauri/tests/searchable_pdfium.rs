@@ -8,12 +8,16 @@ use searchable_ocr::{map_words_to_display, parse_tesseract_tsv};
 use searchable_pdf::{write_searchable_pdf, SearchableRasterPage, SearchableWord};
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
-fn bind_pdfium() -> Pdfium {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    Pdfium::bind_to_library(root.join("resources/pdfium/bin/pdfium.dll"))
-        .map(Pdfium::new)
-        .unwrap()
+fn pdfium() -> &'static Pdfium {
+    static PDFIUM: OnceLock<Pdfium> = OnceLock::new();
+    PDFIUM.get_or_init(|| {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        Pdfium::bind_to_library(root.join("resources/pdfium/bin/pdfium.dll"))
+            .map(Pdfium::new)
+            .unwrap()
+    })
 }
 
 #[test]
@@ -57,7 +61,7 @@ fn unicode_words_extract_exactly_and_stay_inside_their_boxes() {
         words: words.clone(),
     };
     let bytes = write_searchable_pdf(&[expected]).unwrap();
-    let pdfium = bind_pdfium();
+    let pdfium = pdfium();
     let document = pdfium.load_pdf_from_byte_vec(bytes, None).unwrap();
     let page = document.pages().get(0).unwrap();
     let text = page.text().unwrap();
@@ -128,9 +132,7 @@ fn deterministic_fixtures_reopen_with_exact_pixels_and_pdfium_text() {
         &std::fs::read(fixture_root.join("oracle.json")).unwrap(),
     )
     .unwrap();
-    let pdfium = Pdfium::bind_to_library(root.join("resources/pdfium/bin/pdfium.dll"))
-        .map(Pdfium::new)
-        .unwrap();
+    let pdfium = pdfium();
 
     for fixture in oracle["fixtures"].as_array().unwrap() {
         let name = fixture["name"].as_str().unwrap();
