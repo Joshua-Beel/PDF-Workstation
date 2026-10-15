@@ -1,0 +1,30 @@
+import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+
+const verifier = readFileSync('scripts/verify-native-page-dialogs.ps1', 'utf8');
+const mainRs = readFileSync('src-tauri/src/main.rs', 'utf8');
+
+describe('native page-dialog verifier', () => {
+  it('drives the app only through accessibility patterns, never synthetic input', () => {
+    expect(verifier).not.toMatch(/SendKeys|SendInput|mouse_event|keybd_event|SetCursorPos|CopyFromScreen/);
+    expect(verifier).toContain('InvokePattern');
+    expect(verifier).toContain('ValuePattern');
+  });
+
+  it('refuses a system-drive work root, redirects the web view data, and always stops the app', () => {
+    expect(verifier).toContain('WorkRoot must not be on the system drive');
+    expect(verifier).toContain('WEBVIEW2_USER_DATA_FOLDER');
+    expect(verifier).toMatch(/finally \{[\s\S]*Kill\(\$true\)[\s\S]*app process closed/);
+  });
+
+  it('expects the dialog titles and default names that main.rs actually sets', () => {
+    for (const title of ['Save combined PDF as a new file', 'Save PDF with inserted pages as a new file', 'Save PDF with replaced pages as a new file', 'Choose a new folder for split PDFs', 'Choose one PNG or JPEG image', 'Save image as a new PDF', 'Choose PNG or JPEG images', 'Save images as a new PDF']) {
+      expect(mainRs).toContain(`set_title("${title}")`);
+      expect(verifier).toContain(`'${title}'`);
+    }
+    for (const name of ['combined.pdf', 'inserted-pages.pdf', 'replaced-pages.pdf', 'Split PDFs', 'images.pdf']) {
+      expect(mainRs).toContain(`set_file_name("${name}")`);
+      expect(verifier).toContain(`'${name}'`);
+    }
+  });
+});
