@@ -5,7 +5,8 @@ param(
     [string]$PdfiumPath,
     [string[]]$Scenario = @(),
     [int]$TimeoutSeconds = 30,
-    [switch]$DumpTrees
+    [switch]$DumpTrees,
+    [switch]$Strict
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -16,13 +17,18 @@ if (-not $AppPath) {
     $AppPath = Join-Path $targetRoot 'debug\pdf-workstation.exe'
 }
 if (-not $PdfiumPath) { $PdfiumPath = Join-Path $projectRoot 'src-tauri\resources\pdfium\bin\pdfium.dll' }
-if (-not $WorkRoot) {
-    $tmpRoot = if ($env:TEMP) { $env:TEMP } else { throw 'Set TEMP (or pass -WorkRoot) to a folder that is not on the system drive.' }
-    $WorkRoot = Join-Path $tmpRoot ('sm2-dialogs-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+$tmpBase = $null
+for ($ancestor = $projectRoot; $ancestor; $ancestor = Split-Path -Parent $ancestor) {
+    $candidate = Join-Path $ancestor 'tmp'
+    if ((Test-Path -LiteralPath $candidate -PathType Container) -and (Test-Path -LiteralPath (Join-Path $ancestor 'wt') -PathType Container)) { $tmpBase = [IO.Path]::GetFullPath($candidate); break }
 }
+if (-not $tmpBase) { throw 'Could not find the Smacrobat tmp folder (a tmp folder next to wt) above the repo.' }
+if (-not $WorkRoot) { $WorkRoot = Join-Path $tmpBase ('sm2-dialogs\run-' + (Get-Date -Format 'yyyyMMdd-HHmmss')) }
 $WorkRoot = [IO.Path]::GetFullPath($WorkRoot)
 $systemDrive = [IO.Path]::GetPathRoot([Environment]::GetFolderPath('Windows'))
 if ([IO.Path]::GetPathRoot($WorkRoot).Equals($systemDrive, [StringComparison]::OrdinalIgnoreCase)) { throw "WorkRoot must not be on the system drive ($systemDrive): $WorkRoot" }
+$allowedTmp = $tmpBase.TrimEnd([char]92) + [char]92
+if (-not ($WorkRoot.TrimEnd([char]92) + [char]92).StartsWith($allowedTmp, [StringComparison]::OrdinalIgnoreCase)) { throw "WorkRoot must be under the sibling tmp folder $allowedTmp (no UNC or other drives): $WorkRoot" }
 if (Test-Path -LiteralPath $WorkRoot) { throw "WorkRoot must be a fresh folder: $WorkRoot" }
 if (-not (Test-Path -LiteralPath $AppPath -PathType Leaf)) { throw "App executable not found: $AppPath" }
 if (-not (Test-Path -LiteralPath $PdfiumPath -PathType Leaf)) { throw "PDFium library not found: $PdfiumPath" }
@@ -106,9 +112,9 @@ $script:Deadline = $TimeoutSeconds
 $script:OpenItem = 'Open' + [char]0x2026 + '*'
 
 function Add-Result {
-    param([string]$Command,[string]$Check,[ValidateSet('pass','fail','not-automatable','finding')][string]$Status,[string]$Detail = '')
+    param([string]$Command,[string]$Check,[ValidateSet('pass','fail','not-automatable','finding','info')][string]$Status,[string]$Detail = '')
     $script:Results.Add([pscustomobject]@{ command = $Command; check = $Check; status = $Status; detail = $Detail })
-    $mark = switch ($Status) { 'pass' { 'PASS' } 'fail' { 'FAIL' } 'finding' { 'FIND' } default { 'N/A ' } }
+    $mark = switch ($Status) { 'pass' { 'PASS' } 'fail' { 'FAIL' } 'finding' { 'FIND' } 'info' { 'INFO' } default { 'N/A ' } }
     Write-Host ("[{0}] {1} :: {2}{3}" -f $mark, $Command, $Check, $(if ($Detail) { ' - ' + $Detail } else { '' }))
 }
 
@@ -569,7 +575,7 @@ try {
         $before = Get-AppState $outDir
         Invoke-Ui $toolsRow; Wait-HtmlDialog 'Combine PDFs' | Out-Null
         $preview = Read-DialogText '*then*pages.'
-        Add-Result 'combine' 'in-app dialog shows the order' 'pass' "$preview"
+        Assert-Check 'combine' 'in-app dialog lists b.pdf then a.pdf with 5 pages' ([bool]($preview -match 'b\.pdf.*then.*a\.pdf.*5 pages')) "$preview" | Out-Null
         Click-Button -Name 'Combine PDFs' -Last
         $dialog = Wait-NativeDialog
         Test-NativeDialogShell 'combine' $dialog 'Save combined PDF as a new file' 'combined.pdf' 'PDF documents' | Out-Null
@@ -665,7 +671,7 @@ try {
         Click-Button -Name 'Crop'; Wait-HtmlDialog 'Crop page 1' | Out-Null
         Set-UiValue (Wait-Ui -Root (Get-WebRoot) -Type 'Edit' -Name 'Left crop inset') '36'
         Set-UiValue (Wait-Ui -Root (Get-WebRoot) -Type 'Edit' -Name 'Right crop inset') '36'
-        Add-Result 'crop' 'crop dialog is in-app only (no native dialog involved in applying a crop)' 'pass' 'Apply crop is a pure IPC call; see main.rs crop_pages'
+        Add-Result 'crop' 'crop dialog is in-app only (no native dialog involved in applying a crop)' 'info' 'Apply crop is a pure IPC call; see main.rs crop_pages'
         $beforeDialogs = @(Get-NativeDialogs).Count
         Click-Button -Name 'Apply crop'
         Start-Sleep -Milliseconds 800
@@ -782,7 +788,7 @@ finally {
         }
     } catch { }
     try { if ($script:Process -and -not $script:Process.HasExited) { $script:Process.Kill($true); $script:Process.WaitForExit(5000) | Out-Null } } catch { }
-    $leftover = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Id -eq $script:AppPid })
+    $leftover = if ($script:AppPid -gt 0) { @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Id -eq $script:AppPid }) } else { @() }
     Add-Result 'cleanup' 'app process closed' $(if ($leftover.Count -eq 0) { 'pass' } else { 'fail' }) "pid=$($script:AppPid)"
     try {
         [IO.File]::WriteAllText((Join-Path $WorkRoot 'results.json'), ($script:Results | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
@@ -794,3 +800,4 @@ $notAutomatable = @($script:Results | Where-Object { $_.status -eq 'not-automata
 Write-Host ''
 Write-Host ("Summary: {0} pass, {1} fail, {2} not automatable. Work root: {3}" -f (@($script:Results | Where-Object { $_.status -eq 'pass' }).Count), $failed.Count, $notAutomatable.Count, $WorkRoot)
 if ($failed.Count -gt 0) { exit 1 }
+if ($Strict -and $notAutomatable.Count -gt 0) { Write-Host 'Strict: not-automatable checks present.'; exit 2 }

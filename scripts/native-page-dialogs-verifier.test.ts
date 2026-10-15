@@ -17,6 +17,18 @@ describe('native page-dialog verifier', () => {
     expect(verifier).toMatch(/finally \{[\s\S]*Kill\(\$true\)[\s\S]*app process closed/);
   });
 
+  it('confines the work root to the sibling tmp folder, filters by process id, and checks Cancel writes nothing', () => {
+    expect(verifier).toContain('WorkRoot must be under the sibling tmp folder');
+    expect(verifier).toContain('StartsWith($allowedTmp, [StringComparison]::OrdinalIgnoreCase)');
+    expect(verifier).not.toContain('$env:TEMP');
+    expect(verifier).toContain('ProcessIdProperty, $script:AppPid');
+    expect(verifier).toContain('$script:AppPid -gt 0');
+    expect(verifier).toContain('($Before.files -ceq $After.files)');
+    expect(verifier).toContain('no output written');
+    expect(verifier).toContain('[switch]$Strict');
+    expect(verifier).toMatch(/\$Strict -and \$notAutomatable\.Count -gt 0\) \{[^}]*exit 2/);
+  });
+
   it('expects the dialog titles and default names that main.rs actually sets', () => {
     for (const title of ['Save combined PDF as a new file', 'Save PDF with inserted pages as a new file', 'Save PDF with replaced pages as a new file', 'Choose a new folder for split PDFs', 'Choose one PNG or JPEG image', 'Save image as a new PDF', 'Choose PNG or JPEG images', 'Save images as a new PDF']) {
       expect(mainRs).toContain(`set_title("${title}")`);
