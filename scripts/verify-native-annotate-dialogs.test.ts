@@ -35,7 +35,11 @@ describe('native annotate dialog verifier', () => {
     expect(script).toContain('function Assert-AppPid');
     expect(script).toContain('$script:AppPid -le 4');
     expect(script).toContain('SM3_FOREIGN_APP');
-    expect(script).toContain('function Get-OtherDevApps');
+    expect(script).toContain('function Get-OtherApps');
+    expect(script).not.toMatch(/Test-UnderBase \$path/);
+    expect(script).toContain('whatever its path');
+    expect(script).toContain('$script:SawForeign -or @(Get-OtherApps).Count -gt 0');
+    expect(script).toContain('unattributable recovery records left in place');
     expect(script).toContain('$script:Process.Kill($true)');
   });
 

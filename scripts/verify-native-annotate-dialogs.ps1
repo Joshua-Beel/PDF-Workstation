@@ -230,22 +230,15 @@ function Assert-Check {
 
 function Assert-AppPid { if ($script:AppPid -le 4) { throw 'No verifier app process id is set (PID 0 and 4 are never driven).' } }
 
-function Get-OtherDevApps {
-    # Only other dev builds (a copy under the sibling tmp folder or an exe in a cargo target) count; an installed app does not.
-    $found = @()
-    foreach ($process in @(Get-Process -Name 'pdf-workstation' -ErrorAction SilentlyContinue)) {
-        if ($process.Id -eq $script:AppPid) { continue }
-        $path = $null
-        try { $path = $process.Path } catch { }
-        if ($path -and (Test-UnderBase $path (@($tmpBase, $projectRoot) + $targetBases))) { $found += $process }
-    }
-    return $found
+function Get-OtherApps {
+    # Any other pdf-workstation process counts, whatever its path (an installed app shares the recovery folder and the desktop).
+    return @(Get-Process -Name 'pdf-workstation' -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $script:AppPid })
 }
 
 function Assert-Exclusive {
-    # Another dev build means another stream's verifier started. Abort this run so the two never share a desktop.
-    $others = @(Get-OtherDevApps)
-    if ($others.Count -gt 0) { $script:SawForeign = $true; throw ('SM3_FOREIGN_APP: another pdf-workstation dev build appeared (pid ' + (($others | ForEach-Object Id) -join ',') + ').') }
+    # Any other pdf-workstation process means another verifier or the installed app is running. Abort this run so the two never share a desktop.
+    $others = @(Get-OtherApps)
+    if ($others.Count -gt 0) { $script:SawForeign = $true; throw ('SM3_FOREIGN_APP: another pdf-workstation process appeared (pid ' + (($others | ForEach-Object Id) -join ',') + ').') }
 }
 
 function Get-UiTreeText {
@@ -673,10 +666,10 @@ function Save-Copy-Cancel-And-Confirm {
 function Wait-ForExclusive {
     $limit = [DateTime]::UtcNow.AddMinutes($WaitMinutes)
     while ($true) {
-        $others = @(Get-OtherDevApps)
+        $others = @(Get-OtherApps)
         if ($others.Count -eq 0) { return }
-        if ([DateTime]::UtcNow -ge $limit) { throw "Another pdf-workstation dev build (pid $(($others | ForEach-Object Id) -join ',')) was still running after $WaitMinutes minutes." }
-        Write-Host ("{0:HH:mm:ss} waiting for another pdf-workstation dev build to exit (pid {1})..." -f (Get-Date), (($others | ForEach-Object Id) -join ','))
+        if ([DateTime]::UtcNow -ge $limit) { throw "Another pdf-workstation process (pid $(($others | ForEach-Object Id) -join ',')) was still running after $WaitMinutes minutes." }
+        Write-Host ("{0:HH:mm:ss} waiting for another pdf-workstation process to exit (pid {1})..." -f (Get-Date), (($others | ForEach-Object Id) -join ','))
         Start-Sleep -Seconds 30
     }
 }
@@ -961,8 +954,8 @@ function Invoke-Run {
         # Remove only the recovery record files that appeared during this run (diff against the snapshot taken before launch).
         try {
             $created = @(Get-RecoveryRecords | Where-Object { $recoverySnapshot -notcontains $_ })
-            if ($script:SawForeign -or @(Get-OtherDevApps).Count -gt 0) {
-                if ($created.Count -gt 0) { Write-Host "Left $($created.Count) new recovery record(s) in place because another dev build was running." }
+            if ($script:SawForeign -or @(Get-OtherApps).Count -gt 0) {
+                if ($created.Count -gt 0) { Write-Host "Left $($created.Count) unattributable recovery record(s) in place because another pdf-workstation process ran during this run; their source cannot be checked, so they are reported and not deleted." ; Add-Result 'cleanup' 'unattributable recovery records left in place' 'finding' "$($created.Count) file(s)" }
             } else {
                 foreach ($record in $created) {
                     if ((Split-Path -Parent $record) -ceq $recoveryDir -and $record.EndsWith('.smacrec', [StringComparison]::OrdinalIgnoreCase)) { Remove-Item -LiteralPath $record -Force }
