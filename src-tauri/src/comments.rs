@@ -420,4 +420,17 @@ mod tests {
             reopened.mark_saved(); let revision = reopened.revision; assert!(!reopened.dirty()); reopened.apply(PageEdit::Move { from: 0, to: 0 }).unwrap(); assert_eq!(reopened.revision, revision); assert_eq!(Document::load_mem(&reopened.export(None).unwrap()).unwrap().version, expected); assert!(reopened.proposed_comment(None, Some(&note_id), None).is_err()); assert_eq!(reopened.revision, revision); assert!(!reopened.dirty()); assert_eq!(session.source, source);
         }
     }
+
+    #[test]
+    #[ignore]
+    fn write_dialog_annotation_fixture() {
+        let dir = std::path::PathBuf::from(std::env::var("SM3_DIALOG_FIXTURE_DIR").expect("set SM3_DIALOG_FIXTURE_DIR"));
+        let mut session = EditSession::new(sample(), 6);
+        let next = session.proposed_comment(Some((0, CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 })), None, Some("Dialog verifier note")).unwrap(); session.commit_comments(next);
+        let next = session.proposed_highlight(Some((0, CropBox { left: 300.0, bottom: 200.0, right: 400.0, top: 240.0 })), None, Some("Dialog verifier area"), false).unwrap(); session.commit_comments(next);
+        let next = session.proposed_text_highlight(0, vec![CropBox { left: 54.0, bottom: 640.0, right: 250.0, top: 668.0 }], Some("Dialog verifier text")).unwrap(); session.commit_comments(next);
+        let bytes = session.export(None).unwrap();
+        assert_eq!(read(&Document::load_mem(&bytes).unwrap()).unwrap()[0].len(), 3);
+        std::fs::write(dir.join("annotated.pdf"), bytes).unwrap();
+    }
 }
