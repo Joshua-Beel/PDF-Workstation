@@ -516,11 +516,24 @@ impl IoWorker {
                 self.0.store(true, Ordering::Release);
             }
         }
-        if let Ok(thread) = unsafe { OpenThread(THREAD_TERMINATE, false, GetCurrentThreadId()) } {
-            *self.thread.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(unsafe { owned_handle(thread) });
-        }
+        let thread = unsafe { OpenThread(THREAD_TERMINATE, false, GetCurrentThreadId()) }.ok().map(|thread| unsafe { owned_handle(thread) });
+        self.arm(thread);
         let _done = MarkDone(&self.done);
         work(self)
+    }
+
+    /// Records this thread's handle so `cancel_blocked_io` can reach a blocked read or write. Without
+    /// one, blocked I/O could not be cancelled and the scoped join in `run_bounded` could wait on the
+    /// pipe forever, so the worker does no I/O at all: `stop` is set before `work` starts, the pipe
+    /// end is closed unread or unwritten, and the run reports `io_cancelled`.
+    fn arm(&self, thread: Option<OwnedHandle>) {
+        match thread {
+            Some(thread) => *self.thread.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(thread),
+            None => {
+                self.stop.store(true, Ordering::Release);
+                self.mark_cancelled();
+            }
+        }
     }
 
     fn is_done(&self) -> bool {
@@ -665,6 +678,10 @@ fn create_pipe(label: &str, stdin: bool) -> Result<(OwnedHandle, OwnedHandle), C
 
 fn write_input(label: &str, handle: OwnedHandle, input: &[u8], io: &IoWorker) -> Result<(), ChildSystemError> {
     let mut file = File::from(handle);
+    if io.should_stop() {
+        io.mark_cancelled();
+        return Ok(());
+    }
     match file.write_all(input) {
         Ok(()) => Ok(()),
         Err(_) if io.should_stop() => {
@@ -825,7 +842,13 @@ static STDERR_HANDLE: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::nu
 /// Not covered: fail-fast exits (`__fastfail`, which Rust's `abort` uses, `/GS` stack-cookie failures, heap
 /// corruption detection) bypass exception filters and still reach Windows Error Reporting, which may queue a
 /// report on the system drive.
+///
+/// Call it only from a child's own entry point: the helper's mode-flag branch in `main` before Tauri
+/// starts (helper step 3), or a test child. Never in the app process: it replaces the process-wide
+/// error mode, WER flags and unhandled-exception filter. Debug builds assert it runs once per process.
 pub(crate) fn harden_job_child_process() {
+    static HARDENED: AtomicBool = AtomicBool::new(false);
+    debug_assert!(!HARDENED.swap(true, Ordering::AcqRel), "harden_job_child_process must run once, from a child's own entry point");
     STDERR_HANDLE.store(std::io::stderr().as_raw_handle(), Ordering::Release);
     unsafe { SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX) };
     let _ = unsafe { WerSetFlags(WER_FAULT_REPORTING(WER_FAULT_REPORTING_NO_UI)) };
@@ -1198,6 +1221,26 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
         assert!(finished.io_cancelled);
         assert_eq!(finished.writer_result, Ok(()));
+    }
+
+    #[test]
+    fn a_worker_without_a_thread_handle_does_no_blocking_io() {
+        // Both pipes keep their other end open here, so a read or a large write would block forever;
+        // without a handle to cancel it with, the worker must not start the I/O at all.
+        let (read, held_write) = create_pipe(LABEL, false).unwrap();
+        let reader = IoWorker::default();
+        reader.arm(None);
+        let exceeded = AtomicBool::new(false);
+        let started = Instant::now();
+        assert_eq!(read_bounded(LABEL, read, 1024, &exceeded, &reader).unwrap(), Vec::<u8>::new());
+        assert!(reader.cancelled_io.load(Ordering::Acquire));
+        let (held_read, write) = create_pipe(LABEL, true).unwrap();
+        let writer = IoWorker::default();
+        writer.arm(None);
+        assert_eq!(write_input(LABEL, write, &vec![b'x'; 4 * 1024 * 1024], &writer), Ok(()));
+        assert!(writer.cancelled_io.load(Ordering::Acquire));
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        drop((held_write, held_read));
     }
 
     #[test]
