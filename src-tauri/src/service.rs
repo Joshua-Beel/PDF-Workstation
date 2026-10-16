@@ -357,7 +357,7 @@ impl PdfService {
                             let (session, info) = sessions.get(&id).ok_or("Document is closed")?;
                             if session.revision != revision { return Err("Document changed. Start printing again.".into()); }
                             let document: &std::rc::Rc<EngineDoc<'_>> = documents.get(&id).ok_or("Document is closed")?;
-                            if !matches!(document.permissions().security_handler_revision(), Ok(PdfSecurityHandlerRevision::Unprotected)) { return Err("Printing encrypted or restricted PDFs is not supported in this build.".into()); }
+                            if !document.is_unprotected() { return Err("Printing encrypted or restricted PDFs is not supported in this build.".into()); }
                             let token = next_print; next_print += 1;
                             let document = note_document(pdfium.as_ref().map_err(Clone::clone)?, document, session, &mut note_documents, id)?;
                             print_snapshots.insert(token, (document, session.plan.clone()));
@@ -371,13 +371,11 @@ impl PdfService {
                         let result = (|| {
                             let (document, plan) = print_snapshots.get(&token).ok_or("Print job has ended")?;
                             let spec = plan.get(index).ok_or("Print page is out of range")?;
-                            with_planned_page(document, spec, |page| {
-                                let (width, height) = print_dimensions(page.width().value, page.height().value, max_width, max_height)?;
-                                let bitmap = page.render_with_config(&PdfRenderConfig::new().set_fixed_size(width as i32, height as i32).set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(false).clear_before_rendering(true).set_clear_color(PdfColor::WHITE).render_annotations(true).render_form_data(true).use_print_quality(true)).map_err(|error| error.to_string())?;
-                                let bgra = bitmap.as_raw_bytes();
-                                if bitmap.width() != width as i32 || bitmap.height() != height as i32 || bgra.len() != width as usize * height as usize * 4 { return Err("Unexpected print bitmap layout.".into()); }
-                                Ok(PrintBitmap { width, height, bgra })
-                            })
+                            let (page_width, page_height) = document.planned_page_size(spec)?;
+                            let (width, height) = print_dimensions(page_width, page_height, max_width, max_height)?;
+                            let mut bgra = vec![0; crate::pdf_engine::bgra_len(width, height).ok_or("Unexpected print bitmap layout.")?];
+                            document.render_bgra_into(PageTarget::Planned(spec), RenderMode::Print, width, height, &mut bgra).map_err(|error| render_message(error, "Unexpected print bitmap layout."))?;
+                            Ok(PrintBitmap { width, height, bgra })
                         })();
                         let _ = reply.send(result);
                     }
@@ -404,12 +402,12 @@ impl PdfService {
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
                             let mut export_note_documents = HashMap::new();
                             let document = note_document(engine, original, session, &mut export_note_documents, id)?;
-                            let bgra = with_planned_page(&document, &spec, |page| {
-                                let bitmap = page.render_with_config(&PdfRenderConfig::new().set_fixed_size(dimensions.width as i32, dimensions.height as i32).set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(false).clear_before_rendering(true).set_clear_color(PdfColor::WHITE).render_annotations(true).render_form_data(true).use_print_quality(true)).map_err(|error| format!("Could not render the {} page: {error}", format.label()))?;
-                                let bgra = bitmap.as_raw_bytes();
-                                let expected = usize::try_from(u64::from(dimensions.width) * u64::from(dimensions.height) * 4).map_err(|_| format!("The {} bitmap size is out of range.", format.label()))?;
-                                if bitmap.width() != dimensions.width as i32 || bitmap.height() != dimensions.height as i32 || bitmap.format().map_err(|error| format!("Could not inspect the {} bitmap format: {error}", format.label()))? != PdfBitmapFormat::BGRA || bgra.len() != expected { return Err(format!("Unexpected {} export bitmap layout.", format.label())); }
-                                Ok(bgra)
+                            let mut bgra = vec![0; crate::pdf_engine::bgra_len(dimensions.width, dimensions.height).ok_or_else(|| format!("The {} bitmap size is out of range.", format.label()))?];
+                            document.render_bgra_into(PageTarget::Planned(&spec), RenderMode::Print, dimensions.width, dimensions.height, &mut bgra).map_err(|error| match error {
+                                RenderError::Page(error) => error,
+                                RenderError::Render(error) => format!("Could not render the {} page: {error}", format.label()),
+                                RenderError::Format(error) => format!("Could not inspect the {} bitmap format: {error}", format.label()),
+                                RenderError::Layout => format!("Unexpected {} export bitmap layout.", format.label()),
                             })?;
                             if reply.is_closed() { return Err(format!("{} export was canceled.", format.label())); }
                             crate::page_image::write_page_image(&path, dimensions, dpi, &bgra, format, || reply.is_closed())?;
@@ -447,12 +445,12 @@ impl PdfService {
                             let mut raster_pages = Vec::with_capacity(plan.pages.len());
                             for (index, raster) in plan.pages.iter().enumerate() {
                                 if reply.is_closed() { return Err("Redaction was canceled.".into()); }
-                                let bgra = with_planned_page(&document, &raster.spec, |page| {
-                                    let bitmap = page.render_with_config(&PdfRenderConfig::new().set_fixed_size(raster.dimensions.width as i32, raster.dimensions.height as i32).set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(false).clear_before_rendering(true).set_clear_color(PdfColor::WHITE).render_annotations(true).render_form_data(true).use_print_quality(true)).map_err(|error| format!("Could not render redaction page {}: {error}", index + 1))?;
-                                    let bgra = bitmap.as_raw_bytes();
-                                    let expected = usize::try_from(u64::from(raster.dimensions.width) * u64::from(raster.dimensions.height) * 4).map_err(|_| "The redaction bitmap size is out of range.")?;
-                                    if bitmap.width() != raster.dimensions.width as i32 || bitmap.height() != raster.dimensions.height as i32 || bitmap.format().map_err(|error| format!("Could not inspect the redaction bitmap: {error}"))? != PdfBitmapFormat::BGRA || bgra.len() != expected { return Err("Unexpected redaction bitmap layout.".into()); }
-                                    Ok(bgra)
+                                let mut bgra = vec![0; crate::pdf_engine::bgra_len(raster.dimensions.width, raster.dimensions.height).ok_or("The redaction bitmap size is out of range.")?];
+                                document.render_bgra_into(PageTarget::Planned(&raster.spec), RenderMode::Print, raster.dimensions.width, raster.dimensions.height, &mut bgra).map_err(|error| match error {
+                                    RenderError::Page(error) => error,
+                                    RenderError::Render(error) => format!("Could not render redaction page {}: {error}", index + 1),
+                                    RenderError::Format(error) => format!("Could not inspect the redaction bitmap: {error}"),
+                                    RenderError::Layout => "Unexpected redaction bitmap layout.".into(),
                                 })?;
                                 let rgb = crate::page_image::bgra_to_rgb(raster.dimensions, &bgra, PageImageFormat::Png)?;
                                 raster_pages.push(crate::raster_redaction::RasterRedactionPage {
@@ -1633,14 +1631,15 @@ fn checked_read_text_bytes(current: usize, additional: usize, message: &str) -> 
     Ok(total)
 }
 
-fn checked_page_image_request(session: &EditSession, document: &PdfDocument<'_>, revision: u64, page: u16, dpi: u16, format: PageImageFormat) -> Result<(crate::page_image::RasterDimensions, PageSpec), String> {
+fn checked_page_image_request(session: &EditSession, document: &EngineDoc<'_>, revision: u64, page: u16, dpi: u16, format: PageImageFormat) -> Result<(crate::page_image::RasterDimensions, PageSpec), String> {
     if session.revision != revision { return Err("Document changed. Export the page image again.".into()); }
-    if !matches!(document.permissions().security_handler_revision(), Ok(PdfSecurityHandlerRevision::Unprotected)) {
+    if !document.is_unprotected() {
         return Err("Exporting images from encrypted or restricted PDFs is not supported in this build.".into());
     }
     session.page_image_export_guard()?;
     let spec = session.plan.get(usize::from(page)).ok_or_else(|| format!("{} export page is out of range", format.label()))?.clone();
-    let dimensions = with_planned_page(document, &spec, |page| crate::page_image::dimensions(page.width().value, page.height().value, dpi, format))?;
+    let (width, height) = document.planned_page_size(&spec)?;
+    let dimensions = crate::page_image::dimensions(width, height, dpi, format)?;
     Ok((dimensions, spec))
 }
 
@@ -1657,13 +1656,13 @@ struct RasterRedactionPlan {
 
 fn checked_raster_redaction_request(
     session: &EditSession,
-    document: &PdfDocument<'_>,
+    document: &EngineDoc<'_>,
     revision: u64,
     selected_page: u16,
     rectangles: &[crate::raster_redaction::RasterRedactionRect],
 ) -> Result<RasterRedactionPlan, String> {
     if session.revision != revision { return Err("Document changed. Start redaction again.".into()); }
-    if !matches!(document.permissions().security_handler_revision(), Ok(PdfSecurityHandlerRevision::Unprotected)) {
+    if !document.is_unprotected() {
         return Err("Redaction of encrypted or restricted PDFs is not supported in this build.".into());
     }
     session.page_image_export_guard()?;
@@ -1672,12 +1671,8 @@ fn checked_raster_redaction_request(
     let mut pages = Vec::with_capacity(session.plan.len());
     let mut total_pixels = 0u64;
     for spec in &session.plan {
-        let (dimensions, page_width, page_height) = with_planned_page(document, spec, |page| {
-            let page_width = page.width().value;
-            let page_height = page.height().value;
-            let dimensions = crate::page_image::dimensions(page_width, page_height, 150, PageImageFormat::Png)?;
-            Ok((dimensions, page_width, page_height))
-        })?;
+        let (page_width, page_height) = document.planned_page_size(spec)?;
+        let dimensions = crate::page_image::dimensions(page_width, page_height, 150, PageImageFormat::Png)?;
         total_pixels = total_pixels.checked_add(u64::from(dimensions.width) * u64::from(dimensions.height)).ok_or("The redaction pixel count is out of range.")?;
         if total_pixels > 32_000_000 { return Err("The redacted copy exceeds the 32 megapixel aggregate limit at 150 DPI.".into()); }
         pages.push(RasterRedactionPagePlan { spec: spec.clone(), dimensions, page_width, page_height });
