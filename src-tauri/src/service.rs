@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, HashSet, VecDeque}, io::Write, path::PathBuf, sync::{Arc, Mutex, mpsc, OnceLock}};
 use pdfium_render::prelude::*;
-use crate::pdf_engine::{EngineDocument, PageSize, PageTarget, PdfEngine, ProbeError, RenderError, RenderMode, with_planned_page};
+use crate::pdf_engine::{EngineDocument, PageSize, PageTarget, PdfEngine, ProbeError, RenderError, RenderMode, TextError};
 type Engine = crate::pdf_engine::InProcessEngine;
 type EngineDoc<'a> = <Engine as PdfEngine>::Document<'a>;
 use serde::{Deserialize, Serialize};
@@ -523,22 +523,28 @@ impl PdfService {
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
                             let check = engine.load_from_vec(prepared.bytes.clone(), None).map_err(|error| format!("Searchable OCR output validation failed: {error}"))?;
                             ensure_active()?;
-                            if check.pages().len() as usize != page_count { return Err("Searchable OCR output page count validation failed.".into()); }
+                            if check.page_count() != page_count { return Err("Searchable OCR output page count validation failed.".into()); }
                             for (index, expected) in prepared.pages.iter().enumerate() {
                                 if std::time::Instant::now() >= prepared.deadline { return Err("OCR exceeded its time limit.".into()); }
                                 if reply.is_closed() { return Err("OCR was cancelled.".into()); }
-                                let page = check.pages().get(index as i32).map_err(|error| format!("Could not reopen searchable OCR page {}: {error}", index + 1))?;
-                                let bitmap = page.render_with_config(&PdfRenderConfig::new().set_fixed_size(expected.image_width as i32, expected.image_height as i32).set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(false).clear_before_rendering(true).set_clear_color(PdfColor::WHITE)).map_err(|error| format!("Could not render searchable OCR page {}: {error}", index + 1))?;
+                                let mut bgra = vec![0; crate::pdf_engine::bgra_len(expected.image_width, expected.image_height).ok_or("Searchable OCR render length overflows.")?];
+                                check.render_bgra_into(PageTarget::Source(index), RenderMode::Plain, expected.image_width, expected.image_height, &mut bgra).map_err(|error| match error {
+                                    RenderError::Page(error) => format!("Could not reopen searchable OCR page {}: {error}", index + 1),
+                                    RenderError::Render(error) | RenderError::Format(error) => format!("Could not render searchable OCR page {}: {error}", index + 1),
+                                    RenderError::Layout => format!("Searchable OCR page {} has an unexpected render layout.", index + 1),
+                                })?;
                                 ensure_active()?;
-                                let bgra = bitmap.as_raw_bytes();
                                 let expected_bgra = expected.rgb.len().checked_div(3).and_then(|pixels| pixels.checked_mul(4)).ok_or("Searchable OCR render length overflows.")?;
                                 if bgra.len() != expected_bgra || bgra.chunks_exact(4).any(|pixel| pixel[3] != 255) { return Err(format!("Searchable OCR page {} has an unexpected render layout.", index + 1)); }
                                 let rgb = bgra.chunks_exact(4).flat_map(|pixel| [pixel[2], pixel[1], pixel[0]]).collect::<Vec<_>>();
                                 if rgb != expected.rgb { return Err(format!("Searchable OCR page {} pixels changed after reopening.", index + 1)); }
-                                let text = page.text().map_err(|error| format!("Could not extract searchable OCR page {} text: {error}", index + 1))?;
+                                let text = check.visible_text(PageTarget::Source(index)).map_err(|error| match error {
+                                    TextError::Page(error) => format!("Could not reopen searchable OCR page {}: {error}", index + 1),
+                                    TextError::Text(error) => format!("Could not extract searchable OCR page {} text: {error}", index + 1),
+                                    TextError::Bounds(error) => error,
+                                })?;
                                 ensure_active()?;
-                                let visible = page.boundaries().bounding().map_err(|error| error.to_string())?.bounds;
-                                if text.inside_rect(visible) != prepared.expected_text[index] { return Err(format!("Searchable OCR page {} extraction differs from the OCR text.", index + 1)); }
+                                if text != prepared.expected_text[index] { return Err(format!("Searchable OCR page {} extraction differs from the OCR text.", index + 1)); }
                             }
                             ensure_active()?;
                             if reply.is_closed() { return Err("OCR was cancelled.".into()); }
@@ -573,30 +579,15 @@ impl PdfService {
                             let mut ocr_note_documents = HashMap::new();
                             let document = note_document(engine, original, session, &mut ocr_note_documents, request.document_id)?;
                             cancellation.ensure_runnable().map_err(|error| error.to_string())?;
-                            let bgra = with_planned_page(&document, &spec, |page| {
-                                if cancellation.is_cancelled() || reply.is_closed() { return Err("OCR was cancelled".into()); }
-                                #[cfg(test)]
-                                { ocr_work.entry(request.document_id).or_default().rendered += 1; }
-                                let bitmap = page.render_with_config(&PdfRenderConfig::new()
-                                    .set_fixed_size(dimensions.width as i32, dimensions.height as i32)
-                                    .set_format(PdfBitmapFormat::BGRA)
-                                    .set_reverse_byte_order(false)
-                                    .clear_before_rendering(true)
-                                    .set_clear_color(PdfColor::WHITE)
-                                    .render_annotations(true)
-                                    .render_form_data(true)
-                                    .use_print_quality(true))
-                                    .map_err(|error| format!("Could not render the OCR page: {error}"))?;
-                                let bgra = bitmap.as_raw_bytes();
-                                if bitmap.width() != dimensions.width as i32
-                                    || bitmap.height() != dimensions.height as i32
-                                    || bitmap.format().map_err(|error| format!("Could not inspect the OCR bitmap format: {error}"))? != PdfBitmapFormat::BGRA
-                                    || bgra.len() != dimensions.bgra_bytes
-                                {
-                                    return Err("Unexpected OCR bitmap layout.".into());
-                                }
-                                drop(bitmap);
-                                Ok(bgra)
+                            if cancellation.is_cancelled() || reply.is_closed() { return Err("OCR was cancelled".into()); }
+                            #[cfg(test)]
+                            { ocr_work.entry(request.document_id).or_default().rendered += 1; }
+                            let mut bgra = vec![0; dimensions.bgra_bytes];
+                            document.render_bgra_into(PageTarget::Planned(&spec), RenderMode::Print, dimensions.width, dimensions.height, &mut bgra).map_err(|error| match error {
+                                RenderError::Page(error) => error,
+                                RenderError::Render(error) => format!("Could not render the OCR page: {error}"),
+                                RenderError::Format(error) => format!("Could not inspect the OCR bitmap format: {error}"),
+                                RenderError::Layout => "Unexpected OCR bitmap layout.".into(),
                             })?;
                             drop(document);
                             drop(ocr_note_documents);
@@ -1685,20 +1676,17 @@ fn checked_raster_redaction_request(
 #[cfg(windows)]
 fn checked_ocr_request(
     session: &EditSession,
-    document: &PdfDocument<'_>,
+    document: &EngineDoc<'_>,
     request: crate::ocr::OcrPageRequest,
 ) -> Result<(crate::ocr::OcrRasterDimensions, PageSpec, f32, f32), String> {
     if session.revision != request.revision { return Err("Document changed. Start OCR again.".into()); }
-    if !matches!(document.permissions().security_handler_revision(), Ok(PdfSecurityHandlerRevision::Unprotected)) {
+    if !document.is_unprotected() {
         return Err("OCR of encrypted or restricted PDFs is not supported in this build.".into());
     }
     session.page_image_export_guard()?;
     let spec = session.plan.get(usize::from(request.page)).ok_or("OCR page is out of range")?.clone();
-    let (dimensions, width, height) = with_planned_page(document, &spec, |page| {
-        let width = page.width().value;
-        let height = page.height().value;
-        Ok((crate::ocr::raster_dimensions(width, height)?, width, height))
-    })?;
+    let (width, height) = document.planned_page_size(&spec)?;
+    let dimensions = crate::ocr::raster_dimensions(width, height)?;
     Ok((dimensions, spec, width, height))
 }
 #[derive(Clone, Copy, Serialize)]
@@ -1851,15 +1839,16 @@ impl RequestSender{
 }
 
 #[cfg(windows)]
-fn checked_searchable_ocr_request(session: &EditSession, document: &PdfDocument<'_>, revision: u64) -> Result<usize, String> {
+fn checked_searchable_ocr_request(session: &EditSession, document: &EngineDoc<'_>, revision: u64) -> Result<usize, String> {
     if session.revision != revision { return Err("Document changed. Start searchable OCR again.".into()); }
-    if !matches!(document.permissions().security_handler_revision(), Ok(PdfSecurityHandlerRevision::Unprotected)) { return Err("Searchable OCR of encrypted or restricted PDFs is not supported in this build.".into()); }
+    if !document.is_unprotected() { return Err("Searchable OCR of encrypted or restricted PDFs is not supported in this build.".into()); }
     session.page_image_export_guard()?;
     session.text_extraction_permission()?;
     if session.plan.is_empty() || session.plan.len() > crate::searchable_ocr_job::MAX_DOCUMENT_PAGES { return Err("Searchable OCR supports 1 to 32 current pages.".into()); }
     let mut pixels = 0_u64;
     for spec in &session.plan {
-        let dimensions = with_planned_page(document, spec, |page| crate::ocr::raster_dimensions(page.width().value, page.height().value))?;
+        let (width, height) = document.planned_page_size(spec)?;
+        let dimensions = crate::ocr::raster_dimensions(width, height)?;
         pixels = pixels.checked_add(u64::from(dimensions.width).checked_mul(u64::from(dimensions.height)).ok_or("Searchable OCR pixel count overflows.")?).ok_or("Searchable OCR pixel count overflows.")?;
         if pixels > crate::searchable_pdf::MAX_SEARCHABLE_PIXELS { return Err("The searchable OCR copy exceeds the 32 MiPixel aggregate limit at 150 DPI.".into()); }
     }
