@@ -1,14 +1,15 @@
 {
   "schema": 1,
   "target": "x86_64-pc-windows-msvc",
-  "coverage": "Conservative resolved Cargo Windows graph, including build/auxiliary packages, plus non-development npm lock entries. Runtime-candidate is not proof of linked code. PDFium notices are packaged separately. Five exact MPL-2.0 crate source archives are packaged with verified locations and hashes; this collection does not determine the app license or complete release licensing review.",
+  "coverage": "Conservative resolved Cargo Windows graph, including build/auxiliary packages, plus non-development npm lock entries. Runtime-candidate is not proof of linked code. PDFium notices are packaged separately. Five exact MPL-2.0 crate source archives are packaged with verified locations and hashes; this collection does not determine the app license or complete release licensing review. The ocr-engine records cover the Tesseract engine, Leptonica and the English model packaged under resources/ocr/ by an installer built with an OCR setup root; their license texts are checked against scripts/ocr/pins.json.",
   "inputHashes": {
     "src-tauri/Cargo.lock": "3d62d3b63229d7a66f4050d86fb24035438bc7471e47428e833f076324128004",
     "src-tauri/Cargo.toml": "cc27272470937a5e71bcf9e416267327bf1e3d9673689b459dc530ce14df77a3",
     "package-lock.json": "6f1441c57c13489547c54c3e845d12827b907b9cdb1d2f3d54c3321da7683801",
     "package.json": "e4ee9f328ec0dafc305cdee6e632dab65763ed1fd092cac204a3a13a3b314455",
     "scripts/notice-supplements/manifest.json": "f0700cbb9d20d43f42d709852e7961194d22937a41bf1fad5063e27f5fae2121",
-    "scripts/mpl-source-archives.manifest.json": "d5575a6facde7afb4f4faae54009bb776da8b0d1410c68de1915c7a46a73e915"
+    "scripts/mpl-source-archives.manifest.json": "d5575a6facde7afb4f4faae54009bb776da8b0d1410c68de1915c7a46a73e915",
+    "scripts/ocr/pins.json": "4612743a7adf0c49ef6c7c6da839a6a4f38312e962cfee2c5caadd10e18cd50a"
   },
   "issues": [],
   "packages": [
@@ -6452,6 +6453,60 @@
         {
           "path": "LICENSE",
           "sha256": "52412d7bc7ce4157ea628bbaacb8829e0a9cb3c58f57f99176126bc8cf2bfc85"
+        }
+      ]
+    },
+    {
+      "ecosystem": "ocr-engine",
+      "name": "leptonica",
+      "version": "1.87.0",
+      "license": "BSD-2-Clause",
+      "source": "https://github.com/DanBloomberg/leptonica/archive/refs/tags/1.87.0.tar.gz",
+      "scope": "ocr-engine-resource",
+      "notices": [
+        {
+          "path": "upstream-supplement/leptonica-1.87.0-leptonica-license.txt",
+          "sha256": "87829abb5bbb00b55a107365da89e9a33f86c4250169e5a1e5588505be7d5806",
+          "provenance": {
+            "url": "leptonica-license.txt in https://github.com/DanBloomberg/leptonica/archive/refs/tags/1.87.0.tar.gz",
+            "sourceCommit": "13275a278eb55b5746e33f95fbf5a2c8f604b3ab"
+          }
+        }
+      ]
+    },
+    {
+      "ecosystem": "ocr-engine",
+      "name": "tessdata_fast-eng",
+      "version": "4.1.0",
+      "license": "Apache-2.0",
+      "source": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/65727574dfcd264acbb0c3e07860e4e9e9b22185/eng.traineddata",
+      "scope": "ocr-engine-resource",
+      "notices": [
+        {
+          "path": "upstream-supplement/tessdata_fast-4.1.0-LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "provenance": {
+            "url": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/65727574dfcd264acbb0c3e07860e4e9e9b22185/LICENSE",
+            "sourceCommit": "65727574dfcd264acbb0c3e07860e4e9e9b22185"
+          }
+        }
+      ]
+    },
+    {
+      "ecosystem": "ocr-engine",
+      "name": "tesseract",
+      "version": "5.5.3",
+      "license": "Apache-2.0",
+      "source": "https://github.com/tesseract-ocr/tesseract/archive/refs/tags/5.5.3.tar.gz",
+      "scope": "ocr-engine-resource",
+      "notices": [
+        {
+          "path": "upstream-supplement/tesseract-5.5.3-LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "provenance": {
+            "url": "LICENSE in https://github.com/tesseract-ocr/tesseract/archive/refs/tags/5.5.3.tar.gz",
+            "sourceCommit": "db0ec62f81b0737fbbe184d8fea40af5738f8eef"
+          }
         }
       ]
     }

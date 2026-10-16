@@ -21,6 +21,21 @@ export function supplementalFiles(folder, packageKey) {
   return { crateCommit: entry.crateCommit, files };
 }
 
+export function ocrEngineRecords(root) {
+  const pins = JSON.parse(readFileSync(join(root, 'scripts/ocr/pins.json'), 'utf8'));
+  const folder = join(root, 'scripts/notice-supplements');
+  const components = [
+    { name: 'tesseract', version: pins.tesseract.version, license: 'Apache-2.0', source: pins.tesseract.archive.url, sourceCommit: pins.tesseract.commit, file: `tesseract-${pins.tesseract.version}-LICENSE`, upstream: `${pins.tesseract.license.source} in ${pins.tesseract.archive.url}`, pin: pins.tesseract.license },
+    { name: 'leptonica', version: pins.leptonica.version, license: 'BSD-2-Clause', source: pins.leptonica.archive.url, sourceCommit: pins.leptonica.commit, file: `leptonica-${pins.leptonica.version}-${pins.leptonica.license.source}`, upstream: `${pins.leptonica.license.source} in ${pins.leptonica.archive.url}`, pin: pins.leptonica.license },
+    { name: `tessdata_fast-${pins.model.language}`, version: pins.model.version, license: 'Apache-2.0', source: pins.model.data.url, sourceCommit: pins.model.commit, file: `tessdata_fast-${pins.model.version}-LICENSE`, upstream: pins.model.license.url, pin: pins.model.license },
+  ];
+  return components.map(component => {
+    const bytes = readFileSync(join(folder, component.file));
+    if (bytes.length !== component.pin.bytes || hash(bytes) !== component.pin.sha256.toLowerCase()) throw new Error(`OCR license text does not match scripts/ocr/pins.json: ${component.file}`);
+    return { ecosystem: 'ocr-engine', name: component.name, version: component.version, license: component.license, source: component.source, scope: 'ocr-engine-resource', files: [{ path: `upstream-supplement/${component.file}`, sha256: hash(bytes), provenance: { url: component.upstream, sourceCommit: component.sourceCommit }, text: bytes.toString('utf8') }] };
+  });
+}
+
 export function noticeFiles(root) {
   const found = [];
   function visit(folder) {
@@ -93,6 +108,7 @@ export function collectInventory(root) {
     const files = noticeFiles(folder);
     records.push({ ecosystem: 'npm', name: pkg.name, version: pkg.version, license: entry.license ?? pkg.license ?? null, source: entry.resolved ?? null, scope: 'production-lock-entry', files });
   }
+  records.push(...ocrEngineRecords(root));
   records.sort((a, b) => `${a.ecosystem}/${a.name}/${a.version}`.localeCompare(`${b.ecosystem}/${b.name}/${b.version}`, 'en'));
   const issues = records.flatMap(record => {
     const packageName = `${record.ecosystem}:${record.name}@${record.version}`;
@@ -105,15 +121,15 @@ export function collectInventory(root) {
   const inventory = {
     schema: 1,
     target: 'x86_64-pc-windows-msvc',
-    coverage: 'Conservative resolved Cargo Windows graph, including build/auxiliary packages, plus non-development npm lock entries. Runtime-candidate is not proof of linked code. PDFium notices are packaged separately. Five exact MPL-2.0 crate source archives are packaged with verified locations and hashes; this collection does not determine the app license or complete release licensing review.',
-    inputHashes: Object.fromEntries(['src-tauri/Cargo.lock', 'src-tauri/Cargo.toml', 'package-lock.json', 'package.json', 'scripts/notice-supplements/manifest.json', 'scripts/mpl-source-archives.manifest.json'].map(path => [path, hash(normalizeLines(readFileSync(join(root, path), 'utf8')))])),
+    coverage: 'Conservative resolved Cargo Windows graph, including build/auxiliary packages, plus non-development npm lock entries. Runtime-candidate is not proof of linked code. PDFium notices are packaged separately. Five exact MPL-2.0 crate source archives are packaged with verified locations and hashes; this collection does not determine the app license or complete release licensing review. The ocr-engine records cover the Tesseract engine, Leptonica and the English model packaged under resources/ocr/ by an installer built with an OCR setup root; their license texts are checked against scripts/ocr/pins.json.',
+    inputHashes: Object.fromEntries(['src-tauri/Cargo.lock', 'src-tauri/Cargo.toml', 'package-lock.json', 'package.json', 'scripts/notice-supplements/manifest.json', 'scripts/mpl-source-archives.manifest.json', 'scripts/ocr/pins.json'].map(path => [path, hash(normalizeLines(readFileSync(join(root, path), 'utf8')))])),
     issues,
     packages: records.map(({ files, ...record }) => ({ ...record, notices: files.map(({ text, ...file }) => file) })),
   };
   const text = ['THIRD-PARTY DEPENDENCY NOTICES', '', inventory.coverage, '', 'Unresolved collection/review items:', ...(issues.length ? issues.map(issue => `- ${issue.package}: ${issue.issue}`) : ['- None recorded by this notice collection.']), '', ...records.flatMap(record => [
     '='.repeat(78), `${record.ecosystem}: ${record.name} ${record.version}`, `Declared license: ${record.license ?? 'UNKNOWN'}`, `Scope: ${record.scope}`, `Source: ${record.source ?? 'UNKNOWN'}`, '',
     ...(record.sourceArchive ? [`Packaged source archive: ${record.sourceArchive.installedResourcePath} (relative to the application's resource directory)`, `Packaged source repository path: ${record.sourceArchive.repositoryPath}`, `Official source archive: ${record.sourceArchive.url}`, `Source archive SHA-256: ${record.sourceArchive.sha256}`, ''] : []),
-    ...(record.files.length ? record.files.flatMap(file => [`--- ${file.path} (SHA-256 ${file.sha256}) ---`, ...(file.provenance ? [`Upstream: ${file.provenance.url}`, `Published crate commit: ${file.provenance.crateCommit}`, `Source evidence: ${file.provenance.evidence}`] : []), file.text, '']) : ['No standalone license/notice file was found in the installed package.', '']),
+    ...(record.files.length ? record.files.flatMap(file => [`--- ${file.path} (SHA-256 ${file.sha256}) ---`, ...(file.provenance?.sourceCommit ? [`Upstream: ${file.provenance.url}`, `Upstream source commit: ${file.provenance.sourceCommit}`] : file.provenance ? [`Upstream: ${file.provenance.url}`, `Published crate commit: ${file.provenance.crateCommit}`, `Source evidence: ${file.provenance.evidence}`] : []), file.text, '']) : ['No standalone license/notice file was found in the installed package.', '']),
   ])].join('\n');
   return { inventory, text };
 }

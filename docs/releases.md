@@ -64,6 +64,24 @@ The other `release` environment secrets are `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`
 
 The release workflow installs pinned `artifact-signing-cli` 0.11.0 and invokes `npm run installer -- -AzureSigning`. The Tauri signing hook applies Azure Authenticode signatures during bundling, before the final installer receives its Tauri updater signature. It then requires valid timestamped publisher signatures on both the app executable and installer before generating the manifest or uploading assets. Missing configuration or invalid signatures fail the release; the workflow never falls back to unsigned publishing. Local `npm run installer` remains a development build without Azure publisher signing. See [Tauri's Azure signing integration](https://v2.tauri.app/distribute/sign/windows/#azure-artifact-signing).
 
+### OCR in the default installer
+
+The maintainer ruled on 2026-10-14 that every installer includes Tesseract OCR: the engine, the English fast model and their license texts, starting with version 0.3.0. In this source only the build side is done:
+
+- The generated third-party notices list Tesseract 5.5.3 (Apache-2.0), Leptonica 1.87.0 (BSD-2-Clause) and the English fast model 4.1.0 (Apache-2.0) in every build. Their texts are checked against `scripts/ocr/pins.json`; see the [license inventory](license-inventory.md).
+- The manual `windows-validation.yml` workflow builds a fresh pinned engine with `scripts/setup-ocr.ps1`, then an unsigned installer with `build-installer.ps1 -UnsignedLocal -OcrSetupRoot`, and fails unless the extraction proof packages the five OCR resources. It has not run hosted yet. The only hosted engine build so far ran on Windows 2022 (`ocr-signed-artifact.yml`); this workflow uses `windows-latest`, as `release.yml` does.
+- `release.yml` does not pass an OCR setup yet, and the Azure-signed release path still refuses one (below). A tag cut from this source would therefore publish an installer without OCR. Wiring OCR into the signed release changes the signing path, so it is a step of the release cut, done with the rest of signing before the 0.3.0 tag. The Step 1 and Step 2 draft verifiers still require an installer without OCR resources and change in the same step.
+- The engine's trusted identity is unchanged. The app embeds the SHA-256 of the engine named by the setup manifest it was built with; for a signed build that is the signed engine's hash, captured after Authenticode signing. A local or unsigned engine hash is never a release pin.
+
+A local build with OCR is a development build, not a release:
+
+```powershell
+pwsh -NoProfile -File scripts/setup-ocr.ps1 -OutputRoot target/ocr-setup
+pwsh -NoProfile -File scripts/build-installer.ps1 -UnsignedLocal -OcrSetupRoot target/ocr-setup -OutputRoot target/installer-proof-1 -SourceRevision (git rev-parse HEAD)
+```
+
+The installer proof needs a clean committed tree, 7-Zip in Program Files, and no `CARGO_TARGET_DIR` in the environment; it builds into its own output folder and writes `installer-verification.json` there. For a debug executable with OCR, set `PDF_WORKSTATION_OCR_SETUP_ROOT` to the full path of the setup root before `cargo build --manifest-path src-tauri/Cargo.toml --features tauri/custom-protocol`. Without a setup root, a source build compiles OCR out and the app reports OCR unavailable.
+
 ### OCR signing status
 
 The tag-triggered Azure release path still refuses an OCR setup. A guarded source-only mode is available only for `npm run installer -- -AzureSigning -ArtifactOnly -OcrSetupRoot <verified unsigned setup> -OutputRoot <fresh target subdirectory> -ExpectedPublisher "<verified publisher>" -SourceRevision <exact lowercase git HEAD>` on a clean tracked working tree and index; Azure OCR without `-ArtifactOnly` remains refused. It stages signable resources before compilation, signs the staged OCR engine before identity capture, requires Tauri to skip only that verified staged engine, clears updater-key variables, and refuses updater `.sig` files or `latest.json`. The mode writes temporary signing configuration outside its fresh output root and deletes it before packaging checks.

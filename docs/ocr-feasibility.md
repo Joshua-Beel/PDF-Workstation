@@ -2,7 +2,9 @@
 
 ## Status
 
-OCR is unavailable by default and remains absent from published releases. A developer can build an opt-in source executable with a verified local English engine; that build alone enables one current-page, plain-text OCR dialog and the searchable OCR copy command described below. It does not edit the open document or call a service. The exact signed opt-in 0.2.6 artifact has bounded hosted evidence for installation, manual upgrade, launch, packaged-sample rendering, and current-page OCR flow completion. That evidence does not verify OCR correctness, general accuracy, real-document quality, native-window visuals, in-app updating, or release publication.
+2026-10-16: the maintainer ruled on 2026-10-14 that the default installer includes OCR from version 0.3.0. The build side is in source (OCR license records in the generated notices, an unsigned OCR installer proof in `windows-validation.yml`); the signed release path does not package OCR yet, and no installed default build with OCR has been verified. See [OCR in the default installer](releases.md#ocr-in-the-default-installer). A source build without an OCR setup root still compiles OCR out, as described below.
+
+OCR remains absent from published releases. A developer can build an opt-in source executable with a verified local English engine; that build alone enables one current-page, plain-text OCR dialog and the searchable OCR copy command described below. It does not edit the open document or call a service. The exact signed opt-in 0.2.6 artifact has bounded hosted evidence for installation, manual upgrade, launch, packaged-sample rendering, and current-page OCR flow completion. That evidence does not verify OCR correctness, general accuracy, real-document quality, native-window visuals, in-app updating, or release publication.
 
 ## Internal runner foundation
 

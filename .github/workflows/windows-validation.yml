@@ -13,7 +13,10 @@ concurrency:
 jobs:
   validate:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
+    env:
+      OCR_SETUP_ROOT: target/ocr-validation-setup-${{ github.run_id }}-${{ github.run_attempt }}
+      INSTALLER_PROOF_ROOT: target/ocr-validation-installer-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -61,6 +64,24 @@ jobs:
       - run: ./scripts/run-native-recovery-gates.ps1
         shell: pwsh
       - run: npm run build
+
+      - name: Build the pinned unsigned OCR setup
+        shell: pwsh
+        run: ./scripts/setup-ocr.ps1 -OutputRoot $env:OCR_SETUP_ROOT -Jobs 4
+
+      - name: Build and verify the unsigned default installer with OCR
+        shell: pwsh
+        run: |
+          ./scripts/build-installer.ps1 `
+            -UnsignedLocal `
+            -OcrSetupRoot $env:OCR_SETUP_ROOT `
+            -OutputRoot $env:INSTALLER_PROOF_ROOT `
+            -SourceRevision $env:GITHUB_SHA
+          $receipt = Get-Content -LiteralPath (Join-Path $env:INSTALLER_PROOF_ROOT 'installer-verification.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($receipt.mode -cne 'unsigned-local-ocr' -or $receipt.sourceRevision -cne $env:GITHUB_SHA -or -not $receipt.ocr.enabled -or @($receipt.ocr.packagedResources).Count -ne 5) {
+            throw 'The unsigned default installer proof did not package the verified OCR engine, model, and license texts.'
+          }
+          Write-Output ('OCR_INSTALLER_PROOF installerBytes={0} ocrResources={1}' -f $receipt.installer.bytes, @($receipt.ocr.packagedResources).Count)
 
       - name: Recheck tracked source
         if: ${{ always() }}

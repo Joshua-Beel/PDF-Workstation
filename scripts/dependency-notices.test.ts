@@ -1,9 +1,40 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { expect, it } from 'vitest';
-import { noticeFiles, runtimeCandidates, supplementalFiles } from './dependency-notices.mjs';
+import { noticeFiles, ocrEngineRecords, runtimeCandidates, supplementalFiles } from './dependency-notices.mjs';
+
+it('records the OCR engine, Leptonica and English model with license texts bound to the OCR pins', () => {
+  const pins = JSON.parse(readFileSync('scripts/ocr/pins.json', 'utf8'));
+  const records = ocrEngineRecords('.');
+  expect(records.map(record => `${record.name}@${record.version}:${record.license}`)).toEqual([`tesseract@${pins.tesseract.version}:Apache-2.0`, `leptonica@${pins.leptonica.version}:BSD-2-Clause`, `tessdata_fast-eng@${pins.model.version}:Apache-2.0`]);
+  expect(records.map(record => record.files[0].sha256.toUpperCase())).toEqual([pins.tesseract.license.sha256, pins.leptonica.license.sha256, pins.model.license.sha256]);
+  expect(records.every(record => record.ecosystem === 'ocr-engine' && record.scope === 'ocr-engine-resource')).toBe(true);
+  const inventory = JSON.parse(readFileSync('src-tauri/resources/third-party-licenses/inventory.json', 'utf8'));
+  const notices = readFileSync('src-tauri/resources/third-party-licenses/THIRD-PARTY-NOTICES.txt', 'utf8').replace(/\r\n/g, '\n');
+  expect(inventory.packages.filter(pkg => pkg.ecosystem === 'ocr-engine').map(pkg => pkg.name).sort()).toEqual(['leptonica', 'tessdata_fast-eng', 'tesseract']);
+  expect(inventory.inputHashes['scripts/ocr/pins.json']).toMatch(/^[0-9a-f]{64}$/);
+  expect(notices).toContain(`ocr-engine: tesseract ${pins.tesseract.version}\nDeclared license: Apache-2.0`);
+  expect(notices).toContain(`ocr-engine: leptonica ${pins.leptonica.version}\nDeclared license: BSD-2-Clause`);
+  expect(notices).toContain(`ocr-engine: tessdata_fast-eng ${pins.model.version}\nDeclared license: Apache-2.0`);
+  expect(notices).toContain(`Upstream source commit: ${pins.tesseract.commit}`);
+});
+
+it('refuses an OCR license text that differs from the OCR pins', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pdf-ocr-notices-'));
+  mkdirSync(join(root, 'scripts', 'ocr'), { recursive: true });
+  mkdirSync(join(root, 'scripts', 'notice-supplements'));
+  copyFileSync('scripts/ocr/pins.json', join(root, 'scripts', 'ocr', 'pins.json'));
+  const pins = JSON.parse(readFileSync('scripts/ocr/pins.json', 'utf8'));
+  for (const file of [`tesseract-${pins.tesseract.version}-LICENSE`, `leptonica-${pins.leptonica.version}-${pins.leptonica.license.source}`, `tessdata_fast-${pins.model.version}-LICENSE`]) {
+    copyFileSync(join('scripts', 'notice-supplements', file), join(root, 'scripts', 'notice-supplements', file));
+  }
+  expect(ocrEngineRecords(root)).toHaveLength(3);
+  const leptonica = join(root, 'scripts', 'notice-supplements', `leptonica-${pins.leptonica.version}-${pins.leptonica.license.source}`);
+  writeFileSync(leptonica, readFileSync(leptonica, 'utf8').replace(/\n/g, '\r\n'), 'utf8');
+  expect(() => ocrEngineRecords(root)).toThrow('does not match scripts/ocr/pins.json');
+});
 
 it('applies supplements only to exact versions and rejects changed source bytes', () => {
   const folder = mkdtempSync(join(tmpdir(), 'pdf-notice-supplement-'));

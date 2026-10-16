@@ -79,8 +79,8 @@ Set-Location -LiteralPath $projectRoot
 . (Join-Path $PSScriptRoot 'ocr/installer-package.ps1')
 . (Join-Path $PSScriptRoot 'ocr/windows-signing.ps1')
 
-# OCR is enabled only by the explicit parameter. An ambient variable must never
-# change the default installer or release workflow.
+# OCR is packaged only through -OcrSetupRoot. An ambient variable must never
+# change what an installer or release build packages.
 Remove-Item Env:PDF_WORKSTATION_OCR_SETUP_ROOT -ErrorAction SilentlyContinue
 
 if ($AzureSigning -and $UnsignedLocal) { throw 'AzureSigning and UnsignedLocal cannot be combined.' }
@@ -305,8 +305,8 @@ try {
 
         $receipt = [ordered]@{
             schemaVersion = 1
-            scope = if ($ArtifactOnly) { 'Artifact-only Azure OCR installer extraction proof; no install, launch, update, workflow, or release claim.' } elseif ($ocrPlan) { 'Opt-in OCR installer extraction proof; no install, launch, update, or release claim.' } else { 'Default installer extraction proof; no install, launch, update, or release claim.' }
-            mode = if ($ArtifactOnly) { 'azure-signed-artifact-only-ocr' } elseif ($ocrPlan) { 'unsigned-local-ocr' } else { 'unsigned-local-default' }
+            scope = if ($ArtifactOnly) { 'Artifact-only Azure OCR installer extraction proof; no install, launch, update, workflow, or release claim.' } elseif ($ocrPlan) { 'Unsigned OCR installer extraction proof (the default installer configuration); no install, launch, update, or release claim.' } else { 'Unsigned installer extraction proof without OCR; no install, launch, update, or release claim.' }
+            mode = if ($ArtifactOnly) { 'azure-signed-artifact-only-ocr' } elseif ($ocrPlan) { 'unsigned-local-ocr' } else { 'unsigned-local-without-ocr' }
             sourceRevision = $SourceRevision
             installer = @{ path = $installer.Substring($resolvedOutput.Length + 1).Replace('\', '/'); bytes = [uint64]$installers[0].Length; sha256 = Get-ExactSha256 -Path $installer }
             application = @{ path = $packagedApplication.Substring($resolvedOutput.Length + 1).Replace('\', '/'); bytes = [uint64]$packagedApplications[0].Length; sha256 = Get-ExactSha256 -Path $packagedApplication }

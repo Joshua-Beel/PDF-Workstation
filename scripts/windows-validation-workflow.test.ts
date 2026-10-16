@@ -9,7 +9,7 @@ describe('Windows validation workflow', () => {
     expect(workflow).not.toMatch(/^\s*(push|pull_request|schedule):/m);
     expect(workflow).toContain('permissions:\n  contents: read');
     expect(workflow).toContain('runs-on: windows-latest');
-    expect(workflow).toContain('timeout-minutes: 60');
+    expect(workflow).toContain('timeout-minutes: 90');
     expect(workflow).toContain('ref: ${{ github.sha }}');
     expect(workflow).toContain('fetch-depth: 0');
     expect(workflow).toContain('persist-credentials: false');
@@ -39,6 +39,10 @@ describe('Windows validation workflow', () => {
       'run: npm test -- --pool=threads --maxWorkers=1 --no-file-parallelism',
       'run: ./scripts/run-native-recovery-gates.ps1',
       'run: npm run build',
+      'Build the pinned unsigned OCR setup',
+      'run: ./scripts/setup-ocr.ps1 -OutputRoot $env:OCR_SETUP_ROOT -Jobs 4',
+      'Build and verify the unsigned default installer with OCR',
+      './scripts/build-installer.ps1 `',
       'Recheck tracked source',
     ];
     let position = -1;
@@ -58,7 +62,24 @@ describe('Windows validation workflow', () => {
     expect(workflow).not.toContain('workspaceDrive={');
     expect(workflow).not.toContain('tempDrive={');
     expect(workflow).toContain('if (-not $drivesDiffer)');
-    expect(workflow).not.toMatch(/actions\/setup-dotnet|artifact-signing|cargo install|npm run (?:installer|tauri)|build-installer|AZURE_|TAURI_SIGNING|secrets\.|id-token|contents:\s*write/i);
+    expect(workflow).not.toMatch(/actions\/setup-dotnet|artifact-signing|cargo install|npm run (?:installer|tauri)|AZURE_|TAURI_SIGNING|secrets\.|id-token|contents:\s*write/i);
     expect(workflow).not.toMatch(/upload-artifact|download-artifact|gh release|release create|release edit|tags:|target_version|expected_publisher|latest\.json|_x64-setup/i);
+  });
+
+  it('proves the unsigned default installer packages OCR from a fresh pinned setup, never a signed or updater build', () => {
+    expect(workflow).toContain('OCR_SETUP_ROOT: target/ocr-validation-setup-${{ github.run_id }}-${{ github.run_attempt }}');
+    expect(workflow).toContain('INSTALLER_PROOF_ROOT: target/ocr-validation-installer-${{ github.run_id }}-${{ github.run_attempt }}');
+    expect(workflow.match(/build-installer\.ps1/g)).toHaveLength(1);
+    expect(workflow.match(/setup-ocr\.ps1/g)).toHaveLength(1);
+    const build = workflow.slice(workflow.indexOf('./scripts/build-installer.ps1'), workflow.indexOf('Recheck tracked source'));
+    expect(build).toContain('-UnsignedLocal `');
+    expect(build).toContain('-OcrSetupRoot $env:OCR_SETUP_ROOT `');
+    expect(build).toContain('-OutputRoot $env:INSTALLER_PROOF_ROOT `');
+    expect(build).toContain('-SourceRevision $env:GITHUB_SHA');
+    expect(build).not.toMatch(/-AzureSigning|-ArtifactOnly|-ExpectedPublisher/);
+    expect(build).toContain("$receipt.mode -cne 'unsigned-local-ocr'");
+    expect(build).toContain('$receipt.sourceRevision -cne $env:GITHUB_SHA');
+    expect(build).toContain('@($receipt.ocr.packagedResources).Count -ne 5');
+    expect(workflow).not.toMatch(/PDF_WORKSTATION_OCR_SETUP_ROOT|CARGO_TARGET_DIR/);
   });
 });
