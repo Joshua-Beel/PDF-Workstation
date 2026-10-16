@@ -1034,7 +1034,7 @@ impl PdfService {
                             let document = documents.get(&id).ok_or("Document is closed")?;
                             for (index, spec) in session.plan.iter().enumerate() {
                                 for note in spec.notes.iter().filter(|note| note.kind == crate::comments::AnnotationKind::Note) {
-                                    let rect = with_planned_page(document, spec, |page| displayed_note_rect(page, note.rect))?;
+                                    let rect = document.displayed_note_rects(spec, std::slice::from_ref(&note.rect))?.pop().flatten();
                                     result.notes.push(crate::comments::CommentInfo { id: note.id.clone(), page: index, rect, contents: note.contents.clone() });
                                 }
                             }
@@ -1052,17 +1052,17 @@ impl PdfService {
                             let document = documents.get(&id).ok_or("Document is closed")?;
                             for (index, spec) in session.plan.iter().enumerate() {
                                 for note in &spec.notes {
-                                    let (rect, quads) = with_planned_page(document, spec, |page| {
-                                        if note.kind == crate::comments::AnnotationKind::Note { return Ok((displayed_note_rect(page, note.rect)?, None)); }
+                                    let (rect, quads) = (|| -> Result<_, String> {
+                                        if note.kind == crate::comments::AnnotationKind::Note { return Ok((document.displayed_note_rects(spec, std::slice::from_ref(&note.rect))?.pop().flatten(), None)); }
                                         let source = note.quads.as_deref().unwrap_or(std::slice::from_ref(&note.rect));
-                                        let quads = source.iter().map(|bounds| displayed_note_rect(page, *bounds)).collect::<Result<Vec<_>, _>>()?.into_iter().flatten().collect::<Vec<_>>();
+                                        let quads = document.displayed_note_rects(spec, source)?.into_iter().flatten().collect::<Vec<_>>();
                                         let rect = quads.first().map(|first| {
                                             let mut bounds = (first.x, first.y, first.x + first.width, first.y + first.height);
                                             for quad in &quads { bounds.0 = bounds.0.min(quad.x); bounds.1 = bounds.1.min(quad.y); bounds.2 = bounds.2.max(quad.x + quad.width); bounds.3 = bounds.3.max(quad.y + quad.height); }
                                             crate::comments::DisplayRect { x: bounds.0, y: bounds.1, width: bounds.2 - bounds.0, height: bounds.3 - bounds.1 }
                                         });
                                         Ok((rect, Some(quads)))
-                                    })?;
+                                    })()?;
                                     result.annotations.push(crate::comments::AnnotationInfo { id: note.id.clone(), kind: note.kind, page: index, rect, contents: (!note.contents.is_empty()).then(|| note.contents.clone()), quads });
                                 }
                             }
@@ -1086,21 +1086,21 @@ impl PdfService {
                             let next = match mutation {
                                 CommentMutation::Create(page, rect, contents) => {
                                     let spec = session.plan.get(page as usize).ok_or("Page is out of range")?;
-                                    let rect = with_planned_page(document, spec, |page| displayed_crop(page, rect))?;
+                                    let rect = document.displayed_crop(spec, rect)?;
                                     session.proposed_comment(Some((page as usize, rect)), None, Some(&contents))?
                                 }
                                 CommentMutation::Update(note_id, contents) => session.proposed_comment(None, Some(&note_id), Some(&contents))?,
                                 CommentMutation::Delete(note_id) => session.proposed_comment(None, Some(&note_id), None)?,
                                 CommentMutation::CreateHighlight(page, rect, contents) => {
                                     let spec = session.plan.get(page as usize).ok_or("Page is out of range")?;
-                                    let rect = with_planned_page(document, spec, |page| displayed_crop(page, rect))?;
+                                    let rect = document.displayed_crop(spec, rect)?;
                                     session.proposed_highlight(Some((page as usize, rect)), None, contents.as_deref(), false)?
                                 }
                                 CommentMutation::UpdateHighlight(id, contents) => session.proposed_highlight(None, Some(&id), contents.as_deref(), false)?,
                                 CommentMutation::DeleteHighlight(id) => session.proposed_highlight(None, Some(&id), None, true)?,
                                 CommentMutation::CreateTextHighlight(page, start, end, contents) => {
                                     let spec = session.plan.get(page as usize).ok_or("Page is out of range")?;
-                                    let quads = with_planned_page(document, spec, |source| crate::text_geometry::inspect_with_source(source, id, page, revision)?.highlight_bounds(start, end))?;
+                                    let quads = document.text_geometry_with_source(PageTarget::Planned(spec), id, page, revision)?.highlight_bounds(start, end)?;
                                     session.proposed_text_highlight(page as usize, quads, contents.as_deref())?
                                 }
                             };
@@ -1145,7 +1145,7 @@ impl PdfService {
                             if session.revision != revision { return Err("Document changed. Refresh the form field list.".into()); }
                             let mut query=crate::forms::FormDocument::query(session,id);
                             if query.status=="supported" && query.fields.iter().any(|field|field.checked.is_some()||field.radio.is_some()||field.choice.is_some()) {
-                                let values=documents.get(&id).and_then(|document|checked_engine_form_values(document,&query.fields));
+                                let values=documents.get(&id).and_then(|document|document.form_values(&query.fields));
                                 if values.as_ref().is_none_or(|values|!filled_values_agree(&query.fields,values)) {query.status="unsupported";query.reason=Some("The form states disagree with the rendering engine.".into());query.fields.clear();}
                             }
                             Ok(query)
@@ -1176,7 +1176,7 @@ impl PdfService {
                             let document = engine.load_from_vec(bytes.clone(), None).map_err(|error| format!("Filled PDF could not be opened: {error}"))?;
                             let pages = document.page_sizes()?;
                             if pages.len() != expected { return Err("Filled PDF page count validation failed.".into()); }
-                            let engine_fields = checked_engine_form_values(&document,&fields).ok_or("Filled PDF form could not be read consistently by the rendering engine.")?;
+                            let engine_fields = document.form_values(&fields).ok_or("Filled PDF form could not be read consistently by the rendering engine.")?;
                             if !filled_values_agree(&fields, &engine_fields) { return Err("Filled PDF values disagree with the rendering engine.".into()); }
                             for index in 0..document.pages().len() {
                                 let page = document.pages().get(index).map_err(|error| format!("Filled PDF page could not be read: {error}"))?;
@@ -1608,18 +1608,6 @@ fn note_document<'a>(engine: &'a Engine, original: &std::rc::Rc<EngineDoc<'a>>, 
     let document = load_note_document(engine, original, session, &session.plan)?;
     documents.insert(id, (session.revision, document.clone())); Ok(document)
 }
-fn displayed_note_rect(page: &PdfPage<'_>, rect: CropBox) -> Result<Option<crate::comments::DisplayRect>, String> {
-    const SIZE: i32 = 1_000_000;
-    let config = PdfRenderConfig::new().set_fixed_size(SIZE, SIZE); let mut points = Vec::with_capacity(4);
-    for (x, y) in [(rect.left, rect.bottom), (rect.left, rect.top), (rect.right, rect.bottom), (rect.right, rect.top)] {
-        points.push(page.points_to_pixels(PdfPoints::new(x), PdfPoints::new(y), &config).map_err(|error| error.to_string())?);
-    }
-    let x = (points.iter().map(|point| point.0).min().unwrap() as f64 / SIZE as f64).max(0.0);
-    let y = (points.iter().map(|point| point.1).min().unwrap() as f64 / SIZE as f64).max(0.0);
-    let right = (points.iter().map(|point| point.0).max().unwrap() as f64 / SIZE as f64).min(1.0);
-    let bottom = (points.iter().map(|point| point.1).max().unwrap() as f64 / SIZE as f64).min(1.0);
-    Ok((right > x && bottom > y).then_some(crate::comments::DisplayRect { x, y, width: right - x, height: bottom - y }))
-}
 
 fn combine_sessions(sessions: &HashMap<u64, (EditSession, DocumentInfo)>, first: CombineSource, second: CombineSource) -> Result<(&EditSession, &EditSession), String> {
     if first.id == second.id { return Err("Choose two different open PDFs to combine.".into()); }
@@ -1890,11 +1878,11 @@ fn checked_searchable_ocr_request(session: &EditSession, document: &PdfDocument<
 }
 
 #[cfg(windows)]
-fn checked_image_replacement(session: &EditSession, document: &PdfDocument<'_>, revision: u64, page: u16) -> Result<crate::image_edit::ImageEditTargetInfo, String> {
+fn checked_image_replacement(session: &EditSession, document: &EngineDoc<'_>, revision: u64, page: u16) -> Result<crate::image_edit::ImageEditTargetInfo, String> {
     if session.revision != revision { return Err("Document changed. Inspect the image again.".into()); }
-    if !matches!(document.permissions().security_handler_revision(), Ok(PdfSecurityHandlerRevision::Unprotected)) { return Err("Image replacement does not support encrypted or restricted PDFs.".into()); }
+    if !document.is_unprotected() { return Err("Image replacement does not support encrypted or restricted PDFs.".into()); }
     session.page_image_export_guard()?;
-    if session.plan.len() != document.pages().len() as usize || session.plan.iter().enumerate().any(|(index, spec)| spec.source != index || spec.turns != 0 || spec.crop.is_some() || !spec.notes.is_empty()) {
+    if session.plan.len() != document.page_count() || session.plan.iter().enumerate().any(|(index, spec)| spec.source != index || spec.turns != 0 || spec.crop.is_some() || !spec.notes.is_empty()) {
         return Err("Image replacement requires the original unedited page order, geometry, and annotations.".into());
     }
     if usize::from(page) >= session.plan.len() { return Err("Image replacement page is out of range.".into()); }
@@ -1906,8 +1894,8 @@ fn checked_image_replacement(session: &EditSession, document: &PdfDocument<'_>, 
 pub(crate) struct TextReplacementInspection { pub(crate) target: crate::text_edit::TextEditTarget, pub(crate) bounds: crate::text_edit_commands::TextReplacementBounds }
 
 #[cfg(windows)]
-fn text_replacement_geometry(document:&PdfDocument<'_>,id:u64,revision:u64,page:u16,target:crate::text_edit::TextEditTarget)->Result<TextReplacementInspection,String>{
-    let pdf_page=document.pages().get(page as i32).map_err(|e|e.to_string())?;let geometry=crate::text_geometry::inspect(&pdf_page,id,page,revision)?;
+fn text_replacement_geometry(document:&EngineDoc<'_>,id:u64,revision:u64,page:u16,target:crate::text_edit::TextEditTarget)->Result<TextReplacementInspection,String>{
+    let geometry=document.text_geometry(PageTarget::Source(usize::from(page)),id,page,revision)?;
     if geometry.status!="ok"||geometry.truncated||geometry.characters.len()!=target.text.len(){return Err("Text replacement requires complete one-byte PDFium character geometry.".into())}
     let extracted=geometry.characters.iter().map(|c|c.text.as_str()).collect::<String>();if extracted!=target.text{return Err("Text replacement source text disagrees with PDFium extraction.".into())}
     let mut left=1.0f32;let mut top=1.0f32;let mut right=0.0f32;let mut bottom=0.0f32;
@@ -1917,9 +1905,9 @@ fn text_replacement_geometry(document:&PdfDocument<'_>,id:u64,revision:u64,page:
 }
 
 #[cfg(windows)]
-fn checked_text_replacement(session:&EditSession,document:&PdfDocument<'_>,id:u64,revision:u64,page:u16)->Result<TextReplacementInspection,String>{
-    if session.revision!=revision{return Err("Document changed. Inspect the text again.".into())}if !matches!(document.permissions().security_handler_revision(),Ok(PdfSecurityHandlerRevision::Unprotected)){return Err("Text replacement does not support encrypted or restricted PDFs.".into())}session.page_image_export_guard()?;
-    if session.plan.len()!=document.pages().len() as usize||session.plan.iter().enumerate().any(|(i,s)|s.source!=i||s.turns!=0||s.crop.is_some()||!s.notes.is_empty()){return Err("Text replacement requires the original unedited page order, geometry, and annotations.".into())}if usize::from(page)>=session.plan.len(){return Err("Text replacement page is out of range.".into())}let target=crate::text_edit::inspect_text_run(&session.source,u32::from(page)+1)?;text_replacement_geometry(document,id,revision,page,target)
+fn checked_text_replacement(session:&EditSession,document:&EngineDoc<'_>,id:u64,revision:u64,page:u16)->Result<TextReplacementInspection,String>{
+    if session.revision!=revision{return Err("Document changed. Inspect the text again.".into())}if !document.is_unprotected(){return Err("Text replacement does not support encrypted or restricted PDFs.".into())}session.page_image_export_guard()?;
+    if session.plan.len()!=document.page_count()||session.plan.iter().enumerate().any(|(i,s)|s.source!=i||s.turns!=0||s.crop.is_some()||!s.notes.is_empty()){return Err("Text replacement requires the original unedited page order, geometry, and annotations.".into())}if usize::from(page)>=session.plan.len(){return Err("Text replacement page is out of range.".into())}let target=crate::text_edit::inspect_text_run(&session.source,u32::from(page)+1)?;text_replacement_geometry(document,id,revision,page,target)
 }
 
 #[cfg(windows)]
@@ -1976,47 +1964,6 @@ fn print_dimensions(width: f32, height: f32, max_width: u32, max_height: u32) ->
 fn filled_values_agree(fields: &[crate::forms::FormField], engine_fields: &HashMap<String, Option<String>>) -> bool {
     engine_fields.len() == fields.len() && fields.iter().all(|field| engine_fields.get(&field.name).is_some_and(|value| value.as_deref().unwrap_or("") == field.value))
 }
-fn checked_engine_form_values(document: &PdfDocument<'_>, fields: &[crate::forms::FormField]) -> Option<HashMap<String, Option<String>>> {
-    document.form()?;
-    let expected=fields.iter().map(|field|(field.name.as_str(),field)).collect::<HashMap<_,_>>();
-    let mut values=HashMap::new();
-    let mut radio_indices:HashMap<&str,HashSet<usize>>=HashMap::new();
-    for page in document.pages().iter() {
-        for annotation in page.annotations().iter() {
-            if let Some(field)=annotation.as_form_field() {
-                let name=field.name()?;let expected=*expected.get(name.as_str())?;
-                if let Some(choice)=&expected.choice {
-                    let options=if choice.presentation=="dropdown"{let actual=field.as_combo_box_field()?;if actual.has_editable_text_box()||actual.is_multiselect(){return None;}actual.options()}else{let actual=field.as_list_box_field()?;if actual.is_multiselect(){return None;}actual.options()};
-                    if options.len()!=choice.options.len(){return None;}
-                    for(index,option)in choice.options.iter().enumerate(){let actual=options.get(index).ok()?;if actual.index()!=index||actual.label().map(String::as_str)!=Some(option.label.as_str())||actual.is_set()!=(choice.selected_option_id.as_ref()==Some(&option.option_id)){return None;}}
-                    if values.insert(name,Some(expected.value.clone())).is_some(){return None;}continue;
-                }
-                if let Some(radio)=&expected.radio {
-                    let actual=field.as_radio_button_field()?;let index=actual.index_in_group() as usize;let option=radio.options.get(index)?;
-                    if !radio_indices.entry(expected.name.as_str()).or_default().insert(index){return None;}
-                    let group_value=actual.group_value();let matches=if radio.selected_option_id.is_none(){group_value.as_deref().is_none_or(|value|value.is_empty()||value=="Off")}else{group_value.as_deref()==Some(expected.value.as_str())};
-                    // The convenience fallback reports Off == Off as checked for blank groups.
-                    // Their canonical parser proof requires every AS Off; verify the engine's
-                    // blank group value and full child bijection instead. Selected groups still
-                    // require every engine checked state to agree with the selected child.
-                    if !matches || radio.selected_option_id.is_some() && actual.is_checked().ok()? != (radio.selected_option_id.as_ref()==Some(&option.option_id)){return None;}
-                    values.insert(name,Some(expected.value.clone()));continue;
-                }
-                let value=if expected.checked.is_some() {
-                    // pdfium-render 0.9.4 is_checked() recognizes only Yes. Read the actual
-                    // engine value and compare with the exact state validated in the source AP.
-                    let actual=field.as_checkbox_field()?.group_value()?;
-                    let checked=if actual=="Off" {false} else if actual==*expected.on_state.as_ref()? {true} else {return None;};
-                    Some(checked.to_string())
-                } else {field.as_text_field()?.value()};
-                if values.insert(name,value).is_some() {return None;}
-            }
-        }
-    }
-    if fields.iter().filter_map(|field|field.radio.as_ref().map(|radio|(field.name.as_str(),radio.options.len()))).any(|(name,count)|radio_indices.get(name).is_none_or(|indices|indices.len()!=count)){return None;}
-    Some(values)
-}
-
 fn validate_crop_insets(insets: CropInsets) -> Result<(), String> {
     let values = [insets.top, insets.right, insets.bottom, insets.left];
     if values.iter().any(|value| !value.is_finite() || *value < 0.0) {
@@ -2026,54 +1973,22 @@ fn validate_crop_insets(insets: CropInsets) -> Result<(), String> {
     Ok(())
 }
 
-fn displayed_inset_rect(spec: &PageSpec, document: &PdfDocument<'_>, insets: CropInsets) -> Result<CropRect, String> {
-    with_planned_page(document, spec, |page| {
-        let width = f64::from(page.width().value);
-        let height = f64::from(page.height().value);
-        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 { return Err("The page has invalid displayed dimensions.".into()); }
-        let retained_width = width - insets.left - insets.right;
-        let retained_height = height - insets.top - insets.bottom;
-        if retained_width < 1.0 || retained_height < 1.0 { return Err("Insets must leave at least 1 point in both dimensions on every selected page.".into()); }
-        Ok(CropRect { x: insets.left / width, y: insets.top / height, width: retained_width / width, height: retained_height / height })
-    })
+fn displayed_inset_rect(spec: &PageSpec, document: &EngineDoc<'_>, insets: CropInsets) -> Result<CropRect, String> {
+    let (width, height) = document.planned_page_size(spec)?;
+    let width = f64::from(width);
+    let height = f64::from(height);
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 { return Err("The page has invalid displayed dimensions.".into()); }
+    let retained_width = width - insets.left - insets.right;
+    let retained_height = height - insets.top - insets.bottom;
+    if retained_width < 1.0 || retained_height < 1.0 { return Err("Insets must leave at least 1 point in both dimensions on every selected page.".into()); }
+    Ok(CropRect { x: insets.left / width, y: insets.top / height, width: retained_width / width, height: retained_height / height })
 }
 
-fn checked_displayed_crop(document: &PdfDocument<'_>, spec: &PageSpec, rect: CropRect) -> Result<CropBox, String> {
-    let crop = with_planned_page(document, spec, |page| displayed_crop(page, rect))?;
+fn checked_displayed_crop(document: &EngineDoc<'_>, spec: &PageSpec, rect: CropRect) -> Result<CropBox, String> {
+    let crop = document.displayed_crop(spec, rect)?;
     let mut proposed = spec.clone(); proposed.crop = Some(crop);
-    with_planned_page(document, &proposed, |page| {
-        let (width, height) = (page.width().value, page.height().value);
-        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 { return Err("The crop produces invalid page dimensions.".into()); }
-        Ok(())
-    })?;
-    Ok(crop)
-}
-
-fn displayed_crop(page: &PdfPage<'_>, rect: CropRect) -> Result<CropBox, String> {
-    if ![rect.x, rect.y, rect.width, rect.height].iter().all(|value| value.is_finite()) || rect.x < 0.0 || rect.y < 0.0 || rect.width <= 0.0 || rect.height <= 0.0 || rect.x + rect.width > 1.0 + 1e-12 || rect.y + rect.height > 1.0 + 1e-12 {
-        return Err("Choose a nonempty crop rectangle within the current page.".into());
-    }
-    let bounds = page.boundaries().bounding().map_err(|error| error.to_string())?.bounds;
-    let visible = CropBox { left: bounds.left().value, bottom: bounds.bottom().value, right: bounds.right().value, top: bounds.top().value };
-    if rect.x == 0.0 && rect.y == 0.0 && rect.width == 1.0 && rect.height == 1.0 { visible.validate_within(visible)?; return Ok(visible); }
-    const SIZE: i32 = 1_000_000;
-    let config = PdfRenderConfig::new().set_fixed_size(SIZE, SIZE);
-    // DeviceToPage takes integer pixels. Interpolate its page corners in f64 so a one-point crop is not rounded to a smaller pixel cell.
-    let mut page_corners = [(0.0_f64, 0.0_f64); 4];
-    for (index, (x, y)) in [(0, 0), (SIZE, 0), (0, SIZE), (SIZE, SIZE)].into_iter().enumerate() {
-        let (x, y) = page.pixels_to_points(x, y, &config).map_err(|error| error.to_string())?;
-        if !x.value.is_finite() || !y.value.is_finite() { return Err("The crop could not be mapped to the source page.".into()); }
-        page_corners[index] = (f64::from(x.value), f64::from(y.value));
-    }
-    let mut crop = CropBox { left: f32::INFINITY, bottom: f32::INFINITY, right: f32::NEG_INFINITY, top: f32::NEG_INFINITY };
-    for (x, y) in [(rect.x, rect.y), (rect.x + rect.width, rect.y), (rect.x, rect.y + rect.height), (rect.x + rect.width, rect.y + rect.height)] {
-        let (x, y) = (x.min(1.0), y.min(1.0));
-        let weights = [(1.0 - x) * (1.0 - y), x * (1.0 - y), (1.0 - x) * y, x * y];
-        let point = weights.into_iter().zip(page_corners).fold((0.0, 0.0), |(x, y), (weight, (corner_x, corner_y))| (x + weight * corner_x, y + weight * corner_y));
-        crop.left = crop.left.min(point.0 as f32); crop.bottom = crop.bottom.min(point.1 as f32); crop.right = crop.right.max(point.0 as f32); crop.top = crop.top.max(point.1 as f32);
-    }
-    crop.left = crop.left.max(visible.left); crop.bottom = crop.bottom.max(visible.bottom); crop.right = crop.right.min(visible.right); crop.top = crop.top.min(visible.top);
-    crop.validate_within(visible)?;
+    let (width, height) = document.planned_page_size(&proposed)?;
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 { return Err("The crop produces invalid page dimensions.".into()); }
     Ok(crop)
 }
 

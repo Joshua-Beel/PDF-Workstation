@@ -11,11 +11,12 @@
 //! ([`EngineDocument::render_bgra_into`]) so a shared-memory section can stand in for the buffer
 //! later; the caller computes and validates the pixel size before asking.
 
+use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use pdfium_render::prelude::*;
 use serde::Serialize;
-use crate::editor::PageSpec;
+use crate::editor::{CropBox, PageSpec};
 
 #[derive(Clone, Serialize)]
 pub struct PageSize { pub(crate) width: f32, pub(crate) height: f32 }
@@ -85,6 +86,15 @@ pub(crate) trait EngineDocument {
     fn properties(&self, source_size_bytes: usize, current_page_dimensions: &[(f32, f32)]) -> Result<crate::document_properties::DocumentProperties, String>;
     #[cfg(test)]
     fn engine_page_labels(&self) -> Vec<Option<String>>;
+    /// Text geometry plus the source-space bounds a text highlight needs.
+    fn text_geometry_with_source(&self, target: PageTarget<'_>, id: u64, index: u16, revision: u64) -> Result<crate::text_geometry::InspectedGeometry, String>;
+    /// Maps a rectangle given as fractions of the displayed planned page to a source-space crop box.
+    fn displayed_crop(&self, spec: &PageSpec, rect: crate::service::CropRect) -> Result<CropBox, String>;
+    /// Maps source-space rectangles to fractions of the displayed planned page; `None` where one is not visible.
+    fn displayed_note_rects(&self, spec: &PageSpec, rects: &[CropBox]) -> Result<Vec<Option<crate::comments::DisplayRect>>, String>;
+    /// The engine's own reading of every form field the parser found, keyed by field name, or `None`
+    /// when the engine disagrees with the parser's structure.
+    fn form_values(&self, fields: &[crate::forms::FormField]) -> Option<HashMap<String, Option<String>>>;
 }
 
 /// PDFium in this process.
@@ -159,7 +169,7 @@ impl EngineDocument for InProcessDocument<'_> {
         self.with_target(target, |page| crate::text_geometry::inspect(page, id, index, revision))?
     }
     fn bookmarks(&self, limit: usize, visit: &mut dyn FnMut(EngineBookmark) -> Result<ControlFlow<()>, String>) -> Result<(), String> {
-        let mut depths = std::collections::HashMap::new();
+        let mut depths = HashMap::new();
         for bookmark in self.inner.bookmarks().iter().take(limit) {
             let depth = bookmark.parent().and_then(|parent| depths.get(&parent).copied()).map_or(0, |depth: usize| depth + 1);
             depths.insert(bookmark.clone(), depth);
@@ -182,6 +192,97 @@ impl EngineDocument for InProcessDocument<'_> {
     }
     #[cfg(test)]
     fn engine_page_labels(&self) -> Vec<Option<String>> { self.inner.pages().iter().map(|page| page.label().map(str::to_owned)).collect() }
+    fn text_geometry_with_source(&self, target: PageTarget<'_>, id: u64, index: u16, revision: u64) -> Result<crate::text_geometry::InspectedGeometry, String> {
+        self.with_target(target, |page| crate::text_geometry::inspect_with_source(page, id, index, revision))?
+    }
+    fn displayed_crop(&self, spec: &PageSpec, rect: crate::service::CropRect) -> Result<CropBox, String> {
+        with_planned_page(&self.inner, spec, |page| displayed_crop(page, rect))
+    }
+    fn displayed_note_rects(&self, spec: &PageSpec, rects: &[CropBox]) -> Result<Vec<Option<crate::comments::DisplayRect>>, String> {
+        with_planned_page(&self.inner, spec, |page| rects.iter().map(|rect| displayed_note_rect(page, *rect)).collect())
+    }
+    fn form_values(&self, fields: &[crate::forms::FormField]) -> Option<HashMap<String, Option<String>>> {
+        let document = &self.inner;
+        document.form()?;
+        let expected=fields.iter().map(|field|(field.name.as_str(),field)).collect::<HashMap<_,_>>();
+        let mut values=HashMap::new();
+        let mut radio_indices:HashMap<&str,HashSet<usize>>=HashMap::new();
+        for page in document.pages().iter() {
+            for annotation in page.annotations().iter() {
+                if let Some(field)=annotation.as_form_field() {
+                    let name=field.name()?;let expected=*expected.get(name.as_str())?;
+                    if let Some(choice)=&expected.choice {
+                        let options=if choice.presentation=="dropdown"{let actual=field.as_combo_box_field()?;if actual.has_editable_text_box()||actual.is_multiselect(){return None;}actual.options()}else{let actual=field.as_list_box_field()?;if actual.is_multiselect(){return None;}actual.options()};
+                        if options.len()!=choice.options.len(){return None;}
+                        for(index,option)in choice.options.iter().enumerate(){let actual=options.get(index).ok()?;if actual.index()!=index||actual.label().map(String::as_str)!=Some(option.label.as_str())||actual.is_set()!=(choice.selected_option_id.as_ref()==Some(&option.option_id)){return None;}}
+                        if values.insert(name,Some(expected.value.clone())).is_some(){return None;}continue;
+                    }
+                    if let Some(radio)=&expected.radio {
+                        let actual=field.as_radio_button_field()?;let index=actual.index_in_group() as usize;let option=radio.options.get(index)?;
+                        if !radio_indices.entry(expected.name.as_str()).or_default().insert(index){return None;}
+                        let group_value=actual.group_value();let matches=if radio.selected_option_id.is_none(){group_value.as_deref().is_none_or(|value|value.is_empty()||value=="Off")}else{group_value.as_deref()==Some(expected.value.as_str())};
+                        // The convenience fallback reports Off == Off as checked for blank groups.
+                        // Their canonical parser proof requires every AS Off; verify the engine's
+                        // blank group value and full child bijection instead. Selected groups still
+                        // require every engine checked state to agree with the selected child.
+                        if !matches || radio.selected_option_id.is_some() && actual.is_checked().ok()? != (radio.selected_option_id.as_ref()==Some(&option.option_id)){return None;}
+                        values.insert(name,Some(expected.value.clone()));continue;
+                    }
+                    let value=if expected.checked.is_some() {
+                        // pdfium-render 0.9.4 is_checked() recognizes only Yes. Read the actual
+                        // engine value and compare with the exact state validated in the source AP.
+                        let actual=field.as_checkbox_field()?.group_value()?;
+                        let checked=if actual=="Off" {false} else if actual==*expected.on_state.as_ref()? {true} else {return None;};
+                        Some(checked.to_string())
+                    } else {field.as_text_field()?.value()};
+                    if values.insert(name,value).is_some() {return None;}
+                }
+            }
+        }
+        if fields.iter().filter_map(|field|field.radio.as_ref().map(|radio|(field.name.as_str(),radio.options.len()))).any(|(name,count)|radio_indices.get(name).is_none_or(|indices|indices.len()!=count)){return None;}
+        Some(values)
+    }
+}
+
+fn displayed_note_rect(page: &PdfPage<'_>, rect: CropBox) -> Result<Option<crate::comments::DisplayRect>, String> {
+    const SIZE: i32 = 1_000_000;
+    let config = PdfRenderConfig::new().set_fixed_size(SIZE, SIZE); let mut points = Vec::with_capacity(4);
+    for (x, y) in [(rect.left, rect.bottom), (rect.left, rect.top), (rect.right, rect.bottom), (rect.right, rect.top)] {
+        points.push(page.points_to_pixels(PdfPoints::new(x), PdfPoints::new(y), &config).map_err(|error| error.to_string())?);
+    }
+    let x = (points.iter().map(|point| point.0).min().unwrap() as f64 / SIZE as f64).max(0.0);
+    let y = (points.iter().map(|point| point.1).min().unwrap() as f64 / SIZE as f64).max(0.0);
+    let right = (points.iter().map(|point| point.0).max().unwrap() as f64 / SIZE as f64).min(1.0);
+    let bottom = (points.iter().map(|point| point.1).max().unwrap() as f64 / SIZE as f64).min(1.0);
+    Ok((right > x && bottom > y).then_some(crate::comments::DisplayRect { x, y, width: right - x, height: bottom - y }))
+}
+
+fn displayed_crop(page: &PdfPage<'_>, rect: crate::service::CropRect) -> Result<CropBox, String> {
+    if ![rect.x, rect.y, rect.width, rect.height].iter().all(|value| value.is_finite()) || rect.x < 0.0 || rect.y < 0.0 || rect.width <= 0.0 || rect.height <= 0.0 || rect.x + rect.width > 1.0 + 1e-12 || rect.y + rect.height > 1.0 + 1e-12 {
+        return Err("Choose a nonempty crop rectangle within the current page.".into());
+    }
+    let bounds = page.boundaries().bounding().map_err(|error| error.to_string())?.bounds;
+    let visible = CropBox { left: bounds.left().value, bottom: bounds.bottom().value, right: bounds.right().value, top: bounds.top().value };
+    if rect.x == 0.0 && rect.y == 0.0 && rect.width == 1.0 && rect.height == 1.0 { visible.validate_within(visible)?; return Ok(visible); }
+    const SIZE: i32 = 1_000_000;
+    let config = PdfRenderConfig::new().set_fixed_size(SIZE, SIZE);
+    // DeviceToPage takes integer pixels. Interpolate its page corners in f64 so a one-point crop is not rounded to a smaller pixel cell.
+    let mut page_corners = [(0.0_f64, 0.0_f64); 4];
+    for (index, (x, y)) in [(0, 0), (SIZE, 0), (0, SIZE), (SIZE, SIZE)].into_iter().enumerate() {
+        let (x, y) = page.pixels_to_points(x, y, &config).map_err(|error| error.to_string())?;
+        if !x.value.is_finite() || !y.value.is_finite() { return Err("The crop could not be mapped to the source page.".into()); }
+        page_corners[index] = (f64::from(x.value), f64::from(y.value));
+    }
+    let mut crop = CropBox { left: f32::INFINITY, bottom: f32::INFINITY, right: f32::NEG_INFINITY, top: f32::NEG_INFINITY };
+    for (x, y) in [(rect.x, rect.y), (rect.x + rect.width, rect.y), (rect.x, rect.y + rect.height), (rect.x + rect.width, rect.y + rect.height)] {
+        let (x, y) = (x.min(1.0), y.min(1.0));
+        let weights = [(1.0 - x) * (1.0 - y), x * (1.0 - y), (1.0 - x) * y, x * y];
+        let point = weights.into_iter().zip(page_corners).fold((0.0, 0.0), |(x, y), (weight, (corner_x, corner_y))| (x + weight * corner_x, y + weight * corner_y));
+        crop.left = crop.left.min(point.0 as f32); crop.bottom = crop.bottom.min(point.1 as f32); crop.right = crop.right.max(point.0 as f32); crop.top = crop.top.max(point.1 as f32);
+    }
+    crop.left = crop.left.max(visible.left); crop.bottom = crop.bottom.max(visible.bottom); crop.right = crop.right.min(visible.right); crop.top = crop.top.min(visible.top);
+    crop.validate_within(visible)?;
+    Ok(crop)
 }
 
 /// Runs `action` on a source page with the plan's crop and extra quarter turns applied, then
