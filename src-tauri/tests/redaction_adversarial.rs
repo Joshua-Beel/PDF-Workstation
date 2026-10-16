@@ -610,12 +610,13 @@ fn documents_leak_view_only_optional_content_cover_uncovers_text_in_output() {
 #[test]
 fn worker_render_path_matches_this_replica() {
     let source = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/service.rs")).unwrap();
+    let engine = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/pdf_engine.rs")).unwrap();
     let start = source.find("Request::RasterRedact(id, revision, page, rectangles, path, reply) =>").expect("RasterRedact worker arm");
     let end = start + source[start..].find("redact_raster_pages(raster_pages)").expect("redact_raster_pages call");
     let worker = &source[start..end];
     for expected in [
         "let document = note_document(engine, original, session, &mut redaction_note_documents, id)?;",
-        ".set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(false).clear_before_rendering(true).set_clear_color(PdfColor::WHITE).render_annotations(true).render_form_data(true).use_print_quality(true))",
+        "document.render_bgra_into(PageTarget::Planned(&raster.spec), RenderMode::Print, raster.dimensions.width, raster.dimensions.height, &mut bgra)",
         "crate::page_image::bgra_to_rgb(raster.dimensions, &bgra, PageImageFormat::Png)?",
         "rectangles: if index == usize::from(page) { rectangles.clone() } else { Vec::new() },",
     ] {
@@ -625,7 +626,12 @@ fn worker_render_path_matches_this_replica() {
     let plan = &source[plan_start..plan_start + source[plan_start..].find("Ok(RasterRedactionPlan { pages })").expect("plan end")];
     assert!(plan.contains("crate::page_image::dimensions(page_width, page_height, 150, PageImageFormat::Png)?"), "redaction DPI drifted from 150");
     assert!(
-        source.contains("page.render_with_config(&PdfRenderConfig::new().set_target_width(width).set_maximum_height(5000).render_annotations(true))"),
+        engine.contains(".set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(false).clear_before_rendering(true).set_clear_color(PdfColor::WHITE);")
+            && engine.contains("RenderMode::Print => config.render_annotations(true).render_form_data(true).use_print_quality(true)"),
+        "the engine's print render flags drifted from the replica"
+    );
+    assert!(
+        engine.contains("page.render_with_config(&PdfRenderConfig::new().set_target_width(width).set_maximum_height(5000).render_annotations(true))"),
         "the viewer render flags drifted; the view_ink assertions model them"
     );
 }

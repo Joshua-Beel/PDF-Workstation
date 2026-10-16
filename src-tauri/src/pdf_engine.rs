@@ -145,14 +145,9 @@ impl PdfEngine for InProcessEngine {
     }
 }
 
+/// A document loaded in this process. Its PDFium handle is private to this module: the worker can
+/// reach it only through [`EngineDocument`].
 pub(crate) struct InProcessDocument<'a> { inner: PdfDocument<'a> }
-
-// Transitional while the request groups move behind the boundary one commit at a time; removed
-// once every group is migrated.
-impl<'a> std::ops::Deref for InProcessDocument<'a> {
-    type Target = PdfDocument<'a>;
-    fn deref(&self) -> &PdfDocument<'a> { &self.inner }
-}
 
 impl InProcessDocument<'_> {
     fn with_target<T>(&self, target: PageTarget<'_>, action: impl FnOnce(&PdfPage<'_>) -> T) -> Result<T, String> {
@@ -339,7 +334,7 @@ fn displayed_crop(page: &PdfPage<'_>, rect: crate::service::CropRect) -> Result<
 
 /// Runs `action` on a source page with the plan's crop and extra quarter turns applied, then
 /// restores the page's own crop box and rotation.
-pub(crate) fn with_planned_page<T>(document: &PdfDocument<'_>, spec: &PageSpec, action: impl FnOnce(&PdfPage<'_>) -> Result<T, String>) -> Result<T, String> {
+fn with_planned_page<T>(document: &PdfDocument<'_>, spec: &PageSpec, action: impl FnOnce(&PdfPage<'_>) -> Result<T, String>) -> Result<T, String> {
     let mut page = document.pages().get(spec.source as i32).map_err(|error| error.to_string())?;
     let original_rotation = page.rotation().map_err(|error| error.to_string())?;
     let original_crop = if spec.crop.is_some() {
