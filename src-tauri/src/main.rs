@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod service;
+mod pdf_engine;
 mod open_path;
 mod open_limits;
 mod pdf_load;

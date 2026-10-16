@@ -1,5 +1,8 @@
-use std::{collections::{HashMap, HashSet, VecDeque}, io::{Cursor, Write}, path::PathBuf, sync::{Arc, Mutex, mpsc, OnceLock}};
+use std::{collections::{HashMap, HashSet, VecDeque}, io::Write, path::PathBuf, sync::{Arc, Mutex, mpsc, OnceLock}};
 use pdfium_render::prelude::*;
+use crate::pdf_engine::{EngineDocument, PageSize, PageTarget, PdfEngine, with_planned_page};
+type Engine = crate::pdf_engine::InProcessEngine;
+type EngineDoc<'a> = <Engine as PdfEngine>::Document<'a>;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
@@ -15,8 +18,6 @@ pub struct CropInsets { pub top: f64, pub right: f64, pub bottom: f64, pub left:
 pub struct CombineSource { pub id: u64, pub revision: u64 }
 enum CommentMutation { Create(u16, CropRect, String), Update(String, String), Delete(String), CreateHighlight(u16, CropRect, Option<String>), CreateTextHighlight(u16, usize, usize, Option<String>), UpdateHighlight(String, Option<String>), DeleteHighlight(String) }
 
-#[derive(Clone, Serialize)]
-pub struct PageSize { width: f32, height: f32 }
 #[derive(Clone, Serialize)]
 pub struct DocumentInfo { id: u64, name: String, path: String, pages: Vec<PageSize>, revision: u64, dirty: bool, can_undo: bool, can_redo: bool }
 impl DocumentInfo {
@@ -261,7 +262,7 @@ impl PdfService {
         let resource_cleanup = sender.clone();
         let queue_pending = sender.pending.clone();
         std::thread::Builder::new().name("pdf-worker".into()).spawn(move || {
-            let pdfium = Pdfium::bind_to_library(library).map(Pdfium::new).map_err(|e| format!("PDF engine could not start: {e}"));
+            let pdfium = Engine::bind(library);
             let mut documents = HashMap::new();
             let mut sessions = HashMap::<u64, (EditSession, DocumentInfo)>::new();
             let mut note_documents = HashMap::new();
@@ -275,7 +276,7 @@ impl PdfService {
             let mut recovery_locked = HashMap::<u64, RecoveryLock>::new();
             let mut recovery_pages = HashMap::<u64, u32>::new();
             let mut next_request = 1;
-            let mut print_snapshots = HashMap::<u64, (std::rc::Rc<PdfDocument<'_>>, Vec<crate::editor::PageSpec>)>::new();
+            let mut print_snapshots = HashMap::<u64, (std::rc::Rc<EngineDoc<'_>>, Vec<crate::editor::PageSpec>)>::new();
             let mut next_print = 1;
             #[cfg(test)]
             let mut render_work = HashMap::<u64, RenderWork>::new();
@@ -346,7 +347,7 @@ impl PdfService {
                     }
                     #[cfg(test)]
                     Request::EnginePageLabels(id, reply) => {
-                        let result = documents.get(&id).ok_or_else(|| "Document is closed".to_owned()).map(|document: &std::rc::Rc<PdfDocument<'_>>| document.pages().iter().map(|page| page.label().map(str::to_owned)).collect());
+                        let result = documents.get(&id).ok_or_else(|| "Document is closed".to_owned()).map(|document: &std::rc::Rc<EngineDoc<'_>>| document.engine_page_labels());
                         let _ = reply.send(result);
                     }
                     Request::BeginPrint(id, revision, reply) => {
@@ -355,7 +356,7 @@ impl PdfService {
                             if print_snapshots.len() >= 4 { return Err("Wait for another print job to finish.".into()); }
                             let (session, info) = sessions.get(&id).ok_or("Document is closed")?;
                             if session.revision != revision { return Err("Document changed. Start printing again.".into()); }
-                            let document: &std::rc::Rc<PdfDocument<'_>> = documents.get(&id).ok_or("Document is closed")?;
+                            let document: &std::rc::Rc<EngineDoc<'_>> = documents.get(&id).ok_or("Document is closed")?;
                             if !matches!(document.permissions().security_handler_revision(), Ok(PdfSecurityHandlerRevision::Unprotected)) { return Err("Printing encrypted or restricted PDFs is not supported in this build.".into()); }
                             let token = next_print; next_print += 1;
                             let document = note_document(pdfium.as_ref().map_err(Clone::clone)?, document, session, &mut note_documents, id)?;
@@ -465,7 +466,7 @@ impl PdfService {
                             }
                             let prepared = crate::raster_redaction::redact_raster_pages(raster_pages)?;
                             crate::sanitization::verify_clean_raster_pdf(&prepared.bytes, plan.pages.len())?;
-                            let check = engine.load_pdf_from_byte_vec(prepared.bytes.clone(), None).map_err(|error| format!("Redacted output validation failed: {error}"))?;
+                            let check = engine.load_from_vec(prepared.bytes.clone(), None).map_err(|error| format!("Redacted output validation failed: {error}"))?;
                             if check.pages().len() as usize != plan.pages.len() { return Err("Redacted output page count validation failed.".into()); }
                             for (index, raster) in plan.pages.iter().enumerate() {
                                 let output_page = check.pages().get(index as i32).map_err(|error| format!("Could not reopen redacted page {}: {error}", index + 1))?;
@@ -479,7 +480,7 @@ impl PdfService {
                             if reply.is_closed() { return Err("Redaction was canceled.".into()); }
                             ensure_copy_capacity(&sessions, prepared.bytes.len(), document_limit)?;
                             write_new_file(&path, &prepared.bytes)?;
-                            let pages = page_sizes(&check)?;
+                            let pages = check.page_sizes()?;
                             let new_id = next_id; next_id += 1;
                             let info = DocumentInfo { id: new_id, name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), pages, revision: 0, dirty: false, can_undo: false, can_redo: false };
                             sessions.insert(new_id, (EditSession::new(prepared.bytes, info.pages.len()), info.clone()));
@@ -519,7 +520,7 @@ impl PdfService {
                             crate::searchable_pdf::verify_searchable_pdf(&prepared.bytes, &prepared.pages)?;
                             ensure_active()?;
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
-                            let check = engine.load_pdf_from_byte_vec(prepared.bytes.clone(), None).map_err(|error| format!("Searchable OCR output validation failed: {error}"))?;
+                            let check = engine.load_from_vec(prepared.bytes.clone(), None).map_err(|error| format!("Searchable OCR output validation failed: {error}"))?;
                             ensure_active()?;
                             if check.pages().len() as usize != page_count { return Err("Searchable OCR output page count validation failed.".into()); }
                             for (index, expected) in prepared.pages.iter().enumerate() {
@@ -542,7 +543,7 @@ impl PdfService {
                             if reply.is_closed() { return Err("OCR was cancelled.".into()); }
                             ensure_copy_capacity(&sessions, prepared.bytes.len(), document_limit)?;
                             publish_searchable_file(&path, &prepared.bytes, prepared.deadline, &prepared.cancellation, None, None)?;
-                            let pages = page_sizes(&check)?;
+                            let pages = check.page_sizes()?;
                             let new_id = next_id; next_id += 1;
                             let info = DocumentInfo { id: new_id, name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), pages, revision: 0, dirty: false, can_undo: false, can_redo: false };
                             sessions.insert(new_id, (EditSession::new(prepared.bytes, info.pages.len()), info.clone()));
@@ -634,15 +635,15 @@ impl PdfService {
                             if password.contains('\0') { return Err("Passwords cannot contain a null character.".into()); }
                             let bytes = crate::open_limits::read_open_source(&path, sessions.values().map(|(session, _)| session.source.len() as u64), document_limit)?;
                             let parsed = crate::pdf_load::load_for_open(&bytes)?;
-                            let document = match engine.load_pdf_from_byte_vec(bytes.clone(), Some(&password)) {
+                            let document = match engine.load_from_vec(bytes.clone(), Some(&password)) {
                                 Ok(document) => document,
-                                Err(PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError)) => return Ok(OpenResult::PasswordRequired { request_id, name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), incorrect: !password.is_empty() }),
+                                Err(error) if error.is_password() => return Ok(OpenResult::PasswordRequired { request_id, name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), incorrect: !password.is_empty() }),
                                 Err(error) => return Err(format!("Unable to open PDF: {error}")),
                             };
-                            let pages = page_sizes(&document)?;
+                            let pages = document.page_sizes()?;
                             let id = next_id; next_id += 1;
                             let info = DocumentInfo { id, name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), pages, revision: 0, dirty: false, can_undo: false, can_redo: false };
-                            let recovery = if matches!(document.permissions().security_handler_revision(), Ok(PdfSecurityHandlerRevision::Unprotected)) {
+                            let recovery = if document.is_unprotected() {
                                 recovery_root.as_deref().map(|root| {
                                     let source = recovery_source_identity(&bytes)?;
                                     Ok::<_, String>(crate::recovery_store::read_recovery(root, source, None, 0)?.filter(|record| record.active))
@@ -670,8 +671,8 @@ impl PdfService {
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
                             let bytes = crate::open_limits::read_open_source(&path, sessions.values().map(|(session, _)| session.source.len() as u64), document_limit)?;
                             let parsed = crate::pdf_load::load_for_open(&bytes)?;
-                            let document = engine.load_pdf_from_byte_vec(bytes.clone(), None).map_err(|e| format!("Unable to open PDF: {e}"))?;
-                            let pages = page_sizes(&document)?;
+                            let document = engine.load_from_vec(bytes.clone(), None).map_err(|e| format!("Unable to open PDF: {e}"))?;
+                            let pages = document.page_sizes()?;
                             let id = next_id; next_id += 1;
                             let info = DocumentInfo { id, name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), pages, revision: 0, dirty: false, can_undo: false, can_redo: false };
                             sessions.insert(id, (EditSession::opened(bytes, parsed, info.pages.len(), None), info.clone()));
@@ -710,9 +711,9 @@ impl PdfService {
                             accept_recovery_record(&mut recovery_floors, &record)?;
                             if recovery_heads.values().any(|(identity, _)| *identity == source) { return Err("Another open tab already owns recovery for this PDF.".into()); }
                             let parsed = crate::pdf_load::load_for_open(&bytes)?;
-                            let document = engine.load_pdf_from_byte_vec(bytes.clone(), None).map_err(|error| format!("Unable to open PDF: {error}"))?;
-                            if !matches!(document.permissions().security_handler_revision(), Ok(PdfSecurityHandlerRevision::Unprotected)) { return Err("Encrypted or restricted PDFs cannot be restored from recovery.".into()); }
-                            let pages = page_sizes(&document)?;
+                            let document = engine.load_from_vec(bytes.clone(), None).map_err(|error| format!("Unable to open PDF: {error}"))?;
+                            if !document.is_unprotected() { return Err("Encrypted or restricted PDFs cannot be restored from recovery.".into()); }
+                            let pages = document.page_sizes()?;
                             let mut session = EditSession::opened(bytes, parsed, pages.len(), None);
                             restore_recovery_session(&mut session, &record)?;
                             session.export(None)?;
@@ -825,16 +826,11 @@ impl PdfService {
                                 let session = &sessions.get(&id).ok_or("Document is closed")?.0;
                                 let spec = session.plan.get(page as usize).ok_or("Page is out of range")?;
                                 let document = note_document(pdfium.as_ref().map_err(Clone::clone)?, original, session, &mut note_documents, id)?;
-                                let image = with_planned_page(&document, spec, |page| {
-                                    #[cfg(test)]
-                                    { render_work.entry(id).or_default().rendered += 1; }
-                                    let bitmap = page.render_with_config(&PdfRenderConfig::new().set_target_width(width).set_maximum_height(5000).render_annotations(true)).map_err(|e| e.to_string())?;
-                                    bitmap.as_image().map_err(|e| e.to_string())
-                                })?;
-                                let mut bytes = Cursor::new(Vec::new());
-                                image.write_to(&mut bytes, image::ImageFormat::Png).map_err(|e| e.to_string())?;
-                                let bytes = bytes.into_inner();
-                                let weight = bytes.len() + image.width() as usize * image.height() as usize * 4;
+                                #[cfg(test)]
+                                { render_work.entry(id).or_default().rendered += 1; }
+                                let rendered = document.render_viewer_png(spec, width)?;
+                                let bytes = rendered.png;
+                                let weight = bytes.len() + rendered.width as usize * rendered.height as usize * 4;
                                 cache.insert(key, bytes.clone(), weight); Ok(bytes)
                             })()
                         };
@@ -848,7 +844,7 @@ impl PdfService {
                             if session.revision != revision { return Err("Document changed. Reopen document properties.".into()); }
                             let document = documents.get(&id).ok_or("Document is closed")?;
                             let dimensions = current_info(session, original, document)?.pages.iter().map(|page| (page.width, page.height)).collect::<Vec<_>>();
-                            crate::document_properties::inspect(document, session.source.len(), &dimensions)
+                            document.properties(session.source.len(), &dimensions)
                         })();
                         let _ = reply.send(result);
                     }
@@ -858,7 +854,7 @@ impl PdfService {
                             let (session, _) = sessions.get(&id).ok_or("Document is closed")?;
                             if session.revision != revision { return Err("Document changed. Reopen page labels.".into()); }
                             let document = documents.get(&id).ok_or("Document is closed")?;
-                            let source = page_labels.read(id, &session.source, document.pages().len() as usize);
+                            let source = page_labels.read(id, &session.source, document.page_count());
                             Ok(crate::page_labels::project(&source, id, revision, &session.plan))
                         })();
                         let _ = reply.send(result);
@@ -872,39 +868,31 @@ impl PdfService {
                             if session.revision != revision { return Err("Document changed. Reopen bookmarks.".into()); }
                             let document = documents.get(&id).ok_or("Document is closed")?;
                             let mut items = Vec::new();
-                            let mut depths = HashMap::new();
                             let mut views = HashMap::new();
                             let mut truncated = false;
                             let mut title_bytes = 0usize;
-                            for bookmark in document.bookmarks().iter().take(1001) {
+                            document.bookmarks(1001, &mut |bookmark| {
                                 if reply.is_closed() { return Err("Bookmark reading was cancelled.".into()); }
-                                if items.len() == 1000 { truncated = true; break; }
+                                if items.len() == 1000 { truncated = true; return Ok(std::ops::ControlFlow::Break(())); }
                                 #[cfg(test)]
                                 { bookmark_work.entry(id).or_default().visited += 1; }
-                                let depth = bookmark.parent().and_then(|parent| depths.get(&parent).copied()).map_or(0, |depth: usize| depth + 1);
-                                depths.insert(bookmark.clone(), depth);
-                                let target = bookmark.destination();
-                                let source = target.as_ref().and_then(|destination| destination.page_index().ok());
-                                let page = source.and_then(|source| session.plan.iter().position(|spec| spec.source == source as usize));
-                                let destination = match (page, target) {
-                                    (Some(position), Some(target)) => {
-                                        let mut parsed = crate::bookmark_destinations::parse(target.view_settings());
+                                let depth = bookmark.depth;
+                                let page = bookmark.page_index.and_then(|source| session.plan.iter().position(|spec| spec.source == source));
+                                let destination = match (page, bookmark.destination) {
+                                    (Some(position), Some(mut parsed)) => {
                                         if parsed.needs_view() {
-                                            let view = *views.entry(position).or_insert_with(|| with_planned_page(document, &session.plan[position], |planned| {
-                                                let bounds = planned.boundaries().bounding().or_else(|_| planned.boundaries().crop()).or_else(|_| planned.boundaries().media()).map(|boundary| boundary.bounds);
-                                                let (left, bottom) = bounds.map_or((0.0, 0.0), |bounds| (bounds.left().value, bounds.bottom().value));
-                                                Ok(planned.rotation().ok().and_then(|rotation| crate::bookmark_destinations::page_view(left, bottom, planned.width().value, planned.height().value, rotation.as_degrees())))
-                                            }).ok().flatten());
+                                            let view = *views.entry(position).or_insert_with(|| document.bookmark_page_view(&session.plan[position]).ok().flatten());
                                             match view { Some(view) => parsed.view = Some(view), None => parsed = parsed.without_position() }
                                         }
                                         Some(parsed)
                                     }
                                     _ => None,
                                 };
-                                let title = bookmark.title().filter(|s| !s.is_empty()).unwrap_or_else(|| "Untitled bookmark".into());
+                                let title = bookmark.title.filter(|s| !s.is_empty()).unwrap_or_else(|| "Untitled bookmark".into());
                                 title_bytes = checked_read_text_bytes(title_bytes, title.len(), "Bookmarks contain too much text.")?;
                                 items.push(BookmarkInfo { title, page, depth, destination });
-                            }
+                                Ok(std::ops::ControlFlow::Continue(()))
+                            })?;
                             Ok(BookmarkList { items, truncated })
                         })();
                         let _ = reply.send(result);
@@ -917,7 +905,7 @@ impl PdfService {
                             let spec = session.plan.get(index as usize).ok_or("Page is out of range")?;
                             let document = documents.get(&id).ok_or("Document is closed")?;
                             session.text_extraction_permission()?;
-                            with_planned_page(document, spec, |page| crate::text_geometry::inspect(page, id, index, revision))
+                            document.text_geometry(PageTarget::Planned(spec), id, index, revision)
                         })();
                         let _ = reply.send(result);
                     }
@@ -929,13 +917,9 @@ impl PdfService {
                             let spec = session.plan.get(page as usize).ok_or("Page is out of range")?;
                             let document = documents.get(&id).ok_or("Document is closed")?;
                             session.text_extraction_permission()?;
-                            with_planned_page(document, spec, |source| {
-                                let text = source.text().map_err(|e| e.to_string())?;
-                                let visible = source.boundaries().bounding().map_err(|e| e.to_string())?.bounds;
-                                let visible = text.inside_rect(visible);
-                                checked_read_text_bytes(0, visible.len(), "This page has too much embedded text to read or search.")?;
-                                Ok(visible)
-                            })
+                            let visible = document.visible_text(PageTarget::Planned(spec))?;
+                            checked_read_text_bytes(0, visible.len(), "This page has too much embedded text to read or search.")?;
+                            Ok(visible)
                         })();
                         let _ = reply.send(result);
                     }
@@ -1140,7 +1124,7 @@ impl PdfService {
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
                             crate::split::prepare_and_publish(session, parent, name, pages_per_file, |bytes, expected| {
                                 if reply.is_closed() { return Err("Split was canceled.".into()); }
-                                let document = engine.load_pdf_from_byte_slice(bytes, None).map_err(|error| format!("Output could not be opened: {error}"))?;
+                                let document = engine.load_from_slice(bytes, None).map_err(|error| format!("Output could not be opened: {error}"))?;
                                 if document.pages().len() as usize != expected { return Err("Output page count differs from the split plan.".into()); }
                                 for index in 0..document.pages().len() {
                                     let page = document.pages().get(index).map_err(|error| format!("Output page {} could not be read: {error}", index + 1))?;
@@ -1189,8 +1173,8 @@ impl PdfService {
                             let checked = crate::forms::FormDocument::query(&EditSession::new(bytes.clone(), expected), 0);
                             if checked.status != "supported" || checked.fields.len() != fields.len() || checked.fields.iter().zip(&fields).any(|(actual, expected)| actual.name != expected.name || actual.value != expected.value || actual.checked != expected.checked || actual.page != expected.page) { return Err("Filled form field and appearance validation failed.".into()); }
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
-                            let document = engine.load_pdf_from_byte_vec(bytes.clone(), None).map_err(|error| format!("Filled PDF could not be opened: {error}"))?;
-                            let pages = page_sizes(&document)?;
+                            let document = engine.load_from_vec(bytes.clone(), None).map_err(|error| format!("Filled PDF could not be opened: {error}"))?;
+                            let pages = document.page_sizes()?;
                             if pages.len() != expected { return Err("Filled PDF page count validation failed.".into()); }
                             let engine_fields = checked_engine_form_values(&document,&fields).ok_or("Filled PDF form could not be read consistently by the rendering engine.")?;
                             if !filled_values_agree(&fields, &engine_fields) { return Err("Filled PDF values disagree with the rendering engine.".into()); }
@@ -1243,8 +1227,8 @@ impl PdfService {
                             let validate = |bytes: &[u8], expected| {
                                 if reply.is_closed() { return Err(format!("{operation} was canceled.")); }
                                 ensure_copy_capacity(&sessions, bytes.len(), document_limit)?;
-                                let document = engine.load_pdf_from_byte_vec(bytes.to_vec(), None).map_err(|error| format!("Output could not be opened: {error}"))?;
-                                let pages = page_sizes(&document)?;
+                                let document = engine.load_from_vec(bytes.to_vec(), None).map_err(|error| format!("Output could not be opened: {error}"))?;
+                                let pages = document.page_sizes()?;
                                 if pages.len() != expected { return Err(format!("Output page count differs from the {operation} plan.")); }
                                 for index in 0..document.pages().len() {
                                     let page = document.pages().get(index).map_err(|error| format!("Output page {} could not be read: {error}", index + 1))?;
@@ -1278,8 +1262,8 @@ impl PdfService {
                             let mut prepared_document = None;
                             let prepared = crate::image_pdf::prepare_and_write(&source, &path, options, |prepared| {
                                 if reply.is_closed() { return Err("Create PDF was canceled.".into()); }
-                                let document = engine.load_pdf_from_byte_vec(prepared.bytes.clone(), None).map_err(|error| format!("Output could not be opened: {error}"))?;
-                                let pages = page_sizes(&document)?;
+                                let document = engine.load_from_vec(prepared.bytes.clone(), None).map_err(|error| format!("Output could not be opened: {error}"))?;
+                                let pages = document.page_sizes()?;
                                 if pages.len() != 1 || (pages[0].width - prepared.page_width).abs() > 0.02 || (pages[0].height - prepared.page_height).abs() > 0.02 { return Err("Output page dimensions differ from the image conversion plan.".into()); }
                                 let page = document.pages().get(0).map_err(|error| format!("Output page could not be read: {error}"))?;
                                 let bitmap = page.render_with_config(&PdfRenderConfig::new().set_target_width(64).set_maximum_height(64)).map_err(|error| format!("Output page could not be rendered: {error}"))?;
@@ -1304,8 +1288,8 @@ impl PdfService {
                         let result = (|| {
                             if path.exists() || !path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("pdf")) { return Err("Choose a new .pdf filename; Create PDF never overwrites an existing file.".into()); }
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
-                            let document = engine.load_pdf_from_byte_vec(prepared.bytes.clone(), None).map_err(|error| format!("Output could not be opened: {error}"))?;
-                            let pages = page_sizes(&document)?;
+                            let document = engine.load_from_vec(prepared.bytes.clone(), None).map_err(|error| format!("Output could not be opened: {error}"))?;
+                            let pages = document.page_sizes()?;
                             if pages.len() != prepared.pages.len() { return Err("Output page count differs from the image conversion plan.".into()); }
                             for (index, ((width, height), page_size)) in prepared.pages.iter().zip(&pages).enumerate() {
                                 if (page_size.width - width).abs() > 0.02 || (page_size.height - height).abs() > 0.02 { return Err(format!("Output page {} dimensions differ from the image conversion plan.", index + 1)); }
@@ -1342,7 +1326,7 @@ impl PdfService {
                             if current != expected { return Err("The image replacement target changed. Inspect it again.".into()); }
                             let output_bytes = crate::image_edit::replace_flat_raster_image(&session.source, u32::from(page) + 1, &replacement_rgb)?;
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
-                            let output = engine.load_pdf_from_byte_vec(output_bytes.clone(), None).map_err(|error| format!("Image replacement output could not be opened: {error}"))?;
+                            let output = engine.load_from_vec(output_bytes.clone(), None).map_err(|error| format!("Image replacement output could not be opened: {error}"))?;
                             if output.pages().len() != original.pages().len() { return Err("Image replacement output page count changed.".into()); }
                             for index in 0..output.pages().len() {
                                 let target = crate::image_edit::inspect_flat_raster_image(&session.source, u32::from(index as u16) + 1)?;
@@ -1360,7 +1344,7 @@ impl PdfService {
                             if reply.is_closed() { return Err("Image replacement was canceled.".into()); }
                             ensure_copy_capacity(&sessions, output_bytes.len(), document_limit)?;
                             write_new_file(&path, &output_bytes)?;
-                            let pages = page_sizes(&output)?;
+                            let pages = output.page_sizes()?;
                             let new_id = next_id; next_id += 1;
                             let info = DocumentInfo { id: new_id, name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), pages, revision: 0, dirty: false, can_undo: false, can_redo: false };
                             sessions.insert(new_id, (EditSession::new(output_bytes, info.pages.len()), info.clone()));
@@ -1376,10 +1360,10 @@ impl PdfService {
                     Request::ReplaceTextCopy(id, revision, page, expected, replacement, path, reply) => {
                         if reply.is_closed(){continue} let result=(||{
                             let(session,_)=sessions.get(&id).ok_or("Document is closed")?;let original=documents.get(&id).ok_or("Document is closed")?;let current=checked_text_replacement(session,original,id,revision,page)?;if current!=expected{return Err("The text replacement target changed. Inspect it again.".into())}
-                            let bytes=crate::text_edit::replace_text_run(&session.source,u32::from(page)+1,&replacement)?;let engine=pdfium.as_ref().map_err(Clone::clone)?;let output=engine.load_pdf_from_byte_vec(bytes.clone(),None).map_err(|e|format!("Text replacement output could not be opened: {e}"))?;
+                            let bytes=crate::text_edit::replace_text_run(&session.source,u32::from(page)+1,&replacement)?;let engine=pdfium.as_ref().map_err(Clone::clone)?;let output=engine.load_from_vec(bytes.clone(),None).map_err(|e|format!("Text replacement output could not be opened: {e}"))?;
                             let after_target=crate::text_edit::inspect_text_run(&bytes,u32::from(page)+1)?;let after=text_replacement_geometry(&output,id,revision,page,after_target)?;if after.target.text!=replacement{return Err("Text replacement extraction does not match the requested text.".into())}
                             verify_text_pixels(original,&output,page,&current.bounds,&after.bounds)?;
-                            if reply.is_closed(){return Err("Text replacement was canceled.".into())} ensure_copy_capacity(&sessions, bytes.len(), document_limit)?; write_new_file(&path,&bytes)?;let pages=page_sizes(&output)?;let new_id=next_id;next_id+=1;let info=DocumentInfo{id:new_id,name:path.file_name().unwrap_or_default().to_string_lossy().into_owned(),path:path.to_string_lossy().into_owned(),pages,revision:0,dirty:false,can_undo:false,can_redo:false};sessions.insert(new_id,(EditSession::new(bytes,info.pages.len()),info.clone()));documents.insert(new_id,std::rc::Rc::new(output));Ok(SavedCopy{path:path.to_string_lossy().into_owned(),document:info})
+                            if reply.is_closed(){return Err("Text replacement was canceled.".into())} ensure_copy_capacity(&sessions, bytes.len(), document_limit)?; write_new_file(&path,&bytes)?;let pages=output.page_sizes()?;let new_id=next_id;next_id+=1;let info=DocumentInfo{id:new_id,name:path.file_name().unwrap_or_default().to_string_lossy().into_owned(),path:path.to_string_lossy().into_owned(),pages,revision:0,dirty:false,can_undo:false,can_redo:false};sessions.insert(new_id,(EditSession::new(bytes,info.pages.len()),info.clone()));documents.insert(new_id,std::rc::Rc::new(output));Ok(SavedCopy{path:path.to_string_lossy().into_owned(),document:info})
                         })();let result=result.map(|saved|{let saved_id=saved.document.id;ReplyLease::new(saved,UnclaimedReply::Document(saved_id),resource_cleanup.clone())});if let Err(Ok(saved))=reply.send(result){documents.remove(&saved.document.id);sessions.remove(&saved.document.id);}
                     }
                     Request::Save(id, pages, path, reply) => {
@@ -1388,7 +1372,7 @@ impl PdfService {
                             if path == PathBuf::from(&original.path) { return Err("Choose a new filename to preserve the source PDF.".into()); }
                             let bytes = session.export(pages.as_deref())?;
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
-                            let check = engine.load_pdf_from_byte_slice(&bytes, None).map_err(|e| format!("Output validation failed: {e}"))?;
+                            let check = engine.load_from_slice(&bytes, None).map_err(|e| format!("Output validation failed: {e}"))?;
                             let expected = pages.as_ref().map_or(session.plan.len(), |p| p.iter().collect::<std::collections::HashSet<_>>().len());
                             if check.pages().len() as usize != expected { return Err("Output page count validation failed.".into()); }
                             write_new_file(&path, &bytes)?;
@@ -1609,17 +1593,17 @@ impl PdfService {
     }
 }
 
-fn load_note_document<'a>(engine: &'a Pdfium, original: &std::rc::Rc<PdfDocument<'a>>, session: &EditSession, plan: &[PageSpec]) -> Result<std::rc::Rc<PdfDocument<'a>>, String> {
+fn load_note_document<'a>(engine: &'a Engine, original: &std::rc::Rc<EngineDoc<'a>>, session: &EditSession, plan: &[PageSpec]) -> Result<std::rc::Rc<EngineDoc<'a>>, String> {
     match session.note_source(plan)? {
         None => Ok(original.clone()),
         Some(bytes) => {
-            let document = engine.load_pdf_from_byte_vec(bytes, None).map_err(|error| error.to_string())?;
-            if page_sizes(&document)?.len() != original.pages().len() as usize { return Err("Comment rendering changed the source page count. The edit was rejected.".into()); }
+            let document = engine.load_from_vec(bytes, None).map_err(|error| error.to_string())?;
+            if document.page_sizes()?.len() != original.page_count() { return Err("Comment rendering changed the source page count. The edit was rejected.".into()); }
             Ok(std::rc::Rc::new(document))
         }
     }
 }
-fn note_document<'a>(engine: &'a Pdfium, original: &std::rc::Rc<PdfDocument<'a>>, session: &EditSession, documents: &mut HashMap<u64, (u64, std::rc::Rc<PdfDocument<'a>>)>, id: u64) -> Result<std::rc::Rc<PdfDocument<'a>>, String> {
+fn note_document<'a>(engine: &'a Engine, original: &std::rc::Rc<EngineDoc<'a>>, session: &EditSession, documents: &mut HashMap<u64, (u64, std::rc::Rc<EngineDoc<'a>>)>, id: u64) -> Result<std::rc::Rc<EngineDoc<'a>>, String> {
     if let Some((revision, document)) = documents.get(&id) { if *revision == session.revision { return Ok(document.clone()); } }
     let document = load_note_document(engine, original, session, &session.plan)?;
     documents.insert(id, (session.revision, document.clone())); Ok(document)
@@ -1969,7 +1953,7 @@ fn publish_searchable_file(
 #[cfg(windows)]
 fn validate_ocr_result(
     sessions: &HashMap<u64, (EditSession, DocumentInfo)>,
-    documents: &HashMap<u64, std::rc::Rc<PdfDocument<'_>>>,
+    documents: &HashMap<u64, std::rc::Rc<EngineDoc<'_>>>,
     request: crate::ocr::OcrPageRequest,
 ) -> Result<(), String> {
     let (session, _) = sessions.get(&request.document_id).ok_or("Document is closed")?;
@@ -2033,33 +2017,6 @@ fn checked_engine_form_values(document: &PdfDocument<'_>, fields: &[crate::forms
     Some(values)
 }
 
-fn page_sizes(document: &PdfDocument<'_>) -> Result<Vec<PageSize>, String> {
-    let pages = document.pages();
-    if pages.is_empty() { return Err("This PDF has no pages.".into()); }
-    if pages.len() > u16::MAX as i32 + 1 { return Err("This PDF exceeds the supported limit of 65,536 pages.".into()); }
-    (0..pages.len()).map(|index| {
-        let page = pages.get(index).map_err(|error| format!("Unable to read page {}: {error}", index + 1))?;
-        let size = PageSize { width: page.width().value, height: page.height().value };
-        if !size.width.is_finite() || !size.height.is_finite() || size.width <= 0.0 || size.height <= 0.0 { return Err(format!("Invalid dimensions on page {}.", index + 1)); }
-        Ok(size)
-    }).collect()
-}
-
-fn with_planned_page<T>(document: &PdfDocument<'_>, spec: &PageSpec, action: impl FnOnce(&PdfPage<'_>) -> Result<T, String>) -> Result<T, String> {
-    let mut page = document.pages().get(spec.source as i32).map_err(|error| error.to_string())?;
-    let original_rotation = page.rotation().map_err(|error| error.to_string())?;
-    let original_crop = if spec.crop.is_some() {
-        Some(page.boundaries().crop().or_else(|_| page.boundaries().bounding()).map_err(|error| error.to_string())?.bounds)
-    } else { None };
-    if let Some(crop) = spec.crop { page.boundaries_mut().set_crop(PdfRect::new_from_values(crop.bottom, crop.left, crop.top, crop.right)).map_err(|error| error.to_string())?; }
-    let turns = (original_rotation.as_degrees() as i32 / 90 + spec.turns).rem_euclid(4);
-    page.set_rotation(match turns { 1 => PdfPageRenderRotation::Degrees90, 2 => PdfPageRenderRotation::Degrees180, 3 => PdfPageRenderRotation::Degrees270, _ => PdfPageRenderRotation::None });
-    let result = action(&page);
-    let restore = match original_crop { Some(crop) => page.boundaries_mut().set_crop(crop).map_err(|error| error.to_string()), None => Ok(()) };
-    page.set_rotation(original_rotation);
-    result.and_then(|value| restore.map(|_| value))
-}
-
 fn validate_crop_insets(insets: CropInsets) -> Result<(), String> {
     let values = [insets.top, insets.right, insets.bottom, insets.left];
     if values.iter().any(|value| !value.is_finite() || *value < 0.0) {
@@ -2120,10 +2077,10 @@ fn displayed_crop(page: &PdfPage<'_>, rect: CropRect) -> Result<CropBox, String>
     Ok(crop)
 }
 
-fn current_info(session: &EditSession, original: &DocumentInfo, document: &PdfDocument<'_>) -> Result<DocumentInfo, String> {
+fn current_info(session: &EditSession, original: &DocumentInfo, document: &EngineDoc<'_>) -> Result<DocumentInfo, String> {
     let mut info = original.clone();
     info.pages = session.plan.iter().map(|spec| {
-        if spec.crop.is_some() { return with_planned_page(document, spec, |page| Ok(PageSize { width: page.width().value, height: page.height().value })); }
+        if spec.crop.is_some() { let (width, height) = document.planned_page_size(spec)?; return Ok(PageSize { width, height }); }
         let size = &original.pages[spec.source];
         Ok(if spec.turns % 2 == 0 { size.clone() } else { PageSize { width: size.height, height: size.width } })
     }).collect::<Result<_, String>>()?;
@@ -5913,5 +5870,50 @@ mod tests {
 
         let manifest=serde_json::json!({"schema":1,"scope":"Five exact synthetic native saved outputs; PDFium semantic/pixel checks plus independent Poppler rendering. No Adobe, arbitrary-PDF, or general cross-viewer claim.","cases":cases});
         create_new(&root.join("manifest.json"),format!("{}\n",serde_json::to_string_pretty(&manifest).unwrap()).as_bytes());
+    }
+    #[test]
+    #[ignore = "timing probe for the engine boundary; run with --release --ignored --nocapture"]
+    fn engine_render_timing_probe() {
+        let _print_lock = print_test_lock();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let median = |mut samples: Vec<f64>| { samples.sort_by(|a, b| a.partial_cmp(b).unwrap()); samples[samples.len() / 2] };
+        let files = [root.join("resources/welcome.pdf"), root.join("../test-corpus/synthetic-text-1500.pdf"), root.join("../test-corpus/synthetic-scan-98.pdf"), root.join("tests/fixtures/reportlab-mixed-fields.pdf")];
+        for path in files {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            for width in [800, 1600, 3000] {
+                let mut samples = Vec::new();
+                for _ in 0..9 {
+                    let info = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap();
+                    let started = std::time::Instant::now();
+                    let png = call(&service, |reply| Request::Render(info.id, 0, width, reply)).unwrap();
+                    samples.push(started.elapsed().as_secs_f64() * 1000.0);
+                    assert!(!png.is_empty());
+                    call(&service, |reply| Request::Close(info.id, reply)).unwrap();
+                }
+                println!("timing view file={name} width={width} median_ms={:.2}", median(samples));
+            }
+            let mut samples = Vec::new();
+            for _ in 0..9 {
+                let info = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap();
+                let snapshot = call(&service, |reply| Request::BeginPrint(info.id, info.revision, reply)).unwrap();
+                let started = std::time::Instant::now();
+                let bitmap = call(&service, |reply| Request::PrintRender(snapshot.token, 0, 2400, 3200, reply)).unwrap();
+                samples.push(started.elapsed().as_secs_f64() * 1000.0);
+                assert_eq!(bitmap.bgra.len(), bitmap.width as usize * bitmap.height as usize * 4);
+                drop(snapshot);
+                call(&service, |reply| Request::Close(info.id, reply)).unwrap();
+            }
+            println!("timing print file={name} box=2400x3200 median_ms={:.2}", median(samples));
+            let mut samples = Vec::new();
+            for _ in 0..9 {
+                let info = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap();
+                let started = std::time::Instant::now();
+                let _ = call(&service, |reply| Request::Text(info.id, 0, info.revision, reply));
+                samples.push(started.elapsed().as_secs_f64() * 1000.0);
+                call(&service, |reply| Request::Close(info.id, reply)).unwrap();
+            }
+            println!("timing text file={name} median_ms={:.2}", median(samples));
+        }
     }
 }
