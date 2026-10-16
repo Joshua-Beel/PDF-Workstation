@@ -572,6 +572,7 @@ fn run_child(
         stderr_limit: OCR_STDERR_LIMIT,
         timeout: options.timeout,
         poll_interval: OCR_POLL_INTERVAL,
+        drain_grace: child_job::PIPE_DRAIN_GRACE,
     };
     let run = child_job::run_bounded(running, input, &bounds, &|| cancellation.is_cancelled())?;
     let reason = run.reason;
@@ -587,6 +588,9 @@ fn run_child(
         TerminalReason::WaitFailed => return Err(OcrProcessError::System("Could not wait for OCR process".into())),
         TerminalReason::LimitViolation(_) => return Err(OcrProcessError::System("OCR exceeded a job limit".into())),
         TerminalReason::Exited | TerminalReason::StdoutLimit | TerminalReason::StderrLimit => {}
+    }
+    if run.io_cancelled {
+        return Err(OcrProcessError::System("OCR output pipes did not close".into()));
     }
     if cancellation.is_cancelled() {
         return Err(OcrProcessError::Cancelled);

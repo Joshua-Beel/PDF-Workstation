@@ -2,10 +2,11 @@
 //!
 //! Shared by the OCR engine child (`ocr_process.rs`) and the planned PDF-engine helper. The parent holds the
 //! only job handle, so closing it (or the parent exiting) kills the child (`KILL_ON_JOB_CLOSE`). Optional
-//! hardening for children that run untrusted input: Windows Error Reporting is kept out of the child
-//! (`DIE_ON_UNHANDLED_EXCEPTION` plus `harden_job_child_process` inside the child), UI restrictions, and an
-//! I/O completion port that reports limit violations. A memory limit makes allocations fail; it does not end
-//! the process, and Windows reports it once per process, so a caller that enables notifications must check
+//! hardening for children that run untrusted input: no error dialogs and no Windows Error Reporting for
+//! unhandled exceptions or refused allocations (`DIE_ON_UNHANDLED_EXCEPTION` plus `harden_job_child_process`
+//! inside the child; fail-fast exits are not covered, see there), UI restrictions, and an I/O completion port
+//! that reports limit violations. A memory limit makes allocations fail; it does not end the process, and
+//! Windows reports it once per process, so a caller that enables notifications must check
 //! `JobChild::limit_violation` after every reply and discard a child that has hit a limit.
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -16,7 +17,8 @@ use std::io::{Read, Write};
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use windows::core::{BOOL, PCWSTR, PWSTR};
@@ -28,7 +30,9 @@ use windows::Win32::System::Diagnostics::Debug::{
     SetErrorMode, SetUnhandledExceptionFilter, EXCEPTION_POINTERS, SEM_FAILCRITICALERRORS,
     SEM_NOGPFAULTERRORBOX, SEM_NOOPENFILEERRORBOX,
 };
-use windows::Win32::System::IO::{CreateIoCompletionPort, GetQueuedCompletionStatus, OVERLAPPED};
+use windows::Win32::Storage::FileSystem::WriteFile;
+use windows::Win32::System::ErrorReporting::{WerSetFlags, WER_FAULT_REPORTING, WER_FAULT_REPORTING_NO_UI};
+use windows::Win32::System::IO::{CancelSynchronousIo, CreateIoCompletionPort, GetQueuedCompletionStatus, OVERLAPPED};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectAssociateCompletionPortInformation,
     JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation, QueryInformationJobObject,
@@ -42,11 +46,11 @@ use windows::Win32::System::JobObjects::{
 };
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetExitCodeProcess, GetProcessId,
-    InitializeProcThreadAttributeList, ResumeThread, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED, EXTENDED_STARTUPINFO_PRESENT,
-    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-    STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetCurrentThreadId, GetExitCodeProcess,
+    GetProcessId, InitializeProcThreadAttributeList, OpenThread, ResumeThread, TerminateProcess,
+    UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
+    EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW, THREAD_TERMINATE,
 };
 
 /// Exit code the parent uses when it ends a child because the caller cancelled (`STATUS_CONTROL_C_EXIT`).
@@ -56,6 +60,17 @@ pub(crate) const EXIT_RESOURCE_LIMIT: u32 = 0xc000_009a;
 /// Exit code a hardened child uses when an allocation fails, instead of Rust's abort (which goes to
 /// Windows Error Reporting and can write a dump to the system drive).
 pub(crate) const EXIT_ALLOCATION_FAILURE: u32 = 0xe000_0a11;
+
+/// How long `run_bounded` waits, once the child has ended, for its pipe threads to finish. A pipe end held by
+/// some other process (for example one started by another thread while the child's pipe ends were briefly
+/// inheritable) keeps the pipe open after the child is gone; the blocked read or write is then cancelled and
+/// the run reports `io_cancelled`.
+pub(crate) const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(2);
+/// Longest wait for a terminated process to finish exiting.
+const REAP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Longest time spent cancelling blocked pipe I/O after the grace period.
+const IO_CANCEL_LIMIT: Duration = Duration::from_secs(5);
+const UNHANDLED_EXCEPTION_MARKER: &[u8] = b"\nchild_job: unhandled exception, exiting with its code\n";
 
 const JOB_OBJECT_MSG_ACTIVE_PROCESS_LIMIT: u32 = 3;
 const JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT: u32 = 9;
@@ -164,7 +179,7 @@ pub(crate) fn classify_exit_code(code: u32) -> ExitKind {
         EXIT_CANCELLED => ExitKind::Cancelled,
         EXIT_RESOURCE_LIMIT => ExitKind::EndedForResourceLimit,
         EXIT_ALLOCATION_FAILURE => ExitKind::AllocationFailure,
-        code if code >= 0xc000_0000 => ExitKind::Exception(code),
+        code if code >= 0x8000_0000 => ExitKind::Exception(code),
         code => ExitKind::Code(code),
     }
 }
@@ -228,9 +243,13 @@ impl JobChild {
     fn terminate_direct_and_reap(&mut self) {
         if !self.reaped {
             let _ = unsafe { TerminateProcess(as_windows_handle(&self.process), EXIT_RESOURCE_LIMIT) };
-            let _ = unsafe { WaitForSingleObject(as_windows_handle(&self.process), u32::MAX) };
-            self.reaped = true;
+            self.reaped = self.wait_for_exit(REAP_TIMEOUT);
         }
+    }
+
+    fn wait_for_exit(&self, limit: Duration) -> bool {
+        let millis = u32::try_from(limit.as_millis()).unwrap_or(u32::MAX - 1);
+        (unsafe { WaitForSingleObject(as_windows_handle(&self.process), millis) }) == WAIT_OBJECT_0
     }
 
     /// Ends every process in the job with `exit_code` and waits for the child. No-op once it has been reaped.
@@ -243,8 +262,7 @@ impl JobChild {
                 ChildSystemError(format!("Could not terminate {} job ({job_error}) or process ({process_error})", self.label))
             })?;
         }
-        let wait = unsafe { WaitForSingleObject(as_windows_handle(&self.process), u32::MAX) };
-        if wait != WAIT_OBJECT_0 {
+        if !self.wait_for_exit(REAP_TIMEOUT) {
             return Err(ChildSystemError(format!("Could not reap {} process", self.label)));
         }
         self.reaped = true;
@@ -272,8 +290,7 @@ impl Drop for JobChild {
             } else {
                 let _ = unsafe { TerminateProcess(as_windows_handle(&self.process), EXIT_RESOURCE_LIMIT) };
             }
-            let _ = unsafe { WaitForSingleObject(as_windows_handle(&self.process), u32::MAX) };
-            self.reaped = true;
+            self.reaped = self.wait_for_exit(REAP_TIMEOUT);
         }
     }
 }
@@ -372,6 +389,9 @@ pub(crate) struct OutputBounds {
     pub(crate) stderr_limit: usize,
     pub(crate) timeout: Duration,
     pub(crate) poll_interval: Duration,
+    /// Wait for the pipe threads after the child has ended before cancelling their blocked I/O
+    /// (normally `PIPE_DRAIN_GRACE`).
+    pub(crate) drain_grace: Duration,
 }
 
 /// Why `run_bounded` stopped waiting. Every reason except `Exited` means the parent ended the child.
@@ -396,11 +416,16 @@ pub(crate) struct ChildRun {
     pub(crate) stderr: Vec<u8>,
     /// Any limit the job reported, also when the child exited on its own after an allocation failed.
     pub(crate) limit_violation: Option<LimitViolation>,
+    /// A pipe stayed open after the child ended (another process holds an end) and its blocked read or write
+    /// was cancelled after `drain_grace`: stdout or stderr may be incomplete, or the input was not all written.
+    pub(crate) io_cancelled: bool,
     pub(crate) child: JobChild,
 }
 
 /// Writes `input` to the child's stdin and closes it, captures stdout and stderr up to their caps, and waits.
 /// The child is ended (whole job) on a cap overflow, a reported limit violation, cancellation or the timeout.
+/// Bounded even if a pipe never closes: returns within about `timeout + drain_grace` plus the reap and
+/// cancel limits.
 pub(crate) fn run_bounded(
     running: RunningChild,
     input: &[u8],
@@ -412,11 +437,13 @@ pub(crate) fn run_bounded(
     let started = Instant::now();
     let stdout_exceeded = AtomicBool::new(false);
     let stderr_exceeded = AtomicBool::new(false);
-    let poll_millis = u32::try_from(bounds.poll_interval.as_millis()).unwrap_or(u32::MAX);
+    let poll_millis = u32::try_from(bounds.poll_interval.as_millis()).unwrap_or(u32::MAX - 1);
+    let workers = [IoWorker::default(), IoWorker::default(), IoWorker::default()];
+    let [writer_io, stdout_io, stderr_io] = &workers;
     let terminal = std::thread::scope(|scope| {
-        let writer = scope.spawn(move || write_input(label, stdin, input));
-        let stdout_reader = scope.spawn(|| read_bounded(label, stdout, bounds.stdout_limit, &stdout_exceeded));
-        let stderr_reader = scope.spawn(|| read_bounded(label, stderr, bounds.stderr_limit, &stderr_exceeded));
+        let writer = scope.spawn(move || writer_io.run(|io| write_input(label, stdin, input, io)));
+        let stdout_reader = scope.spawn(|| stdout_io.run(|io| read_bounded(label, stdout, bounds.stdout_limit, &stdout_exceeded, io)));
+        let stderr_reader = scope.spawn(|| stderr_io.run(|io| read_bounded(label, stderr, bounds.stderr_limit, &stderr_exceeded, io)));
         let reason = loop {
             let wait = unsafe { WaitForSingleObject(as_windows_handle(&child.process), poll_millis) };
             if wait == WAIT_OBJECT_0 {
@@ -450,6 +477,7 @@ pub(crate) fn run_bounded(
                 break TerminalReason::TimedOut;
             }
         };
+        finish_io(&workers, bounds.drain_grace);
         let writer_result = writer.join().map_err(|_| ChildSystemError(format!("{label} input worker panicked")))?;
         let stdout = stdout_reader.join().map_err(|_| ChildSystemError(format!("{label} stdout worker panicked")))??;
         let stderr = stderr_reader.join().map_err(|_| ChildSystemError(format!("{label} stderr worker panicked")))??;
@@ -465,8 +493,72 @@ pub(crate) fn run_bounded(
         stdout,
         stderr,
         limit_violation,
+        io_cancelled: workers.iter().any(|worker| worker.cancelled_io.load(Ordering::Acquire)),
         child,
     })
+}
+
+/// One pipe thread of `run_bounded`: its own thread handle (so blocked synchronous I/O can be cancelled from
+/// the supervising thread), whether it has finished, and whether it was cancelled.
+#[derive(Default)]
+struct IoWorker {
+    thread: Mutex<Option<OwnedHandle>>,
+    done: AtomicBool,
+    stop: AtomicBool,
+    cancelled_io: AtomicBool,
+}
+
+impl IoWorker {
+    fn run<T>(&self, work: impl FnOnce(&IoWorker) -> T) -> T {
+        struct MarkDone<'a>(&'a AtomicBool);
+        impl Drop for MarkDone<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        if let Ok(thread) = unsafe { OpenThread(THREAD_TERMINATE, false, GetCurrentThreadId()) } {
+            *self.thread.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(unsafe { owned_handle(thread) });
+        }
+        let _done = MarkDone(&self.done);
+        work(self)
+    }
+
+    fn is_done(&self) -> bool {
+        self.done.load(Ordering::Acquire)
+    }
+
+    fn should_stop(&self) -> bool {
+        self.stop.load(Ordering::Acquire)
+    }
+
+    /// Records that the I/O was cut short; the caller then returns what it has.
+    fn mark_cancelled(&self) {
+        self.cancelled_io.store(true, Ordering::Release);
+    }
+
+    fn cancel_blocked_io(&self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = &*self.thread.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) {
+            let _ = unsafe { CancelSynchronousIo(as_windows_handle(thread)) };
+        }
+    }
+}
+
+/// Waits up to `grace` for every pipe thread, then keeps cancelling the blocked ones (repeatedly, so a
+/// thread that was between its stop check and the system call is caught) for up to `IO_CANCEL_LIMIT`.
+fn finish_io(workers: &[IoWorker], grace: Duration) {
+    let all_done = || workers.iter().all(IoWorker::is_done);
+    let started = Instant::now();
+    while !all_done() && started.elapsed() < grace {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let cancelling = Instant::now();
+    while !all_done() && cancelling.elapsed() < IO_CANCEL_LIMIT {
+        for worker in workers.iter().filter(|worker| !worker.is_done()) {
+            worker.cancel_blocked_io();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn create_job(label: &'static str, limits: &JobLimits) -> Result<(OwnedHandle, Option<OwnedHandle>), ChildSystemError> {
@@ -571,17 +663,35 @@ fn create_pipe(label: &str, stdin: bool) -> Result<(OwnedHandle, OwnedHandle), C
     Ok((read, write))
 }
 
-fn write_input(label: &str, handle: OwnedHandle, input: &[u8]) -> Result<(), ChildSystemError> {
+fn write_input(label: &str, handle: OwnedHandle, input: &[u8], io: &IoWorker) -> Result<(), ChildSystemError> {
     let mut file = File::from(handle);
-    file.write_all(input).map_err(|error| ChildSystemError(format!("Could not write {label} input: {error}")))
+    match file.write_all(input) {
+        Ok(()) => Ok(()),
+        Err(_) if io.should_stop() => {
+            io.mark_cancelled();
+            Ok(())
+        }
+        Err(error) => Err(ChildSystemError(format!("Could not write {label} input: {error}"))),
+    }
 }
 
-fn read_bounded(label: &str, handle: OwnedHandle, limit: usize, exceeded: &AtomicBool) -> Result<Vec<u8>, ChildSystemError> {
+fn read_bounded(label: &str, handle: OwnedHandle, limit: usize, exceeded: &AtomicBool, io: &IoWorker) -> Result<Vec<u8>, ChildSystemError> {
     let mut file = File::from(handle);
     let mut output = Vec::with_capacity(limit.min(8192));
     let mut buffer = [0_u8; 8192];
     loop {
-        let count = file.read(&mut buffer).map_err(|error| ChildSystemError(format!("Could not read {label} output: {error}")))?;
+        if io.should_stop() {
+            io.mark_cancelled();
+            return Ok(output);
+        }
+        let count = match file.read(&mut buffer) {
+            Ok(count) => count,
+            Err(_) if io.should_stop() => {
+                io.mark_cancelled();
+                return Ok(output);
+            }
+            Err(error) => return Err(ChildSystemError(format!("Could not read {label} output: {error}"))),
+        };
         if count == 0 {
             return Ok(output);
         }
@@ -707,16 +817,28 @@ pub(crate) fn as_windows_handle(handle: &OwnedHandle) -> HANDLE {
 
 // Inside the child.
 
-/// Called first thing in a hardened child: no error dialogs, and an unhandled exception ends the process with
-/// the exception code instead of going to Windows Error Reporting (no dialog, no dump on the system drive).
+static STDERR_HANDLE: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+/// Called first thing in a hardened child. Covered: no error dialogs (`SetErrorMode`, and WER's fault UI off);
+/// an unhandled SEH exception ends the process with the exception code after writing one marker line to
+/// stderr, before Windows Error Reporting sees it; refused allocations exit through `TerminatingAllocator`.
+/// Not covered: fail-fast exits (`__fastfail`, which Rust's `abort` uses, `/GS` stack-cookie failures, heap
+/// corruption detection) bypass exception filters and still reach Windows Error Reporting, which may queue a
+/// report on the system drive.
 pub(crate) fn harden_job_child_process() {
+    STDERR_HANDLE.store(std::io::stderr().as_raw_handle(), Ordering::Release);
     unsafe { SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX) };
+    let _ = unsafe { WerSetFlags(WER_FAULT_REPORTING(WER_FAULT_REPORTING_NO_UI)) };
     unsafe { SetUnhandledExceptionFilter(Some(exit_with_exception_code)) };
 }
 
 unsafe extern "system" fn exit_with_exception_code(information: *const EXCEPTION_POINTERS) -> i32 {
     let code = unsafe { information.as_ref().and_then(|pointers| pointers.ExceptionRecord.as_ref()) }
         .map_or(EXIT_RESOURCE_LIMIT, |record| record.ExceptionCode.0 as u32);
+    let stderr = STDERR_HANDLE.load(Ordering::Acquire);
+    if !stderr.is_null() {
+        let _ = unsafe { WriteFile(HANDLE(stderr), Some(UNHANDLED_EXCEPTION_MARKER), None, None) };
+    }
     let _ = unsafe { TerminateProcess(GetCurrentProcess(), code) };
     EXCEPTION_EXECUTE_HANDLER
 }
@@ -879,7 +1001,25 @@ mod tests {
     }
 
     fn bounds(timeout: Duration) -> OutputBounds {
-        OutputBounds { stdout_limit: 1024 * 1024, stderr_limit: 64 * 1024, timeout, poll_interval: Duration::from_millis(10) }
+        OutputBounds {
+            stdout_limit: 1024 * 1024,
+            stderr_limit: 64 * 1024,
+            timeout,
+            poll_interval: Duration::from_millis(10),
+            drain_grace: PIPE_DRAIN_GRACE,
+        }
+    }
+
+    /// Replaces one of the child's parent-side pipe ends with a fresh pipe whose other end the test keeps,
+    /// as if another process had inherited it: that pipe never closes when the child exits. Also returns
+    /// the replaced end, which the test keeps open so the child's own writes still succeed.
+    fn leak_pipe(running: &mut RunningChild, which: &str) -> (OwnedHandle, OwnedHandle) {
+        let (read, write) = create_pipe(LABEL, false).unwrap();
+        match which {
+            "stdout" => (write, std::mem::replace(&mut running.pipes.stdout, read)),
+            "stdin" => (read, std::mem::replace(&mut running.pipes.stdin, write)),
+            other => panic!("unknown pipe {other}"),
+        }
     }
 
     fn run(mode: &str, limits: JobLimits, input: &[u8], bounds: OutputBounds) -> ChildRun {
@@ -993,12 +1133,71 @@ mod tests {
     }
 
     #[test]
-    fn an_unhandled_exception_exits_with_its_code() {
+    fn the_exception_filter_runs_and_exits_with_the_exception_code() {
         let raised = run("raise", JobLimits::hardened_single_process(TEST_CAP), b"", bounds(Duration::from_secs(30)));
         assert_eq!(raised.reason, TerminalReason::Exited);
         let code = raised.child.exit_code().unwrap();
         assert_eq!(code, TEST_EXCEPTION_CODE, "exit code {code:#x}");
         assert_eq!(classify_exit_code(code), ExitKind::Exception(TEST_EXCEPTION_CODE));
+        assert!(
+            raised.stderr.ends_with(UNHANDLED_EXCEPTION_MARKER),
+            "the filter's marker is missing, so it did not run: {:?}",
+            String::from_utf8_lossy(&raised.stderr)
+        );
+    }
+
+    #[test]
+    fn a_leaked_stdout_write_end_cannot_hold_run_bounded_after_exit() {
+        let mut running = spawn_test_child("exit-3", JobLimits::single_process(TEST_CAP));
+        let _leaked = leak_pipe(&mut running, "stdout");
+        let started = Instant::now();
+        let finished = run_bounded(
+            running,
+            b"",
+            &OutputBounds { drain_grace: Duration::from_millis(200), ..bounds(Duration::from_secs(30)) },
+            &|| false,
+        )
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+        assert_eq!(finished.reason, TerminalReason::Exited);
+        assert!(finished.io_cancelled);
+        assert!(!process_is_alive(finished.child.process_id()));
+    }
+
+    #[test]
+    fn a_leaked_stdout_write_end_cannot_hold_run_bounded_past_the_timeout() {
+        let mut running = spawn_test_child("sleep", JobLimits::single_process(TEST_CAP));
+        let _leaked = leak_pipe(&mut running, "stdout");
+        let started = Instant::now();
+        let timed = run_bounded(
+            running,
+            b"",
+            &OutputBounds { drain_grace: Duration::from_millis(200), ..bounds(Duration::from_millis(300)) },
+            &|| false,
+        )
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        assert_eq!(timed.reason, TerminalReason::TimedOut);
+        assert!(timed.io_cancelled);
+        assert_eq!(timed.child.exit_code().unwrap(), EXIT_RESOURCE_LIMIT);
+    }
+
+    #[test]
+    fn a_leaked_stdin_read_end_cannot_block_the_input_writer() {
+        let mut running = spawn_test_child("exit-3", JobLimits::single_process(TEST_CAP));
+        let _leaked = leak_pipe(&mut running, "stdin");
+        let input = vec![b'x'; 4 * 1024 * 1024];
+        let started = Instant::now();
+        let finished = run_bounded(
+            running,
+            &input,
+            &OutputBounds { drain_grace: Duration::from_millis(200), ..bounds(Duration::from_secs(30)) },
+            &|| false,
+        )
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+        assert!(finished.io_cancelled);
+        assert_eq!(finished.writer_result, Ok(()));
     }
 
     #[test]
@@ -1070,6 +1269,7 @@ mod tests {
         assert_eq!(classify_exit_code(EXIT_RESOURCE_LIMIT), ExitKind::EndedForResourceLimit);
         assert_eq!(classify_exit_code(0xc000_0005), ExitKind::Exception(0xc000_0005));
         assert_eq!(classify_exit_code(77), ExitKind::Code(77));
+        assert_eq!(classify_exit_code(0x8000_0003), ExitKind::Exception(0x8000_0003));
         let line = command_line(&[OsStr::new(r"C:\a b\x.exe"), OsStr::new(r#"say "hi"\"#)]).unwrap();
         assert_eq!(String::from_utf16(&line[..line.len() - 1]).unwrap(), r#""C:\a b\x.exe" "say \"hi\"\\""#);
         assert_eq!(command_line(&[OsStr::new("a\0b")]), Err(ContainsNul));
