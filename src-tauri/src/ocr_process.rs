@@ -1,38 +1,23 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
-use std::mem::size_of;
+use std::io::Read;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use windows::core::{BOOL, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::core::PCWSTR;
 use windows::Win32::Security::Cryptography::{
     BCryptCloseAlgorithmProvider, BCryptHash, BCryptOpenAlgorithmProvider,
     BCRYPT_ALG_HANDLE, BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS, BCRYPT_SHA256_ALGORITHM,
 };
-use windows::Win32::Security::SECURITY_ATTRIBUTES;
 use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
-use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
-    JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOB_OBJECT_LIMIT_PROCESS_MEMORY,
-};
-use windows::Win32::System::Pipes::CreatePipe;
-use windows::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, ResumeThread, TerminateProcess,
-    UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
-    EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+
+use crate::child_job::{
+    self, ChildCommand, ChildSystemError, JobLimits, OutputBounds, TerminalReason, EXIT_CANCELLED,
 };
 
 pub(crate) const OCR_INPUT_LIMIT: usize = 16 * 1024 * 1024;
@@ -51,8 +36,7 @@ const OCR_MODEL_SHA256: [u8; 32] = [
     0x25, 0x56, 0x42, 0x71, 0x70, 0xb2,
 ];
 const FILE_ATTRIBUTE_REPARSE_POINT_VALUE: u32 = 0x400;
-const EXIT_CANCELLED: u32 = 0xc000_013a;
-const EXIT_RESOURCE_LIMIT: u32 = 0xc000_009a;
+const OCR_LABEL: &str = "OCR";
 
 static OCR_SLOT: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
@@ -181,6 +165,12 @@ impl fmt::Display for OcrProcessError {
 }
 
 impl std::error::Error for OcrProcessError {}
+
+impl From<ChildSystemError> for OcrProcessError {
+    fn from(error: ChildSystemError) -> Self {
+        Self::System(error.0)
+    }
+}
 
 pub(crate) struct OcrProcessRunner {
     engine_path: PathBuf,
@@ -554,133 +544,61 @@ fn run_child(
     output_profile: OcrOutputProfile,
 ) -> Result<OcrProcessOutput, OcrProcessError> {
     cancellation.ensure_runnable()?;
-    let job = create_job()?;
-    let (child_stdin, parent_stdin) = create_pipe(true)?;
-    let (parent_stdout, child_stdout) = create_pipe(false)?;
-    let (parent_stderr, child_stderr) = create_pipe(false)?;
-    let inherited = [as_windows_handle(&child_stdin), as_windows_handle(&child_stdout), as_windows_handle(&child_stderr)];
-    let mut attributes = ProcThreadAttributes::with_handle_list(&inherited)?;
-    let mut startup = STARTUPINFOEXW::default();
-    startup.StartupInfo.cb = u32::try_from(size_of::<STARTUPINFOEXW>()).unwrap();
-    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    startup.StartupInfo.hStdInput = inherited[0];
-    startup.StartupInfo.hStdOutput = inherited[1];
-    startup.StartupInfo.hStdError = inherited[2];
-    startup.lpAttributeList = attributes.list;
-    let mut process_info = PROCESS_INFORMATION::default();
-    let application = wide_null(engine.as_os_str())?;
-    let current_directory = wide_null(engine.parent().ok_or_else(|| OcrProcessError::InvalidAsset("OCR executable has no parent directory".into()))?.as_os_str())?;
-    let mut command_line = build_command_line(engine, tessdata, output_profile)?;
-    let creation_flags = CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT;
-    cancellation.ensure_runnable()?;
-    unsafe {
-        CreateProcessW(
-            PCWSTR(application.as_ptr()),
-            Some(PWSTR(command_line.as_mut_ptr())),
-            None,
-            None,
-            true,
-            creation_flags,
-            None,
-            PCWSTR(current_directory.as_ptr()),
-            &startup.StartupInfo,
-            &mut process_info,
-        )
-    }
-    .map_err(|error| OcrProcessError::System(format!("Could not create suspended OCR process: {error}")))?;
-    attributes.release();
-    let process = unsafe { owned_handle(process_info.hProcess) };
-    let thread = unsafe { owned_handle(process_info.hThread) };
-    drop(child_stdin);
-    drop(child_stdout);
-    drop(child_stderr);
-    let mut child = ChildGuard::new(process, job);
-    if let Err(error) = unsafe { AssignProcessToJobObject(as_windows_handle(&child.job), as_windows_handle(&child.process)) } {
-        child.terminate_direct_and_reap();
-        return Err(OcrProcessError::System(format!("Could not assign OCR process to its job: {error}")));
-    }
-    child.assigned = true;
+    let suspended = child_job::spawn_suspended(
+        OCR_LABEL,
+        &JobLimits::single_process(OCR_CHILD_COMMIT_LIMIT),
+        || {
+            let application = wide_null(engine.as_os_str())?;
+            let current_directory = wide_null(engine.parent().ok_or_else(|| OcrProcessError::InvalidAsset("OCR executable has no parent directory".into()))?.as_os_str())?;
+            let command_line = build_command_line(engine, tessdata, output_profile)?;
+            Ok(ChildCommand { application, command_line, current_directory })
+        },
+        || cancellation.ensure_runnable(),
+    )?;
     if let Some(hook) = options.before_resume {
         hook();
     }
     if cancellation.is_cancelled() {
-        child.terminate_job_and_reap(EXIT_CANCELLED)?;
+        suspended.terminate_and_reap(EXIT_CANCELLED)?;
         return Err(OcrProcessError::Cancelled);
     }
-    if unsafe { ResumeThread(as_windows_handle(&thread)) } == u32::MAX {
-        child.terminate_job_and_reap(EXIT_RESOURCE_LIMIT)?;
-        return Err(OcrProcessError::System("Could not resume OCR process".into()));
-    }
-    drop(thread);
+    let running = suspended.resume()?;
     if let Some(hook) = options.after_resume {
         hook();
     }
 
-    let started = Instant::now();
-    let stdout_exceeded = AtomicBool::new(false);
-    let stderr_exceeded = AtomicBool::new(false);
-    let terminal_reason = std::thread::scope(|scope| {
-        let writer = scope.spawn(move || write_input(parent_stdin, input));
-        let stdout_reader = scope.spawn(|| read_bounded(parent_stdout, OCR_STDOUT_LIMIT, &stdout_exceeded));
-        let stderr_reader = scope.spawn(|| read_bounded(parent_stderr, OCR_STDERR_LIMIT, &stderr_exceeded));
-        let reason = loop {
-            let wait = unsafe { WaitForSingleObject(as_windows_handle(&child.process), OCR_POLL_INTERVAL.as_millis() as u32) };
-            if wait == WAIT_OBJECT_0 {
-                child.reaped = true;
-                break TerminalReason::Exited;
-            }
-            if wait != WAIT_TIMEOUT {
-                let _ = child.terminate_job_and_reap(EXIT_RESOURCE_LIMIT);
-                break TerminalReason::WaitFailed;
-            }
-            if stdout_exceeded.load(Ordering::Acquire) {
-                let _ = child.terminate_job_and_reap(EXIT_RESOURCE_LIMIT);
-                break TerminalReason::StdoutLimit;
-            }
-            if stderr_exceeded.load(Ordering::Acquire) {
-                let _ = child.terminate_job_and_reap(EXIT_RESOURCE_LIMIT);
-                break TerminalReason::StderrLimit;
-            }
-            if cancellation.is_cancelled() {
-                let _ = child.terminate_job_and_reap(EXIT_CANCELLED);
-                break TerminalReason::Cancelled;
-            }
-            if started.elapsed() >= options.timeout {
-                let _ = child.terminate_job_and_reap(EXIT_RESOURCE_LIMIT);
-                break TerminalReason::TimedOut;
-            }
-        };
-        let writer_result = writer.join().map_err(|_| OcrProcessError::System("OCR input worker panicked".into()))?;
-        let stdout = stdout_reader.join().map_err(|_| OcrProcessError::System("OCR stdout worker panicked".into()))??;
-        let stderr = stderr_reader.join().map_err(|_| OcrProcessError::System("OCR stderr worker panicked".into()))??;
-        Ok::<_, OcrProcessError>((reason, writer_result, stdout, stderr))
-    })?;
-    let (reason, writer_result, stdout, stderr) = terminal_reason;
-    if stdout_exceeded.load(Ordering::Acquire) || reason == TerminalReason::StdoutLimit {
+    let bounds = OutputBounds {
+        stdout_limit: OCR_STDOUT_LIMIT,
+        stderr_limit: OCR_STDERR_LIMIT,
+        timeout: options.timeout,
+        poll_interval: OCR_POLL_INTERVAL,
+    };
+    let run = child_job::run_bounded(running, input, &bounds, &|| cancellation.is_cancelled())?;
+    let reason = run.reason;
+    if run.stdout_exceeded || reason == TerminalReason::StdoutLimit {
         return Err(OcrProcessError::OutputLimit("stdout"));
     }
-    if stderr_exceeded.load(Ordering::Acquire) || reason == TerminalReason::StderrLimit {
+    if run.stderr_exceeded || reason == TerminalReason::StderrLimit {
         return Err(OcrProcessError::OutputLimit("stderr"));
     }
     match reason {
         TerminalReason::Cancelled => return Err(OcrProcessError::Cancelled),
         TerminalReason::TimedOut => return Err(OcrProcessError::TimedOut),
         TerminalReason::WaitFailed => return Err(OcrProcessError::System("Could not wait for OCR process".into())),
+        TerminalReason::LimitViolation(_) => return Err(OcrProcessError::System("OCR exceeded a job limit".into())),
         TerminalReason::Exited | TerminalReason::StdoutLimit | TerminalReason::StderrLimit => {}
     }
     if cancellation.is_cancelled() {
         return Err(OcrProcessError::Cancelled);
     }
-    let stdout = String::from_utf8(stdout).map_err(|_| OcrProcessError::InvalidUtf8("stdout"))?;
-    let stderr = String::from_utf8(stderr).map_err(|_| OcrProcessError::InvalidUtf8("stderr"))?;
-    let mut exit_code = 0_u32;
-    unsafe { GetExitCodeProcess(as_windows_handle(&child.process), &mut exit_code) }
-        .map_err(|error| OcrProcessError::System(format!("Could not read OCR exit code: {error}")))?;
-    let peak_job_commit_bytes = child.peak_job_commit()?;
+    let stdout = String::from_utf8(run.stdout).map_err(|_| OcrProcessError::InvalidUtf8("stdout"))?;
+    let stderr = String::from_utf8(run.stderr).map_err(|_| OcrProcessError::InvalidUtf8("stderr"))?;
+    let exit_code = run.child.exit_code()?;
+    let peak_job_commit_bytes = run.child.peak_job_commit()?;
     if exit_code != 0 {
         return Err(OcrProcessError::ChildExit { code: exit_code, stderr });
     }
-    writer_result?;
+    run.writer_result?;
     if !stderr.is_empty() {
         return Err(OcrProcessError::UnexpectedStderr(stderr));
     }
@@ -688,199 +606,6 @@ fn run_child(
         return Err(OcrProcessError::Cancelled);
     }
     Ok(OcrProcessOutput { text: stdout, peak_job_commit_bytes })
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum TerminalReason {
-    Exited,
-    Cancelled,
-    TimedOut,
-    StdoutLimit,
-    StderrLimit,
-    WaitFailed,
-}
-
-fn create_job() -> Result<OwnedHandle, OcrProcessError> {
-    let handle = unsafe { CreateJobObjectW(None, PCWSTR::null()) }
-        .map_err(|error| OcrProcessError::System(format!("Could not create OCR job: {error}")))?;
-    let job = unsafe { owned_handle(handle) };
-    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
-        | JOB_OBJECT_LIMIT_PROCESS_MEMORY
-        | JOB_OBJECT_LIMIT_JOB_MEMORY;
-    limits.BasicLimitInformation.ActiveProcessLimit = 1;
-    limits.ProcessMemoryLimit = OCR_CHILD_COMMIT_LIMIT;
-    limits.JobMemoryLimit = OCR_CHILD_COMMIT_LIMIT;
-    unsafe {
-        SetInformationJobObject(
-            as_windows_handle(&job),
-            JobObjectExtendedLimitInformation,
-            &limits as *const _ as *const _,
-            u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()).unwrap(),
-        )
-    }
-    .map_err(|error| OcrProcessError::System(format!("Could not configure OCR job: {error}")))?;
-    Ok(job)
-}
-
-fn create_pipe(stdin: bool) -> Result<(OwnedHandle, OwnedHandle), OcrProcessError> {
-    let attributes = SECURITY_ATTRIBUTES {
-        nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).unwrap(),
-        lpSecurityDescriptor: std::ptr::null_mut(),
-        bInheritHandle: BOOL(1),
-    };
-    let mut read = HANDLE::default();
-    let mut write = HANDLE::default();
-    unsafe { CreatePipe(&mut read, &mut write, Some(&attributes), 0) }
-        .map_err(|error| OcrProcessError::System(format!("Could not create OCR pipe: {error}")))?;
-    let read = unsafe { owned_handle(read) };
-    let write = unsafe { owned_handle(write) };
-    let parent = if stdin { &write } else { &read };
-    unsafe { SetHandleInformation(as_windows_handle(parent), HANDLE_FLAG_INHERIT.0, windows::Win32::Foundation::HANDLE_FLAGS(0)) }
-        .map_err(|error| OcrProcessError::System(format!("Could not restrict OCR pipe inheritance: {error}")))?;
-    Ok(if stdin { (read, write) } else { (read, write) })
-}
-
-fn write_input(handle: OwnedHandle, input: &[u8]) -> Result<(), OcrProcessError> {
-    let mut file = File::from(handle);
-    file.write_all(input).map_err(|error| OcrProcessError::System(format!("Could not write OCR input: {error}")))
-}
-
-fn read_bounded(handle: OwnedHandle, limit: usize, exceeded: &AtomicBool) -> Result<Vec<u8>, OcrProcessError> {
-    let mut file = File::from(handle);
-    let mut output = Vec::with_capacity(limit.min(8192));
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let count = file.read(&mut buffer).map_err(|error| OcrProcessError::System(format!("Could not read OCR output: {error}")))?;
-        if count == 0 {
-            return Ok(output);
-        }
-        let remaining = limit.saturating_sub(output.len());
-        if count > remaining {
-            output.extend_from_slice(&buffer[..remaining]);
-            exceeded.store(true, Ordering::Release);
-            return Ok(output);
-        }
-        output.extend_from_slice(&buffer[..count]);
-    }
-}
-
-struct ChildGuard {
-    process: OwnedHandle,
-    job: OwnedHandle,
-    assigned: bool,
-    reaped: bool,
-}
-
-impl ChildGuard {
-    fn new(process: OwnedHandle, job: OwnedHandle) -> Self {
-        Self { process, job, assigned: false, reaped: false }
-    }
-
-    fn terminate_direct_and_reap(&mut self) {
-        if !self.reaped {
-            let _ = unsafe { TerminateProcess(as_windows_handle(&self.process), EXIT_RESOURCE_LIMIT) };
-            let _ = unsafe { WaitForSingleObject(as_windows_handle(&self.process), u32::MAX) };
-            self.reaped = true;
-        }
-    }
-
-    fn terminate_job_and_reap(&mut self, exit_code: u32) -> Result<(), OcrProcessError> {
-        if self.reaped {
-            return Ok(());
-        }
-        if let Err(job_error) = unsafe { TerminateJobObject(as_windows_handle(&self.job), exit_code) } {
-            unsafe { TerminateProcess(as_windows_handle(&self.process), exit_code) }
-                .map_err(|process_error| OcrProcessError::System(format!("Could not terminate OCR job ({job_error}) or process ({process_error})")))?;
-        }
-        let wait = unsafe { WaitForSingleObject(as_windows_handle(&self.process), u32::MAX) };
-        if wait != WAIT_OBJECT_0 {
-            return Err(OcrProcessError::System("Could not reap OCR process".into()));
-        }
-        self.reaped = true;
-        Ok(())
-    }
-
-    fn peak_job_commit(&self) -> Result<usize, OcrProcessError> {
-        let mut information = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        unsafe {
-            QueryInformationJobObject(
-                Some(as_windows_handle(&self.job)),
-                JobObjectExtendedLimitInformation,
-                &mut information as *mut _ as *mut _,
-                u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()).unwrap(),
-                None,
-            )
-        }
-        .map_err(|error| OcrProcessError::System(format!("Could not read OCR job memory accounting: {error}")))?;
-        Ok(information.PeakJobMemoryUsed)
-    }
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if !self.reaped {
-            if self.assigned {
-                let _ = unsafe { TerminateJobObject(as_windows_handle(&self.job), EXIT_RESOURCE_LIMIT) };
-            } else {
-                let _ = unsafe { TerminateProcess(as_windows_handle(&self.process), EXIT_RESOURCE_LIMIT) };
-            }
-            let _ = unsafe { WaitForSingleObject(as_windows_handle(&self.process), u32::MAX) };
-            self.reaped = true;
-        }
-    }
-}
-
-struct ProcThreadAttributes {
-    storage: Vec<usize>,
-    list: LPPROC_THREAD_ATTRIBUTE_LIST,
-    released: bool,
-}
-
-impl ProcThreadAttributes {
-    fn with_handle_list(handles: &[HANDLE]) -> Result<Self, OcrProcessError> {
-        let mut bytes = 0_usize;
-        let _ = unsafe { InitializeProcThreadAttributeList(None, 1, None, &mut bytes) };
-        if bytes == 0 {
-            return Err(OcrProcessError::System("Could not size OCR process attributes".into()));
-        }
-        let words = bytes.checked_add(size_of::<usize>() - 1).ok_or_else(|| OcrProcessError::System("OCR process attributes overflow".into()))? / size_of::<usize>();
-        let mut storage = vec![0_usize; words];
-        let list = LPPROC_THREAD_ATTRIBUTE_LIST(storage.as_mut_ptr().cast());
-        unsafe { InitializeProcThreadAttributeList(Some(list), 1, None, &mut bytes) }
-            .map_err(|error| OcrProcessError::System(format!("Could not initialize OCR process attributes: {error}")))?;
-        let update = unsafe {
-            UpdateProcThreadAttribute(
-                list,
-                0,
-                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
-                Some(handles.as_ptr().cast()),
-                std::mem::size_of_val(handles),
-                None,
-                None,
-            )
-        };
-        if let Err(error) = update {
-            unsafe { DeleteProcThreadAttributeList(list) };
-            return Err(OcrProcessError::System(format!("Could not restrict OCR process handles: {error}")));
-        }
-        Ok(Self { storage, list, released: false })
-    }
-
-    fn release(&mut self) {
-        if !self.released {
-            unsafe { DeleteProcThreadAttributeList(self.list) };
-            self.released = true;
-        }
-    }
-}
-
-impl Drop for ProcThreadAttributes {
-    fn drop(&mut self) {
-        self.release();
-        let _ = self.storage.len();
-    }
 }
 
 fn build_command_line(engine: &Path, tessdata: &Path, output_profile: OcrOutputProfile) -> Result<Vec<u16>, OcrProcessError> {
@@ -902,66 +627,27 @@ fn build_command_line(engine: &Path, tessdata: &Path, output_profile: OcrOutputP
         OsString::from("ERROR"),
     ];
     if matches!(output_profile, OcrOutputProfile::Tsv) { arguments.push(OsString::from("tsv")); }
-    let mut command = Vec::new();
-    for (index, argument) in arguments.iter().enumerate() {
-        if index != 0 {
-            command.push(b' ' as u16);
-        }
-        append_quoted_argument(&mut command, argument)?;
-    }
-    command.push(0);
-    Ok(command)
-}
-
-fn append_quoted_argument(output: &mut Vec<u16>, argument: &OsStr) -> Result<(), OcrProcessError> {
-    let units = argument.encode_wide().collect::<Vec<_>>();
-    if units.contains(&0) {
-        return Err(OcrProcessError::InvalidAsset("OCR path contains a null character".into()));
-    }
-    output.push(b'"' as u16);
-    let mut backslashes = 0_usize;
-    for unit in units {
-        if unit == b'\\' as u16 {
-            backslashes += 1;
-        } else {
-            if unit == b'"' as u16 {
-                output.extend(std::iter::repeat(b'\\' as u16).take(backslashes * 2 + 1));
-            } else {
-                output.extend(std::iter::repeat(b'\\' as u16).take(backslashes));
-            }
-            backslashes = 0;
-            output.push(unit);
-        }
-    }
-    output.extend(std::iter::repeat(b'\\' as u16).take(backslashes * 2));
-    output.push(b'"' as u16);
-    Ok(())
+    let arguments = arguments.iter().map(OsString::as_os_str).collect::<Vec<_>>();
+    child_job::command_line(&arguments).map_err(|_| null_character())
 }
 
 fn wide_null(value: &OsStr) -> Result<Vec<u16>, OcrProcessError> {
-    let mut units = value.encode_wide().collect::<Vec<_>>();
-    if units.contains(&0) {
-        return Err(OcrProcessError::InvalidAsset("OCR path contains a null character".into()));
-    }
-    units.push(0);
-    Ok(units)
+    child_job::wide_null(value).map_err(|_| null_character())
 }
 
-unsafe fn owned_handle(handle: HANDLE) -> OwnedHandle {
-    unsafe { OwnedHandle::from_raw_handle(handle.0) }
-}
-
-fn as_windows_handle(handle: &OwnedHandle) -> HANDLE {
-    HANDLE(handle.as_raw_handle())
+fn null_character() -> OcrProcessError {
+    OcrProcessError::InvalidAsset("OCR path contains a null character".into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::child_job::{as_windows_handle, owned_handle};
     use std::process::Command;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::OnceLock;
-    use windows::Win32::System::Threading::{OpenProcess, PROCESS_ACCESS_RIGHTS, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows::Win32::Foundation::WAIT_TIMEOUT;
+    use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_ACCESS_RIGHTS, PROCESS_QUERY_LIMITED_INFORMATION};
 
     static CASE_NUMBER: AtomicUsize = AtomicUsize::new(0);
     static FAKE_EXECUTABLE: OnceLock<Result<PathBuf, String>> = OnceLock::new();

@@ -9,6 +9,12 @@ pub const MAX_OPEN_SOURCE_BYTES: u64 = GIB;
 pub const MAX_OPEN_DOCUMENTS: usize = 32;
 /// Total source bytes held across all open documents (about 8 GiB including PDFium's copies).
 pub const MAX_OPEN_SOURCE_TOTAL: u64 = 4 * GIB;
+/// Committed-memory cap (Job Object process and job limit) for the planned PDF-engine helper process.
+/// Not used by the app yet. Measured with sources and bitmaps in shared sections, which the job does not
+/// charge: the worst of 4,268 real PDFs (11 KB to 538 MB) peaked at 247 MiB, median 19 MiB; all 12 largest
+/// open together peaked at 132 MiB. 1 GiB leaves about 4x over the worst real file.
+#[allow(dead_code)]
+pub const HELPER_MEMORY_LIMIT: usize = 1024 * 1024 * 1024;
 
 // Parse-work limits for every lopdf load of a document source (`pdf_load::load`). A file over one is refused
 // before or during the load with "Nothing was opened.". Measurements: README and the SM5 log.

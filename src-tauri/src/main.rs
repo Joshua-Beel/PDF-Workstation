@@ -41,6 +41,9 @@ mod update_commands;
 mod notices;
 #[cfg(windows)]
 #[allow(dead_code)]
+mod child_job;
+#[cfg(windows)]
+#[allow(dead_code)]
 mod ocr_process;
 #[cfg(windows)]
 #[cfg_attr(not(ocr_opt_in), allow(dead_code))]
