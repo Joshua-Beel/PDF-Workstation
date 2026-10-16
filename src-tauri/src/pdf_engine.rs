@@ -49,6 +49,30 @@ impl From<TextError> for String {
     fn from(error: TextError) -> Self { match error { TextError::Page(message) | TextError::Text(message) | TextError::Bounds(message) => message } }
 }
 
+/// Render flags for [`EngineDocument::render_bgra_into`]. Both clear to white first.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RenderMode {
+    /// Annotations, form data and print quality (print, page-image export, redaction, OCR input).
+    Print,
+    /// Page content only (output validation, pixel comparisons).
+    Plain,
+}
+
+/// A failed BGRA render. `Page`: the page could not be prepared; `Render`: the engine refused the
+/// render; `Format`: the bitmap format could not be read; `Layout`: the bitmap does not match the
+/// requested size or format. Messages are the engine's own.
+#[derive(Debug)]
+pub(crate) enum RenderError { Page(String), Render(String), Format(String), Layout }
+
+/// A failed output probe ([`EngineDocument::thumbnail_check`]).
+#[derive(Debug)]
+pub(crate) enum ProbeError { Read(String), Render(String) }
+
+/// `width * height * 4`, the BGRA buffer size for a render.
+pub(crate) fn bgra_len(width: u32, height: u32) -> Option<usize> {
+    usize::try_from(u64::from(width) * u64::from(height) * 4).ok()
+}
+
 /// A viewer render, PNG-encoded, with the bitmap's pixel size.
 pub(crate) struct RenderedPng { pub(crate) png: Vec<u8>, pub(crate) width: u32, pub(crate) height: u32 }
 
@@ -95,6 +119,13 @@ pub(crate) trait EngineDocument {
     /// The engine's own reading of every form field the parser found, keyed by field name, or `None`
     /// when the engine disagrees with the parser's structure.
     fn form_values(&self, fields: &[crate::forms::FormField]) -> Option<HashMap<String, Option<String>>>;
+    /// Size in points of a source page as stored (no plan applied).
+    fn source_page_size(&self, index: usize) -> Result<(f32, f32), String>;
+    /// Renders a source page into a 64-pixel box; `Ok(false)` when the bitmap is empty.
+    fn thumbnail_check(&self, index: usize) -> Result<bool, ProbeError>;
+    /// Renders a page at exactly `width` x `height` pixels, BGRA, into `out`, which must be exactly
+    /// [`bgra_len`] bytes (otherwise `Layout`). The engine never chooses the buffer size.
+    fn render_bgra_into(&self, target: PageTarget<'_>, mode: RenderMode, width: u32, height: u32, out: &mut [u8]) -> Result<(), RenderError>;
 }
 
 /// PDFium in this process.
@@ -242,6 +273,27 @@ impl EngineDocument for InProcessDocument<'_> {
         if fields.iter().filter_map(|field|field.radio.as_ref().map(|radio|(field.name.as_str(),radio.options.len()))).any(|(name,count)|radio_indices.get(name).is_none_or(|indices|indices.len()!=count)){return None;}
         Some(values)
     }
+    fn source_page_size(&self, index: usize) -> Result<(f32, f32), String> {
+        let page = self.inner.pages().get(index as i32).map_err(|error| error.to_string())?;
+        Ok((page.width().value, page.height().value))
+    }
+    fn thumbnail_check(&self, index: usize) -> Result<bool, ProbeError> {
+        let page = self.inner.pages().get(index as i32).map_err(|error| ProbeError::Read(error.to_string()))?;
+        let bitmap = page.render_with_config(&PdfRenderConfig::new().set_target_width(64).set_maximum_height(64)).map_err(|error| ProbeError::Render(error.to_string()))?;
+        Ok(bitmap.width() > 0 && bitmap.height() > 0)
+    }
+    fn render_bgra_into(&self, target: PageTarget<'_>, mode: RenderMode, width: u32, height: u32, out: &mut [u8]) -> Result<(), RenderError> {
+        if bgra_len(width, height) != Some(out.len()) { return Err(RenderError::Layout); }
+        self.with_target(target, |page| {
+            let config = PdfRenderConfig::new().set_fixed_size(width as i32, height as i32).set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(false).clear_before_rendering(true).set_clear_color(PdfColor::WHITE);
+            let config = match mode { RenderMode::Print => config.render_annotations(true).render_form_data(true).use_print_quality(true), RenderMode::Plain => config };
+            let mut bitmap = PdfBitmap::from_bytes(width as i32, height as i32, PdfBitmapFormat::BGRA, out).map_err(|error| RenderError::Render(error.to_string()))?;
+            page.render_into_bitmap_with_config(&mut bitmap, &config).map_err(|error| RenderError::Render(error.to_string()))?;
+            if bitmap.width() != width as i32 || bitmap.height() != height as i32 { return Err(RenderError::Layout); }
+            if bitmap.format().map_err(|error| RenderError::Format(error.to_string()))? != PdfBitmapFormat::BGRA { return Err(RenderError::Layout); }
+            Ok(())
+        }).map_err(RenderError::Page)?
+    }
 }
 
 fn displayed_note_rect(page: &PdfPage<'_>, rect: CropBox) -> Result<Option<crate::comments::DisplayRect>, String> {
@@ -300,4 +352,61 @@ pub(crate) fn with_planned_page<T>(document: &PdfDocument<'_>, spec: &PageSpec, 
     let restore = match original_crop { Some(crop) => page.boundaries_mut().set_crop(crop).map_err(|error| error.to_string()), None => Ok(()) };
     page.set_rotation(original_rotation);
     result.and_then(|value| restore.map(|_| value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CHILD: &str = "SM5_ENGINE_EQUIVALENCE_CHILD";
+    const NAME: &str = "pdf_engine::tests::render_bgra_into_matches_render_with_config";
+
+    /// The caller-buffer render must be byte-identical to the render the worker used before the
+    /// boundary (`render_with_config` into a PDFium-owned bitmap, then `as_raw_bytes`), for both
+    /// flag sets, every quarter turn, with and without a crop. Runs in a child process so this test
+    /// binary binds PDFium only once per process.
+    #[test]
+    fn render_bgra_into_matches_render_with_config() {
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture", "--test-threads=1"]).env(CHILD, "1").output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success() && stdout.contains("engine-equivalence-ok"), "child failed:\n{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let engine = InProcessEngine::bind(root.join("resources/pdfium/bin/pdfium.dll")).unwrap();
+        let files = [root.join("resources/welcome.pdf"), root.join("../test-corpus/synthetic-text-1500.pdf"), root.join("../test-corpus/synthetic-scan-98.pdf"), root.join("tests/fixtures/reportlab-mixed-fields.pdf")];
+        let mut compared = 0;
+        for path in files {
+            let document = engine.load_from_vec(std::fs::read(&path).unwrap(), None).unwrap();
+            for source in 0..document.page_count().min(2) {
+                let (width, height) = document.source_page_size(source).unwrap();
+                let crop = CropBox { left: width * 0.1, bottom: height * 0.2, right: width * 0.8, top: height * 0.9 };
+                for turns in 0..4 {
+                    for crop in [None, Some(crop)] {
+                        let spec = PageSpec { source, turns, crop, notes: Vec::new() };
+                        for mode in [RenderMode::Print, RenderMode::Plain] {
+                            let (pixel_width, pixel_height) = (613_u32, 457_u32);
+                            let config = PdfRenderConfig::new().set_fixed_size(pixel_width as i32, pixel_height as i32).set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(false).clear_before_rendering(true).set_clear_color(PdfColor::WHITE);
+                            let config = match mode { RenderMode::Print => config.render_annotations(true).render_form_data(true).use_print_quality(true), RenderMode::Plain => config };
+                            let before = with_planned_page(&document.inner, &spec, |page| Ok(page.render_with_config(&config).unwrap().as_raw_bytes())).unwrap();
+                            let mut after = vec![0; bgra_len(pixel_width, pixel_height).unwrap()];
+                            document.render_bgra_into(PageTarget::Planned(&spec), mode, pixel_width, pixel_height, &mut after).unwrap();
+                            assert!(before == after, "{} page {source} turns {turns} crop {} {mode:?} differs", path.display(), crop.is_some());
+                            compared += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let mut wrong = vec![0; 16];
+        assert!(matches!(document_layout_error(&engine, &root, &mut wrong), Err(RenderError::Layout)));
+        println!("engine-equivalence-ok compared={compared}");
+    }
+
+    fn document_layout_error(engine: &InProcessEngine, root: &std::path::Path, out: &mut [u8]) -> Result<(), RenderError> {
+        let document = engine.load_from_vec(std::fs::read(root.join("resources/welcome.pdf")).unwrap(), None).unwrap();
+        document.render_bgra_into(PageTarget::Source(0), RenderMode::Plain, 10, 10, out)
+    }
 }

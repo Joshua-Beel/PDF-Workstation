@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, HashSet, VecDeque}, io::Write, path::PathBuf, sync::{Arc, Mutex, mpsc, OnceLock}};
 use pdfium_render::prelude::*;
-use crate::pdf_engine::{EngineDocument, PageSize, PageTarget, PdfEngine, with_planned_page};
+use crate::pdf_engine::{EngineDocument, PageSize, PageTarget, PdfEngine, ProbeError, RenderError, RenderMode, with_planned_page};
 type Engine = crate::pdf_engine::InProcessEngine;
 type EngineDoc<'a> = <Engine as PdfEngine>::Document<'a>;
 use serde::{Deserialize, Serialize};
@@ -467,11 +467,14 @@ impl PdfService {
                             let prepared = crate::raster_redaction::redact_raster_pages(raster_pages)?;
                             crate::sanitization::verify_clean_raster_pdf(&prepared.bytes, plan.pages.len())?;
                             let check = engine.load_from_vec(prepared.bytes.clone(), None).map_err(|error| format!("Redacted output validation failed: {error}"))?;
-                            if check.pages().len() as usize != plan.pages.len() { return Err("Redacted output page count validation failed.".into()); }
+                            if check.page_count() != plan.pages.len() { return Err("Redacted output page count validation failed.".into()); }
                             for (index, raster) in plan.pages.iter().enumerate() {
-                                let output_page = check.pages().get(index as i32).map_err(|error| format!("Could not reopen redacted page {}: {error}", index + 1))?;
-                                let bitmap = output_page.render_with_config(&PdfRenderConfig::new().set_fixed_size(raster.dimensions.width as i32, raster.dimensions.height as i32).set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(false).clear_before_rendering(true).set_clear_color(PdfColor::WHITE)).map_err(|error| format!("Could not render reopened redacted page {}: {error}", index + 1))?;
-                                if bitmap.width() != raster.dimensions.width as i32 || bitmap.height() != raster.dimensions.height as i32 { return Err("Reopened redaction render dimensions differ from the plan.".into()); }
+                                let mut bgra = vec![0; crate::pdf_engine::bgra_len(raster.dimensions.width, raster.dimensions.height).ok_or("The redaction bitmap size is out of range.")?];
+                                check.render_bgra_into(PageTarget::Source(index), RenderMode::Plain, raster.dimensions.width, raster.dimensions.height, &mut bgra).map_err(|error| match error {
+                                    RenderError::Page(error) => format!("Could not reopen redacted page {}: {error}", index + 1),
+                                    RenderError::Render(error) | RenderError::Format(error) => format!("Could not render reopened redacted page {}: {error}", index + 1),
+                                    RenderError::Layout => "Reopened redaction render dimensions differ from the plan.".into(),
+                                })?;
                             }
                             let parsed = lopdf::Document::load_mem(&prepared.bytes).map_err(|error| format!("Could not inspect redacted output text: {error}"))?;
                             for page_number in 1..=plan.pages.len() as u32 {
@@ -1125,13 +1128,11 @@ impl PdfService {
                             crate::split::prepare_and_publish(session, parent, name, pages_per_file, |bytes, expected| {
                                 if reply.is_closed() { return Err("Split was canceled.".into()); }
                                 let document = engine.load_from_slice(bytes, None).map_err(|error| format!("Output could not be opened: {error}"))?;
-                                if document.pages().len() as usize != expected { return Err("Output page count differs from the split plan.".into()); }
-                                for index in 0..document.pages().len() {
-                                    let page = document.pages().get(index).map_err(|error| format!("Output page {} could not be read: {error}", index + 1))?;
-                                    let (width, height) = (page.width().value, page.height().value);
+                                if document.page_count() != expected { return Err("Output page count differs from the split plan.".into()); }
+                                for index in 0..document.page_count() {
+                                    let (width, height) = document.source_page_size(index).map_err(|error| format!("Output page {} could not be read: {error}", index + 1))?;
                                     if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 { return Err(format!("Output page {} has invalid dimensions.", index + 1)); }
-                                    let bitmap = page.render_with_config(&PdfRenderConfig::new().set_target_width(64).set_maximum_height(64)).map_err(|error| format!("Output page {} could not be rendered: {error}", index + 1))?;
-                                    if bitmap.width() <= 0 || bitmap.height() <= 0 { return Err(format!("Output page {} has an invalid bitmap.", index + 1)); }
+                                    if !output_thumbnail(&document, index)? { return Err(format!("Output page {} has an invalid bitmap.", index + 1)); }
                                 }
                                 Ok(())
                             })
@@ -1178,10 +1179,9 @@ impl PdfService {
                             if pages.len() != expected { return Err("Filled PDF page count validation failed.".into()); }
                             let engine_fields = document.form_values(&fields).ok_or("Filled PDF form could not be read consistently by the rendering engine.")?;
                             if !filled_values_agree(&fields, &engine_fields) { return Err("Filled PDF values disagree with the rendering engine.".into()); }
-                            for index in 0..document.pages().len() {
-                                let page = document.pages().get(index).map_err(|error| format!("Filled PDF page could not be read: {error}"))?;
-                                let bitmap = page.render_with_config(&PdfRenderConfig::new().set_target_width(64).set_maximum_height(64)).map_err(|error| format!("Filled PDF page could not be rendered: {error}"))?;
-                                if bitmap.width() <= 0 || bitmap.height() <= 0 { return Err("Filled PDF has an invalid bitmap.".into()); }
+                            for index in 0..document.page_count() {
+                                let valid = document.thumbnail_check(index).map_err(|error| match error { ProbeError::Read(error) => format!("Filled PDF page could not be read: {error}"), ProbeError::Render(error) => format!("Filled PDF page could not be rendered: {error}") })?;
+                                if !valid { return Err("Filled PDF has an invalid bitmap.".into()); }
                                 if reply.is_closed() { return Err("Fill form was canceled.".into()); }
                             }
                             if reply.is_closed() { return Err("Fill form was canceled.".into()); }
@@ -1230,10 +1230,8 @@ impl PdfService {
                                 let document = engine.load_from_vec(bytes.to_vec(), None).map_err(|error| format!("Output could not be opened: {error}"))?;
                                 let pages = document.page_sizes()?;
                                 if pages.len() != expected { return Err(format!("Output page count differs from the {operation} plan.")); }
-                                for index in 0..document.pages().len() {
-                                    let page = document.pages().get(index).map_err(|error| format!("Output page {} could not be read: {error}", index + 1))?;
-                                    let bitmap = page.render_with_config(&PdfRenderConfig::new().set_target_width(64).set_maximum_height(64)).map_err(|error| format!("Output page {} could not be rendered: {error}", index + 1))?;
-                                    if bitmap.width() <= 0 || bitmap.height() <= 0 { return Err(format!("Output page {} has an invalid bitmap.", index + 1)); }
+                                for index in 0..document.page_count() {
+                                    if !output_thumbnail(&document, index)? { return Err(format!("Output page {} has an invalid bitmap.", index + 1)); }
                                 }
                                 if reply.is_closed() { return Err(format!("{operation} was canceled.")); }
                                 prepared = Some((document, pages));
@@ -1265,9 +1263,8 @@ impl PdfService {
                                 let document = engine.load_from_vec(prepared.bytes.clone(), None).map_err(|error| format!("Output could not be opened: {error}"))?;
                                 let pages = document.page_sizes()?;
                                 if pages.len() != 1 || (pages[0].width - prepared.page_width).abs() > 0.02 || (pages[0].height - prepared.page_height).abs() > 0.02 { return Err("Output page dimensions differ from the image conversion plan.".into()); }
-                                let page = document.pages().get(0).map_err(|error| format!("Output page could not be read: {error}"))?;
-                                let bitmap = page.render_with_config(&PdfRenderConfig::new().set_target_width(64).set_maximum_height(64)).map_err(|error| format!("Output page could not be rendered: {error}"))?;
-                                if bitmap.width() <= 0 || bitmap.height() <= 0 { return Err("Output page has an invalid bitmap.".into()); }
+                                let valid = document.thumbnail_check(0).map_err(|error| match error { ProbeError::Read(error) => format!("Output page could not be read: {error}"), ProbeError::Render(error) => format!("Output page could not be rendered: {error}") })?;
+                                if !valid { return Err("Output page has an invalid bitmap.".into()); }
                                 if reply.is_closed() { return Err("Create PDF was canceled.".into()); }
                                 ensure_copy_capacity(&sessions, prepared.bytes.len(), document_limit)?;
                                 prepared_document = Some((document, pages));
@@ -1293,9 +1290,7 @@ impl PdfService {
                             if pages.len() != prepared.pages.len() { return Err("Output page count differs from the image conversion plan.".into()); }
                             for (index, ((width, height), page_size)) in prepared.pages.iter().zip(&pages).enumerate() {
                                 if (page_size.width - width).abs() > 0.02 || (page_size.height - height).abs() > 0.02 { return Err(format!("Output page {} dimensions differ from the image conversion plan.", index + 1)); }
-                                let page = document.pages().get(index as i32).map_err(|error| format!("Output page {} could not be read: {error}", index + 1))?;
-                                let bitmap = page.render_with_config(&PdfRenderConfig::new().set_target_width(64).set_maximum_height(64)).map_err(|error| format!("Output page {} could not be rendered: {error}", index + 1))?;
-                                if bitmap.width() <= 0 || bitmap.height() <= 0 { return Err(format!("Output page {} has an invalid bitmap.", index + 1)); }
+                                if !output_thumbnail(&document, index)? { return Err(format!("Output page {} has an invalid bitmap.", index + 1)); }
                             }
                             if reply.is_closed() { return Err("Create PDF was canceled.".into()); }
                             ensure_copy_capacity(&sessions, prepared.bytes.len(), document_limit)?;
@@ -1327,18 +1322,17 @@ impl PdfService {
                             let output_bytes = crate::image_edit::replace_flat_raster_image(&session.source, u32::from(page) + 1, &replacement_rgb)?;
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
                             let output = engine.load_from_vec(output_bytes.clone(), None).map_err(|error| format!("Image replacement output could not be opened: {error}"))?;
-                            if output.pages().len() != original.pages().len() { return Err("Image replacement output page count changed.".into()); }
-                            for index in 0..output.pages().len() {
+                            if output.page_count() != original.page_count() { return Err("Image replacement output page count changed.".into()); }
+                            for index in 0..output.page_count() {
                                 let target = crate::image_edit::inspect_flat_raster_image(&session.source, u32::from(index as u16) + 1)?;
-                                let render = |document: &PdfDocument<'_>| -> Result<Vec<u8>, String> {
-                                    let page = document.pages().get(index).map_err(|error| error.to_string())?;
-                                    let bitmap = page.render_with_config(&PdfRenderConfig::new().set_fixed_size(target.pixel_width as i32, target.pixel_height as i32).set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(false).clear_before_rendering(true).set_clear_color(PdfColor::WHITE)).map_err(|error| error.to_string())?;
-                                    let bytes = bitmap.as_raw_bytes();
+                                let render = |document: &EngineDoc<'_>| -> Result<Vec<u8>, String> {
+                                    let mut bytes = vec![0; crate::pdf_engine::bgra_len(target.pixel_width, target.pixel_height).ok_or("The image replacement bitmap size is out of range.")?];
+                                    document.render_bgra_into(PageTarget::Source(index), RenderMode::Plain, target.pixel_width, target.pixel_height, &mut bytes).map_err(|error| render_message(error, "Unexpected image replacement bitmap layout."))?;
                                     if bytes.chunks_exact(4).any(|pixel| pixel[3] != 255) { return Err("Image replacement render has unexpected alpha.".into()); }
                                     Ok(bytes.chunks_exact(4).flat_map(|pixel| [pixel[2], pixel[1], pixel[0]]).collect())
                                 };
                                 let actual = render(&output)?;
-                                if index == page as i32 { if actual != replacement_rgb { return Err("Image replacement pixels differ after reopening.".into()); } }
+                                if index == usize::from(page) { if actual != replacement_rgb { return Err("Image replacement pixels differ after reopening.".into()); } }
                                 else if actual != render(original)? { return Err(format!("Image replacement changed unselected page {}.", index + 1)); }
                             }
                             if reply.is_closed() { return Err("Image replacement was canceled.".into()); }
@@ -1374,7 +1368,7 @@ impl PdfService {
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
                             let check = engine.load_from_slice(&bytes, None).map_err(|e| format!("Output validation failed: {e}"))?;
                             let expected = pages.as_ref().map_or(session.plan.len(), |p| p.iter().collect::<std::collections::HashSet<_>>().len());
-                            if check.pages().len() as usize != expected { return Err("Output page count validation failed.".into()); }
+                            if check.page_count() != expected { return Err("Output page count validation failed.".into()); }
                             write_new_file(&path, &bytes)?;
                             Ok(SavedCopy { path: path.to_string_lossy().into_owned(), document: current_info(session, original, documents.get(&id).ok_or("Document is closed")?)? })
                         })();
@@ -1911,8 +1905,8 @@ fn checked_text_replacement(session:&EditSession,document:&EngineDoc<'_>,id:u64,
 }
 
 #[cfg(windows)]
-fn verify_text_pixels(before:&PdfDocument<'_>,after:&PdfDocument<'_>,page:u16,a:&crate::text_edit_commands::TextReplacementBounds,b:&crate::text_edit_commands::TextReplacementBounds)->Result<(),String>{
-    const SIDE:i32=1000;let render=|d:&PdfDocument<'_>|->Result<Vec<u8>,String>{let p=d.pages().get(page as i32).map_err(|e|e.to_string())?;let bitmap=p.render_with_config(&PdfRenderConfig::new().set_fixed_size(SIDE,SIDE).set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(false).clear_before_rendering(true).set_clear_color(PdfColor::WHITE)).map_err(|e|e.to_string())?;Ok(bitmap.as_raw_bytes().to_vec())};let x0=((a.x.min(b.x)*SIDE as f32).floor() as i32-1).max(0);let y0=((a.y.min(b.y)*SIDE as f32).floor() as i32-1).max(0);let x1=(((a.x+a.width).max(b.x+b.width)*SIDE as f32).ceil() as i32+1).min(SIDE);let y1=(((a.y+a.height).max(b.y+b.height)*SIDE as f32).ceil() as i32+1).min(SIDE);let lhs=render(before)?;let rhs=render(after)?;if lhs.len()!=rhs.len(){return Err("Text replacement render dimensions changed.".into())}for y in 0..SIDE{for x in 0..SIDE{if (x<x0||x>=x1||y<y0||y>=y1)&&lhs[((y*SIDE+x)*4)as usize..][..4]!=rhs[((y*SIDE+x)*4)as usize..][..4]{return Err("Text replacement changed pixels outside the glyph ink bounds.".into())}}}Ok(())
+fn verify_text_pixels(before:&EngineDoc<'_>,after:&EngineDoc<'_>,page:u16,a:&crate::text_edit_commands::TextReplacementBounds,b:&crate::text_edit_commands::TextReplacementBounds)->Result<(),String>{
+    const SIDE:i32=1000;let render=|d:&EngineDoc<'_>|->Result<Vec<u8>,String>{let mut bytes=vec![0;(SIDE*SIDE*4) as usize];d.render_bgra_into(PageTarget::Source(usize::from(page)),RenderMode::Plain,SIDE as u32,SIDE as u32,&mut bytes).map_err(|e|render_message(e,"Unexpected text replacement bitmap layout."))?;Ok(bytes)};let x0=((a.x.min(b.x)*SIDE as f32).floor() as i32-1).max(0);let y0=((a.y.min(b.y)*SIDE as f32).floor() as i32-1).max(0);let x1=(((a.x+a.width).max(b.x+b.width)*SIDE as f32).ceil() as i32+1).min(SIDE);let y1=(((a.y+a.height).max(b.y+b.height)*SIDE as f32).ceil() as i32+1).min(SIDE);let lhs=render(before)?;let rhs=render(after)?;if lhs.len()!=rhs.len(){return Err("Text replacement render dimensions changed.".into())}for y in 0..SIDE{for x in 0..SIDE{if (x<x0||x>=x1||y<y0||y>=y1)&&lhs[((y*SIDE+x)*4)as usize..][..4]!=rhs[((y*SIDE+x)*4)as usize..][..4]{return Err("Text replacement changed pixels outside the glyph ink bounds.".into())}}}Ok(())
 }
 
 #[cfg(windows)]
@@ -1949,6 +1943,17 @@ fn validate_ocr_result(
     if session.revision != request.revision { return Err("Document changed. Start OCR again.".into()); }
     session.plan.get(usize::from(request.page)).ok_or("OCR page is out of range")?;
     Ok(())
+}
+
+fn render_message(error: RenderError, layout: &str) -> String {
+    match error { RenderError::Page(error) | RenderError::Render(error) | RenderError::Format(error) => error, RenderError::Layout => layout.into() }
+}
+
+fn output_thumbnail(document: &EngineDoc<'_>, index: usize) -> Result<bool, String> {
+    document.thumbnail_check(index).map_err(|error| match error {
+        ProbeError::Read(error) => format!("Output page {} could not be read: {error}", index + 1),
+        ProbeError::Render(error) => format!("Output page {} could not be rendered: {error}", index + 1),
+    })
 }
 
 fn print_dimensions(width: f32, height: f32, max_width: u32, max_height: u32) -> Result<(u32, u32), String> {
