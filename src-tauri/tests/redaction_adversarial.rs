@@ -625,13 +625,27 @@ fn worker_render_path_matches_this_replica() {
     let plan_start = source.find("fn checked_raster_redaction_request(").expect("plan function");
     let plan = &source[plan_start..plan_start + source[plan_start..].find("Ok(RasterRedactionPlan { pages })").expect("plan end")];
     assert!(plan.contains("crate::page_image::dimensions(page_width, page_height, 150, PageImageFormat::Png)?"), "redaction DPI drifted from 150");
+    // Check only the real method bodies: pdf_engine.rs also holds a #[cfg(test)] replica of these flags.
+    // The trait declares each method first (signature only); the implementation is the last occurrence
+    // before the test module.
+    let test_module = engine.find("#[cfg(test)]\nmod tests").or_else(|| engine.find("#[cfg(test)]\r\nmod tests")).expect("pdf_engine.rs test module");
+    let method = |name: &str| -> &str {
+        let start = engine[..test_module].rfind(name).unwrap_or_else(|| panic!("{name} not found in pdf_engine.rs"));
+        let body = &engine[start..test_module];
+        let end = body[name.len()..].find("\n    fn ").or_else(|| body[name.len()..].find("\n}")).expect("method end") + name.len();
+        &body[..end]
+    };
+    let bgra = method("fn render_bgra_into(&self");
+    assert!(bgra.contains("RenderMode::Print") && bgra.contains("render_into_bitmap_with_config"), "render_bgra_into slice is not the real method: {bgra}");
     assert!(
-        engine.contains(".set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(false).clear_before_rendering(true).set_clear_color(PdfColor::WHITE);")
-            && engine.contains("RenderMode::Print => config.render_annotations(true).render_form_data(true).use_print_quality(true)"),
+        bgra.contains(".set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(false).clear_before_rendering(true).set_clear_color(PdfColor::WHITE);")
+            && bgra.contains("RenderMode::Print => config.render_annotations(true).render_form_data(true).use_print_quality(true)"),
         "the engine's print render flags drifted from the replica"
     );
+    let viewer = method("fn render_viewer_png(&self");
+    assert!(viewer.contains("image::ImageFormat::Png"), "render_viewer_png slice is not the real method: {viewer}");
     assert!(
-        engine.contains("page.render_with_config(&PdfRenderConfig::new().set_target_width(width).set_maximum_height(5000).render_annotations(true))"),
+        viewer.contains("page.render_with_config(&PdfRenderConfig::new().set_target_width(width).set_maximum_height(5000).render_annotations(true))"),
         "the viewer render flags drifted; the view_ink assertions model them"
     );
 }
