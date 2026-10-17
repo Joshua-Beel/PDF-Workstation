@@ -720,6 +720,10 @@ fn main() {
             eprintln!("bounded fake failure");
             exit(7);
         }
+        "nonzero-unread" => {
+            eprintln!("bounded fake failure");
+            exit(7);
+        }
         "unexpected-stderr" => {
             print!("recognized text\n");
             eprintln!("unexpected warning");
@@ -980,6 +984,26 @@ fn main() {
         let directory = over_stderr.directory.clone();
         assert_eq!(over_stderr.runner.recognize_p6(TEST_P6, &OcrCancellation::default()), Err(OcrProcessError::OutputLimit("stderr")));
         assert_process_reaped(wait_for_pid(&directory));
+    }
+
+    #[test]
+    fn nonzero_exit_is_reported_ahead_of_a_writer_error_when_input_is_never_read() {
+        let _serial = test_lock();
+        let (width, height) = (1000_usize, 1000_usize);
+        let mut input = format!("P6
+{width} {height}
+255
+").into_bytes();
+        input.resize(input.len() + width * height * 3, 255);
+        for _ in 0..3 {
+            let case = fake_case("nonzero-unread");
+            let result = case.runner.recognize_p6(&input, &OcrCancellation::default());
+            assert!(
+                matches!(result, Err(OcrProcessError::ChildExit { code: 7, ref stderr }) if stderr == "bounded fake failure
+"),
+                "{result:?}"
+            );
+        }
     }
 
     #[test]
