@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- Repo renamed to `Joshua-Beel/PDF-Workstation`: workflow guards, release URLs, the updater endpoint for new builds and verifier pins use the new name; older installs keep updating through GitHub's redirects (SM6).
 - README restructured: one-line feature and change summaries here; full feature text moved to [docs/features.md](docs/features.md) and the full change log to [docs/changelog.md](docs/changelog.md), verbatim; README links now use the renamed repo `Joshua-Beel/PDF-Workstation` (docs only).
 - CI on every push to `master` and every pull request: tests, type-check and build, read-only, no secrets (SM6). Unverified until its first hosted run.
 - Viewer scroll follow-ups: tighter Find cancellation and stale-page tests (SM1; tests only).
