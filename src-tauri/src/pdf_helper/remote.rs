@@ -49,6 +49,12 @@ impl RemotePdfEngine {
         self.supervisor.borrow().stats()
     }
 
+    /// Ends the running helper as a crash would (test only).
+    #[cfg(test)]
+    pub(crate) fn kill_helper(&self) -> bool {
+        self.supervisor.borrow_mut().kill_running_helper()
+    }
+
     /// Shares `section` with `access` into the helper and asks it to probe the mapping (test only).
     #[cfg(test)]
     pub(crate) fn probe_section(&self, section: &Section, access: u32) -> Result<u8, CallError> {

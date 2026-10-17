@@ -146,6 +146,27 @@ impl SelectedEngine {
     }
 }
 
+#[cfg(test)]
+impl SelectedEngine {
+    /// Which engine the pdf-worker is using (test only).
+    pub(crate) fn test_kind(&self) -> &'static str {
+        match self {
+            Self::InProcess(_) => "in-process",
+            #[cfg(windows)]
+            Self::Remote(_) => "helper",
+        }
+    }
+
+    /// Ends the running helper as a crash would; `false` in process (test only).
+    pub(crate) fn test_kill_helper(&self) -> bool {
+        match self {
+            Self::InProcess(_) => false,
+            #[cfg(windows)]
+            Self::Remote(engine) => engine.kill_helper(),
+        }
+    }
+}
+
 pub(crate) enum SelectedDocument<'a> {
     InProcess(InProcessDocument<'a>),
     #[cfg(windows)]
