@@ -630,7 +630,11 @@ fn build_command_line(engine: &Path, tessdata: &Path, output_profile: OcrOutputP
         OsString::from("--loglevel"),
         OsString::from("ERROR"),
     ];
-    if matches!(output_profile, OcrOutputProfile::Tsv) { arguments.push(OsString::from("tsv")); }
+    if matches!(output_profile, OcrOutputProfile::Tsv) {
+        for argument in ["-c", "tessedit_create_tsv=1", "-c", "tessedit_create_txt=0"] {
+            arguments.push(OsString::from(argument));
+        }
+    }
     let arguments = arguments.iter().map(OsString::as_os_str).collect::<Vec<_>>();
     child_job::command_line(&arguments).map_err(|_| null_character())
 }
@@ -683,7 +687,8 @@ fn main() {
         thread::sleep(Duration::from_secs(30));
         return;
     }
-    fs::write(directory.join("child.pid"), std::process::id().to_string()).unwrap();
+    fs::write(directory.join("child.pid.tmp"), std::process::id().to_string()).unwrap();
+    fs::rename(directory.join("child.pid.tmp"), directory.join("child.pid")).unwrap();
     let behavior = fs::read_to_string(directory.join("behavior.txt")).unwrap();
     match behavior.trim() {
         "exact" => {
@@ -790,7 +795,9 @@ fn main() {
         let path = directory.join("child.pid");
         for _ in 0..300 {
             if let Ok(text) = std::fs::read_to_string(&path) {
-                return text.parse().unwrap();
+                if let Ok(pid) = text.trim().parse() {
+                    return pid;
+                }
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -836,7 +843,7 @@ fn main() {
         assert_eq!(text, r#""C:\OCR engine\tesseract.exe" "stdin" "stdout" "--tessdata-dir" "C:\model space\tessdata" "-l" "eng" "--oem" "1" "--psm" "6" "--dpi" "150" "--loglevel" "ERROR""#);
         let tsv = build_command_line(Path::new(r"C:\OCR engine\tesseract.exe"), Path::new(r"C:\model space\tessdata"), OcrOutputProfile::Tsv).unwrap();
         let tsv = String::from_utf16(&tsv[..tsv.len() - 1]).unwrap();
-        assert_eq!(tsv, format!("{text} \"tsv\""));
+        assert_eq!(tsv, format!("{text} \"-c\" \"tessedit_create_tsv=1\" \"-c\" \"tessedit_create_txt=0\""));
     }
 
     #[test]

@@ -28,6 +28,7 @@ pub fn is_supported_word_char(character: char) -> bool {
             0x00AD | 0x034F | 0x061C | 0x115F | 0x1160 | 0x17B4 | 0x17B5 | 0x180B..=0x180F
             | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F | 0x3164 | 0xFE00..=0xFE0F
             | 0xFEFF | 0xFFA0 | 0xFFF0..=0xFFFD | 0x1BCA0..=0x1BCA3 | 0x1D173..=0x1D17A
+            | 0x0600..=0x0605 | 0x06DD | 0x070F | 0x110BD | 0x13430..=0x1343F
             | 0xE0000..=0xE0FFF | 0xE000..=0xF8FF | 0xF0000..=0x10FFFF | 0xFDD0..=0xFDEF)
         || code & 0xFFFE == 0xFFFE)
 }
@@ -380,7 +381,7 @@ fn glyphless_truetype() -> Vec<u8> {
 
     let mut hhea = Vec::new();
     be32(&mut hhea, 0x0001_0000);
-    be16(&mut hhea, &[ascent, descent, 0, advance, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2]);
+    be16(&mut hhea, &[ascent, descent, 0, advance, 0, 0, advance, 1, 0, 0, 0, 0, 0, 0, 0, 2]);
 
     let mut hmtx = Vec::new();
     be16(&mut hmtx, &[advance, 0, advance, 0]);

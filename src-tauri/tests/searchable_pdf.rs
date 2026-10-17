@@ -185,3 +185,22 @@ fn oracle_binds_expected_words_and_pixels() {
     changed_pixel[0].rgb[0] = 0;
     assert!(verify_searchable_pdf(&bytes, &changed_pixel).is_err());
 }
+
+#[test]
+fn refuses_format_characters_the_extractor_would_hide() {
+    for text in ["ar\u{600}x", "ar\u{605}x", "ar\u{6dd}x", "sy\u{70f}x", "br\u{110bd}x", "eg\u{13430}x", "eg\u{1343f}x"] {
+        assert!(write_searchable_pdf(&[page(vec![word(text)])]).is_err(), "{text:?}");
+    }
+    assert!(write_searchable_pdf(&[page(vec![word("ar\u{606}x")])]).is_ok());
+}
+
+#[test]
+fn embedded_font_reports_a_real_hhea_x_max_extent() {
+    let bytes = write_searchable_pdf(&[page(vec![word("A")])]).unwrap();
+    let document = Document::load_mem(&bytes).unwrap();
+    let (_, _, _, _, program) = font_parts(&document);
+    let tables = u16::from_be_bytes([program[4], program[5]]) as usize;
+    let record = (0..tables).map(|i| 12 + i * 16).find(|&at| &program[at..at + 4] == b"hhea").unwrap();
+    let offset = u32::from_be_bytes(program[record + 8..record + 12].try_into().unwrap()) as usize;
+    assert_eq!(u16::from_be_bytes([program[offset + 16], program[offset + 17]]), 500);
+}
