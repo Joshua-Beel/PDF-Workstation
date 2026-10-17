@@ -37,6 +37,9 @@ pub(crate) enum Fault {
     Misreply(Misreply),
     /// Calls `SetEvent` on this handle value and replies with whether it succeeded.
     SetEvent(u64),
+    /// Replies, then ends the helper with exit code 9 as soon as the next request arrives (a crash while
+    /// that request is in flight).
+    ExitOnNextRequest,
     /// Maps the passed section handle (value, length) for write and for read, then closes it. Replies with
     /// bit 0 = write mapping succeeded, bit 1 = read mapping succeeded, bit 2 = first byte is 0xA5.
     ProbeSection(u64, u64),
@@ -112,6 +115,7 @@ impl Fault {
                 writer.u8(6);
                 writer.u64(handle);
             }
+            Self::ExitOnNextRequest => writer.u8(8),
             Self::ProbeSection(handle, len) => {
                 writer.u8(7);
                 writer.u64(handle);
@@ -130,6 +134,7 @@ impl Fault {
             5 => Self::Misreply(*MISREPLIES.get(reader.u8()? as usize).ok_or_else(|| Malformed::new("unknown misreply"))?),
             6 => Self::SetEvent(reader.u64()?),
             7 => Self::ProbeSection(reader.u64()?, reader.u64()?),
+            8 => Self::ExitOnNextRequest,
             other => return Err(Malformed::new(format!("unknown fault {other}"))),
         })
     }
@@ -148,7 +153,14 @@ pub(crate) fn exit_if_crash_on_load(bytes: &[u8]) {
     }
 }
 
-pub(crate) fn run(fault: Fault, misreply: &mut Option<Misreply>, sequence: u32) -> Reply {
+/// Ends the helper if a previous `ExitOnNextRequest` armed it.
+pub(crate) fn exit_if_armed(armed: &mut bool) {
+    if std::mem::take(armed) {
+        exit_now(9);
+    }
+}
+
+pub(crate) fn run(fault: Fault, misreply: &mut Option<Misreply>, exit_armed: &mut bool, sequence: u32) -> Reply {
     let mut out = FrameWriter::new(kind::FAULT, sequence);
     match fault {
         Fault::Exit(code) => exit_now(code),
@@ -173,6 +185,10 @@ pub(crate) fn run(fault: Fault, misreply: &mut Option<Misreply>, sequence: u32) 
                 unsafe { System.dealloc(pointer, layout) };
                 out.u8(1);
             }
+        }
+        Fault::ExitOnNextRequest => {
+            *exit_armed = true;
+            out.u8(1);
         }
         Fault::Misreply(next) => {
             *misreply = Some(next);

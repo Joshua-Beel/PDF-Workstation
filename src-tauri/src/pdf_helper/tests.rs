@@ -153,6 +153,24 @@ fn t3_an_exit_mid_request_fails_that_request_and_other_documents_reload_after_re
     assert_eq!(victim.page_sizes().err().unwrap(), SUSPECT_MESSAGE);
 }
 
+/// A helper that dies while no request is in flight is found before the next request and replaced (the
+/// restart counts toward the crash-loop cap); no document is blamed, so documents reload and render as before.
+#[test]
+fn an_idle_helper_crash_is_replaced_before_the_next_request() {
+    let engine = RemotePdfEngine::start(test_config(TEST_CAP)).unwrap();
+    let document = engine.load_from_vec(welcome(), None).unwrap();
+    let before = render(&document);
+    assert!(engine.kill_helper());
+    assert_eq!(render(&document), before, "the next render reloads into a new helper");
+    let stats = engine.stats();
+    assert_eq!(stats.spawns, 2);
+    assert_eq!(stats.last_failure, Some(HelperFailure::Exited(Some(ExitKind::Code(0xdead)))));
+    assert!(!document.is_suspect());
+    let other = engine.load_from_vec(welcome(), None).unwrap();
+    assert!(engine.kill_helper());
+    assert_eq!(other.page_sizes().unwrap().len(), WELCOME_PAGES, "a load-path request (section sharing) also recovers");
+}
+
 #[test]
 fn t3_an_access_violation_ends_the_helper_with_its_exception_code() {
     let engine = RemotePdfEngine::start(test_config(TEST_CAP)).unwrap();

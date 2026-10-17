@@ -52,10 +52,17 @@ impl RemotePdfEngine {
         self.supervisor.borrow().stats()
     }
 
-    /// Ends the running helper as a crash would (test only).
+    /// Ends the running helper as a crash would, while no request is in flight (test only).
     #[cfg(test)]
     pub(crate) fn kill_helper(&self) -> bool {
         self.supervisor.borrow_mut().kill_running_helper()
+    }
+
+    /// Makes the helper exit when its next request arrives, a crash while that request is in flight (test only).
+    #[cfg(test)]
+    pub(crate) fn crash_on_next_request(&self) -> bool {
+        let deadline = self.supervisor.borrow().deadlines().read;
+        self.fault(super::faults::Fault::ExitOnNextRequest, deadline) == Ok(1)
     }
 
     /// Shares `section` with `access` into the helper and asks it to probe the mapping (test only).
@@ -190,6 +197,7 @@ impl RemoteDocument<'_> {
 
     /// This document's handle in the running helper, loading it again after a restart unless it is suspect.
     fn current_handle(&self) -> Result<u32, CallError> {
+        self.engine.supervisor.borrow_mut().drop_if_exited();
         {
             let state = self.state.borrow();
             if state.deaths >= MAX_DEATHS {
