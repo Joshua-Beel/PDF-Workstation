@@ -48,6 +48,7 @@ const DOCUMENT_KINDS: &[u16] = &[
     kind::SOURCE_PAGE_SIZE,
     kind::THUMBNAIL_CHECK,
     kind::RENDER_BGRA,
+    kind::RENDER_VIEWER_RGBA,
     #[cfg(test)]
     kind::PAGE_LABELS,
 ];
@@ -302,6 +303,17 @@ impl<'e> State<'e> {
                 let target_view = length.ok_or_else(|| "The bitmap size is out of range.".to_owned()).and_then(|length| unsafe { View::map_passed(section, length, true) });
                 match target_view {
                     Ok(mut view) => document.render_bgra_into(target.as_target(), mode, width, height, view.as_mut_slice()).map_err(render_error),
+                    Err(message) => Err((class::RENDER_RENDER, message)),
+                }
+            }
+            kind::RENDER_VIEWER_RGBA => {
+                let spec = get_spec(&mut reader)?;
+                let (width, height, section) = (reader.u32()?, reader.u32()?, reader.u64()?);
+                reader.finish()?;
+                let length = bgra_len(width, height).filter(|length| (1..=MAX_BGRA_BYTES).contains(length));
+                let target_view = length.ok_or_else(|| "The bitmap size is out of range.".to_owned()).and_then(|length| unsafe { View::map_passed(section, length, true) });
+                match target_view {
+                    Ok(mut view) => document.render_viewer_rgba_into(&spec, width, height, view.as_mut_slice()).map_err(render_error),
                     Err(message) => Err((class::RENDER_RENDER, message)),
                 }
             }

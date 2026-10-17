@@ -497,6 +497,8 @@ pub(crate) struct SupervisorStats {
     pub(crate) last_io_cancelled: bool,
     pub(crate) last_stderr: Vec<u8>,
     pub(crate) process_id: Option<u32>,
+    /// Peak committed memory of the running helper's job (`PeakJobMemoryUsed`).
+    pub(crate) peak_commit: Option<usize>,
 }
 
 /// Owns at most one helper. Not thread-safe: the pdf-worker thread is its only user.
@@ -531,6 +533,7 @@ impl Supervisor {
     pub(crate) fn stats(&self) -> SupervisorStats {
         let mut stats = self.stats.clone();
         stats.process_id = self.helper.as_ref().map(|helper| helper.child.process_id());
+        stats.peak_commit = self.helper.as_ref().and_then(|helper| helper.child.peak_job_commit().ok());
         stats
     }
 

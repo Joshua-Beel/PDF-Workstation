@@ -79,6 +79,8 @@ pub(crate) mod kind {
     pub(crate) const SOURCE_PAGE_SIZE: u16 = 17;
     pub(crate) const THUMBNAIL_CHECK: u16 = 18;
     pub(crate) const RENDER_BGRA: u16 = 19;
+    /// A viewer render in RGBA order into an app-owned section (step 4).
+    pub(crate) const RENDER_VIEWER_RGBA: u16 = 21;
     #[cfg(test)]
     pub(crate) const PAGE_LABELS: u16 = 20;
     #[cfg(test)]

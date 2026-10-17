@@ -21,8 +21,10 @@ pub(crate) const CLOSED_MESSAGE: &str = "This file couldn't be displayed: the PD
 const RELOAD_CHANGED_MESSAGE: &str = "This file couldn't be displayed: it reloaded with a different page count.";
 /// Helper deaths after which a document's engine side is closed for good.
 const MAX_DEATHS: u8 = 2;
-/// A render target section larger than this is released after use; smaller ones are kept for the next render.
-const KEEP_RENDER_TARGET: usize = 32 * 1024 * 1024;
+/// A render target section larger than this is released after use; smaller ones are kept for the next
+/// render. 64 MiB covers the largest viewer render (3,000 x 5,000 px): recreating and faulting in a fresh
+/// section per render cost 40-80 ms at 3,000 px in the T16 measurement.
+const KEEP_RENDER_TARGET: usize = 64 * 1024 * 1024;
 
 pub(crate) struct RemotePdfEngine {
     supervisor: RefCell<Supervisor>,
@@ -357,18 +359,23 @@ impl EngineDocument for RemoteDocument<'_> {
         }
         let (page_width, page_height) = self.planned_page_size(spec)?;
         let (pixels_wide, pixels_high) = viewer_size(page_width, page_height, width).ok_or("The page has no area to render.")?;
-        let mut pixels = vec![0; bgra_len(pixels_wide, pixels_high).ok_or("The page is too large to render.")?];
-        self.render_bgra_into(PageTarget::Planned(spec), RenderMode::Viewer, pixels_wide, pixels_high, &mut pixels).map_err(|error| match error {
+        let mut encoded = Err("The viewer render produced no image.".to_owned());
+        let encode = |rgba: &[u8]| {
+            use image::ImageEncoder;
+            let mut png = Vec::new();
+            encoded = image::codecs::png::PngEncoder::new(&mut png).write_image(rgba, pixels_wide, pixels_high, image::ExtendedColorType::Rgba8).map(|()| png).map_err(|error| error.to_string());
+        };
+        let request = |writer: &mut FrameWriter, shared: u64| {
+            put_spec(writer, spec);
+            writer.u32(pixels_wide);
+            writer.u32(pixels_high);
+            writer.u64(shared);
+        };
+        self.render_into_target(kind::RENDER_VIEWER_RGBA, request, pixels_wide, pixels_high, encode).map_err(|error| match error {
             RenderError::Page(message) | RenderError::Render(message) | RenderError::Format(message) => message,
             RenderError::Layout => "Unexpected viewer bitmap layout.".to_owned(),
         })?;
-        for pixel in pixels.chunks_exact_mut(4) {
-            pixel.swap(0, 2);
-        }
-        let image = image::RgbaImage::from_raw(pixels_wide, pixels_high, pixels).ok_or("Unexpected viewer bitmap layout.")?;
-        let mut png = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgba8(image).write_to(&mut png, image::ImageFormat::Png).map_err(|error| error.to_string())?;
-        Ok(RenderedPng { png: png.into_inner(), width: pixels_wide, height: pixels_high })
+        Ok(RenderedPng { png: encoded?, width: pixels_wide, height: pixels_high })
     }
 
     fn visible_text(&self, target: PageTarget<'_>) -> Result<String, TextError> {
@@ -472,21 +479,32 @@ impl EngineDocument for RemoteDocument<'_> {
     }
 
     fn render_bgra_into(&self, target: PageTarget<'_>, mode: RenderMode, width: u32, height: u32, out: &mut [u8]) -> Result<(), RenderError> {
-        let Some(length) = bgra_len(width, height).filter(|length| *length == out.len()) else { return Err(RenderError::Layout) };
+        if bgra_len(width, height) != Some(out.len()) {
+            return Err(RenderError::Layout);
+        }
+        let request = |writer: &mut FrameWriter, shared: u64| {
+            put_target(writer, target);
+            put_mode(writer, mode);
+            writer.u32(width);
+            writer.u32(height);
+            writer.u64(shared);
+        };
+        self.render_into_target(kind::RENDER_BGRA, request, width, height, |pixels| out.copy_from_slice(pixels))
+    }
+}
+
+impl RemoteDocument<'_> {
+    /// Has the helper render `width` x `height` BGRA into the engine's app-owned target section, then hands
+    /// the pixels (only after a successful reply) to `consume`.
+    fn render_into_target(&self, request_kind: u16, request: impl FnOnce(&mut FrameWriter, u64), width: u32, height: u32, consume: impl FnOnce(&[u8])) -> Result<(), RenderError> {
+        let Some(length) = bgra_len(width, height).filter(|length| *length > 0) else { return Err(RenderError::Layout) };
         if length > MAX_BGRA_BYTES {
             return Err(RenderError::Render("The bitmap is larger than the PDF engine renders.".into()));
         }
         let rendered = self.engine.with_render_target(length, |section, view| {
-            let payload = |writer: &mut FrameWriter, shared: u64| {
-                put_target(writer, target);
-                put_mode(writer, mode);
-                writer.u32(width);
-                writer.u32(height);
-                writer.u64(shared);
-            };
-            let result = self.request_sharing(section.handle(), FILE_MAP_READ | FILE_MAP_WRITE, kind::RENDER_BGRA, payload, Deadline::Render, class::RENDER, |_| Ok(()));
+            let result = self.request_sharing(section.handle(), FILE_MAP_READ | FILE_MAP_WRITE, request_kind, request, Deadline::Render, class::RENDER, |_| Ok(()));
             if result.is_ok() {
-                out.copy_from_slice(&view.as_slice()[..length]);
+                consume(&view.as_slice()[..length]);
             }
             result
         });

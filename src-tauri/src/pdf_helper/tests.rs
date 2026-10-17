@@ -749,3 +749,211 @@ fn remote_engine_matches_in_process_engine_on_the_fixtures() {
     assert_eq!(remote.stats().spawns, 1, "no helper restarted during the comparison");
     println!("helper-equivalence-ok renders={renders} checks={checks}");
 }
+
+// Helper step 4: T1, T2 (memory past the cap, from legitimate large content under a cap set between a
+// measured baseline and the measured need) and the T15/T16 measurement harnesses (ignored; run on demand).
+
+const MIB: usize = 1024 * 1024;
+
+/// A one-page PDF showing a `side` x `side` RGB photo-like gradient, JPEG-compressed (what a scan page is).
+fn photo_page(side: u32) -> Vec<u8> {
+    use lopdf::{dictionary, Document, Object, Stream};
+    let mut rgb = Vec::with_capacity((side * side * 3) as usize);
+    for y in 0..side {
+        for x in 0..side {
+            rgb.extend_from_slice(&[(x * 255 / side) as u8, (y * 255 / side) as u8, ((x + y) * 127 / side) as u8]);
+        }
+    }
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 85).encode(&rgb, side, side, image::ExtendedColorType::Rgb8).unwrap();
+    let mut document = Document::with_version("1.7");
+    let pages = document.new_object_id();
+    let image = document.add_object(Stream::new(
+        dictionary! { "Type" => "XObject", "Subtype" => "Image", "Width" => side as i64, "Height" => side as i64, "ColorSpace" => "DeviceRGB", "BitsPerComponent" => 8, "Filter" => "DCTDecode" },
+        jpeg,
+    ));
+    let content = document.add_object(Stream::new(dictionary! {}, b"q 600 0 0 600 0 0 cm /Im0 Do Q".to_vec()));
+    let page = document.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages, "Contents" => content, "MediaBox" => vec![0.into(), 0.into(), 600.into(), 600.into()],
+        "Resources" => dictionary! { "XObject" => dictionary! { "Im0" => image } },
+    });
+    document.objects.insert(pages, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![Object::Reference(page)], "Count" => 1 }));
+    let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    document.trailer.set("Root", catalog);
+    let mut bytes = Vec::new();
+    document.save_to(&mut bytes).unwrap();
+    bytes
+}
+
+/// A PDF with `count` letter pages in one flat page tree sharing one small content stream.
+fn many_pages(count: usize) -> Vec<u8> {
+    use lopdf::{dictionary, Document, Object, Stream};
+    let mut document = Document::with_version("1.7");
+    let pages = document.new_object_id();
+    let content = document.add_object(Stream::new(dictionary! {}, b"0 0 m 100 100 l S".to_vec()));
+    let kids = (0..count).map(|_| Object::Reference(document.add_object(dictionary! { "Type" => "Page", "Parent" => pages, "Contents" => content }))).collect::<Vec<_>>();
+    document.objects.insert(pages, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => count as i64, "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()] }));
+    let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    document.trailer.set("Root", catalog);
+    let mut bytes = Vec::new();
+    document.save_to(&mut bytes).unwrap();
+    bytes
+}
+
+fn peak(engine: &RemotePdfEngine) -> usize {
+    engine.stats().peak_commit.unwrap()
+}
+
+/// A cap halfway between what the helper needs for the welcome PDF and what `work` needs on top, measured
+/// in a helper with room to spare. `work` gets a fresh engine and must leave the large allocation done.
+fn cap_between(work: impl Fn(&RemotePdfEngine)) -> (usize, usize, usize) {
+    let engine = RemotePdfEngine::start(test_config(TEST_CAP)).unwrap();
+    let welcome_document = engine.load_from_vec(welcome(), None).unwrap();
+    render(&welcome_document);
+    let baseline = peak(&engine);
+    work(&engine);
+    let needed = peak(&engine);
+    assert!(needed > baseline + 16 * MIB, "the large work needs only {} MiB more than the baseline {} MiB", (needed - baseline) / MIB, baseline / MIB);
+    (baseline, needed, baseline + (needed - baseline) / 2)
+}
+
+/// T1: a render whose decoding needs more memory than the helper may use fails with the memory message;
+/// nothing from the capped helper (no blank page) reaches the caller; the document is set aside; another
+/// document in the same engine renders exactly as before once the helper is replaced.
+#[test]
+fn t1_a_render_past_the_cap_fails_and_other_documents_recover() {
+    let photo = photo_page(3_000);
+    let side = 3_000_u32;
+    let render_photo = |document: &RemoteDocument<'_>, out: &mut [u8]| document.render_bgra_into(PageTarget::Source(0), RenderMode::Viewer, side, side, out);
+    let (baseline, needed, cap) = cap_between(|engine| {
+        let document = engine.load_from_vec(photo.clone(), None).unwrap();
+        let mut pixels = vec![0; (side * side * 4) as usize];
+        render_photo(&document, &mut pixels).unwrap();
+        assert!(pixels.chunks_exact(4).any(|pixel| pixel != [255; 4]));
+    });
+    println!("step4: t1 baseline {} MiB, photo render needs {} MiB, cap {} MiB", baseline / MIB, needed / MIB, cap / MIB);
+    let engine = RemotePdfEngine::start(test_config(cap)).unwrap();
+    let other = engine.load_from_vec(welcome(), None).unwrap();
+    let before = render(&other);
+    let document = engine.load_from_vec(photo, None).unwrap();
+    let mut pixels = vec![0x5a_u8; (side * side * 4) as usize];
+    let error = render_photo(&document, &mut pixels).unwrap_err();
+    assert!(matches!(&error, RenderError::Render(message) if *message == HelperFailure::LimitViolation(LimitViolation::ProcessMemory).message()), "{error:?}");
+    assert!(pixels.iter().all(|byte| *byte == 0x5a), "no blank or partial page reaches the caller");
+    assert!(matches!(engine.stats().last_failure, Some(HelperFailure::LimitViolation(_))));
+    assert!(document.is_suspect());
+    let started = Instant::now();
+    assert_eq!(render(&other), before, "the other document re-renders identically in the new helper");
+    println!("step4: t1 other document re-rendered {:?} after the limit", started.elapsed());
+}
+
+/// T2: opening a document whose page tree needs more memory than the helper may use fails with the
+/// memory message, leaves nothing open in the helper, and other documents keep working.
+#[test]
+fn t2_an_open_past_the_cap_fails_and_other_documents_recover() {
+    let big = many_pages(65_536);
+    let (baseline, needed, cap) = cap_between(|engine| {
+        let document = engine.load_from_vec(big.clone(), None).unwrap();
+        assert_eq!(document.page_sizes().unwrap().len(), 65_536);
+    });
+    println!("step4: t2 baseline {} MiB, 65,536-page open needs {} MiB, cap {} MiB", baseline / MIB, needed / MIB, cap / MIB);
+    let engine = RemotePdfEngine::start(test_config(cap)).unwrap();
+    let other = engine.load_from_vec(welcome(), None).unwrap();
+    let before = render(&other);
+    let opened = engine.load_from_vec(big, None).map_err(|error| error.to_string()).and_then(|document| document.page_sizes().map(|_| ()));
+    assert_eq!(opened, Err(HelperFailure::LimitViolation(LimitViolation::ProcessMemory).message()));
+    assert!(matches!(engine.stats().last_failure, Some(HelperFailure::LimitViolation(_))));
+    assert_eq!(render(&other), before);
+}
+
+fn listed_files(variable: &str) -> Vec<PathBuf> {
+    let Some(list) = std::env::var_os(variable) else { return Vec::new() };
+    std::fs::read_to_string(list).unwrap().lines().map(str::trim).filter(|line| !line.is_empty()).map(PathBuf::from).collect()
+}
+
+/// T15 (run on demand: `SM5_HELPER_REAL=<list of PDF paths>`, read only): every listed file opens through
+/// the helper with the same page count and sizes as in process, and page 1 at 1,600 px is the same PNG.
+#[test]
+#[ignore]
+fn t15_real_files_open_and_render_identically() {
+    let files = listed_files("SM5_HELPER_REAL");
+    let local = InProcessEngine::bind(library()).unwrap();
+    let remote = RemotePdfEngine::start(test_config(crate::open_limits::HELPER_MEMORY_LIMIT)).unwrap();
+    let (mut identical, mut refused_alike, mut pages) = (0, 0, 0);
+    for (index, path) in files.iter().enumerate() {
+        let bytes = std::fs::read(path).unwrap();
+        let (left, right) = (local.load_from_vec(bytes.clone(), None), remote.load_from_vec(bytes, None));
+        let (left, right) = match (left, right) {
+            (Ok(left), Ok(right)) => (left, right),
+            (Err(left), Err(right)) => {
+                assert_eq!(left.to_string(), right.to_string(), "file {}: different load errors", index + 1);
+                refused_alike += 1;
+                continue;
+            }
+            (left, right) => panic!("file {}: in process {:?}, helper {:?}", index + 1, left.err().map(|error| error.to_string()), right.err().map(|error| error.to_string())),
+        };
+        let sizes = |document: &dyn EngineDocument| format!("{:?}", document.page_sizes().map(|sizes| sizes.iter().map(|size| (size.width.to_bits(), size.height.to_bits())).collect::<Vec<_>>()));
+        assert_eq!(sizes(&left), sizes(&right), "file {}: page sizes differ", index + 1);
+        let first = spec(0);
+        let png = |document: &dyn EngineDocument| document.render_viewer_png(&first, 1_600).map(|png| png.png);
+        assert!(png(&left).unwrap() == png(&right).unwrap(), "file {}: page 1 at 1,600 px differs", index + 1);
+        pages += left.page_count();
+        identical += 1;
+    }
+    assert_eq!(remote.stats().spawns, 1, "no helper restarted");
+    println!("step4: t15 files={} identical={identical} refused_alike={refused_alike} pages={pages} helper_peak_mib={}", files.len(), peak(&remote) / MIB);
+}
+
+fn percentile(values: &mut [f64], fraction: f64) -> f64 {
+    values.sort_by(f64::total_cmp);
+    values[((values.len() - 1) as f64 * fraction).round() as usize]
+}
+
+/// T16 (run on demand, release build: `SM5_HELPER_PERF=<list of PDF paths>`, read only): viewer render
+/// time in process vs through the helper at 800, 1,600 and 3,000 px on the fixtures and the listed files
+/// (15 timed renders each after one warm-up), helper start time and idle commit, and restart plus re-render
+/// of the active document.
+#[test]
+#[ignore]
+fn t16_helper_performance_budget() {
+    let mut files = vec![root().join("resources/welcome.pdf"), root().join("../test-corpus/synthetic-text-1500.pdf"), root().join("../test-corpus/synthetic-scan-98.pdf")];
+    let fixtures = files.len();
+    files.extend(listed_files("SM5_HELPER_PERF"));
+    let local = InProcessEngine::bind(library()).unwrap();
+    let mut starts = Vec::new();
+    for _ in 0..5 {
+        let started = Instant::now();
+        let engine = RemotePdfEngine::start(HelperConfig::production()).unwrap();
+        starts.push(started.elapsed().as_secs_f64() * 1000.0);
+        drop(engine);
+    }
+    let remote = RemotePdfEngine::start(HelperConfig::production()).unwrap();
+    println!("step4: t16 helper start ms p50 {:.1} max {:.1}; idle commit {:.1} MiB", percentile(&mut starts.clone(), 0.5), starts.iter().cloned().fold(0.0, f64::max), peak(&remote) as f64 / MIB as f64);
+    let first = spec(0);
+    let (mut within, mut rows) = (0, 0);
+    for (index, path) in files.iter().enumerate() {
+        let label = if index < fixtures { path.file_name().unwrap().to_string_lossy().into_owned() } else { format!("real-{:02}", index - fixtures + 1) };
+        let bytes = std::fs::read(path).unwrap();
+        let (left, right) = (local.load_from_vec(bytes.clone(), None).unwrap(), remote.load_from_vec(bytes, None).unwrap());
+        for width in [800, 1_600, 3_000] {
+            let time = |document: &dyn EngineDocument| {
+                document.render_viewer_png(&first, width).unwrap();
+                let mut samples = (0..15).map(|_| { let started = Instant::now(); document.render_viewer_png(&first, width).unwrap(); started.elapsed().as_secs_f64() * 1000.0 }).collect::<Vec<_>>();
+                (percentile(&mut samples, 0.5), percentile(&mut samples, 0.95))
+            };
+            let ((local_p50, local_p95), (remote_p50, remote_p95)) = (time(&left), time(&right));
+            let ok = remote_p50 - local_p50 <= f64::max(5.0, local_p50 * 0.05) && remote_p95 - local_p95 <= f64::max(15.0, local_p95 * 0.10);
+            rows += 1;
+            within += usize::from(ok);
+            println!("step4: t16 {label} {width}px in-process p50 {local_p50:.1} p95 {local_p95:.1} ms; helper p50 {remote_p50:.1} p95 {remote_p95:.1} ms; overhead p50 {:+.1} p95 {:+.1} ms; budget {}", remote_p50 - local_p50, remote_p95 - local_p95, if ok { "met" } else { "MISSED" });
+        }
+    }
+    let active = remote.load_from_vec(welcome(), None).unwrap();
+    let before = active.render_viewer_png(&first, 1_600).unwrap().png;
+    remote.fault(Fault::Exit(3), LONG).unwrap_err();
+    let started = Instant::now();
+    let after = active.render_viewer_png(&first, 1_600).unwrap().png;
+    let restart = started.elapsed();
+    assert!(before == after);
+    println!("step4: t16 budget met on {within}/{rows} rows; restart + re-render of the active document {restart:?}");
+}
