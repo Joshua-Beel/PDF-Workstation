@@ -164,6 +164,9 @@ enum Request {
     ReplaceTextCopy(u64, u64, u16, TextReplacementInspection, String, PathBuf, Reply<ReplyLease<SavedCopy>>),
     Close(u64, Reply<()>),
     RetryEngine(u64, Reply<()>),
+    /// Test only: the engine in use ("in-process" or "helper"), or with `true`, kill the running helper.
+    #[cfg(test)]
+    TestEngine(bool, Reply<String>),
     Edit(u64, PageEdit, Reply<DocumentInfo>),
     DurableEdit(u64, PageEdit, u32, Reply<DocumentInfo>),
     DurableEditAt(u64, u64, PageEdit, u32, Reply<DocumentInfo>),
@@ -1362,6 +1365,11 @@ impl PdfService {
                             write_new_file(&path, &bytes)?;
                             Ok(SavedCopy { path: path.to_string_lossy().into_owned(), document: current_info(session, original, documents.get(&id).ok_or("Document is closed")?)? })
                         })();
+                        let _ = reply.send(result);
+                    }
+                    #[cfg(test)]
+                    Request::TestEngine(kill, reply) => {
+                        let result = pdfium.as_ref().map_err(Clone::clone).map(|engine| if kill { engine.test_kill_helper().to_string() } else { engine.test_kind().to_owned() });
                         let _ = reply.send(result);
                     }
                     Request::RetryEngine(id, reply) => {
@@ -5172,6 +5180,134 @@ mod tests {
         assert_eq!(runs[0].0, runs[1].0, "fixture: the secret must be invisible in the viewer");
         assert_ne!(runs[0].1, runs[1].1, "fixture: a print-mode render must show the secret, or this test proves nothing");
         assert_eq!(runs[0].2, runs[1].2, "the redacted copy carries secret ink the viewer did not show");
+    }
+
+    // Helper step 5: print, export, raster redaction and OCR rasterisation through the PDF-engine helper.
+    // Each test below reruns itself in a child process with the helper setting on.
+    const HELPER_CHILD: &str = "SM5_SERVICE_HELPER_CHILD";
+
+    /// Runs the test `name` again in a child process with the helper on; the child may write into `folder`.
+    fn run_with_helper(name: &str, folder: &std::path::Path) -> String {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env(HELPER_CHILD, folder)
+            .env(crate::pdf_helper::HELPER_SETTING_VARIABLE, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(output.status.success(), "helper child failed:\n{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+        stdout
+    }
+
+    fn engine_kind(service: &PdfService) -> String {
+        call(service, |reply| Request::TestEngine(false, reply)).unwrap()
+    }
+
+    /// The redacted copy's page images, in page order.
+    fn redacted_images(path: &std::path::Path) -> Vec<Vec<u8>> {
+        let parsed = lopdf::Document::load_mem(&std::fs::read(path).unwrap()).unwrap();
+        parsed.get_pages().values().map(|page| {
+            let page = parsed.get_dictionary(*page).unwrap();
+            let image = page.get(b"Resources").unwrap().as_dict().unwrap().get(b"XObject").unwrap().as_dict().unwrap().get(b"Image").unwrap().as_reference().unwrap();
+            parsed.get_object(image).unwrap().as_stream().unwrap().decompressed_content().unwrap()
+        }).collect()
+    }
+
+    /// Raster redaction through the helper (RenderMode::Viewer into an app-owned section) produces exactly
+    /// the page images the in-process worker produces: for SM7's print-only and screen-only vectors (secret
+    /// and control) and for the welcome PDF with a rotation and a highlight (the session overlay path).
+    #[test]
+    fn raster_redaction_through_the_helper_matches_in_process() {
+        const NAME: &str = "service::tests::raster_redaction_through_the_helper_matches_in_process";
+        let _print_guard = print_test_lock();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let child = std::env::var_os(HELPER_CHILD).map(PathBuf::from);
+        let temporary = tempfile::tempdir().unwrap();
+        let folder = child.clone().unwrap_or_else(|| temporary.path().to_path_buf());
+        let side = if child.is_some() { "helper" } else { "local" };
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        if child.is_some() {
+            assert_eq!(engine_kind(&service), "helper");
+        } else if std::env::var_os(crate::pdf_helper::HELPER_SETTING_VARIABLE).is_none() {
+            assert_eq!(engine_kind(&service), "in-process");
+        }
+        let rectangles = vec![crate::raster_redaction::RasterRedactionRect { x: 150.0, y: 170.0, width: 40.0, height: 20.0 }];
+        let sources = [
+            ("print-screen-secret", print_and_screen_only_fixture("SM2SECRET42")),
+            ("print-screen-control", print_and_screen_only_fixture("           ")),
+            ("welcome-edited", std::fs::read(root.join("resources/welcome.pdf")).unwrap()),
+        ];
+        for (name, bytes) in &sources {
+            let source = folder.join(format!("{side}-{name}.pdf"));
+            std::fs::write(&source, bytes).unwrap();
+            let mut info = call(&service, |reply| Request::Open(source.clone(), reply)).unwrap();
+            if *name == "welcome-edited" {
+                info = call(&service, |reply| Request::Edit(info.id, PageEdit::Rotate { pages: vec![0], clockwise: true }, reply)).unwrap();
+                info = call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::CreateHighlight(0, CropRect { x: 0.1, y: 0.1, width: 0.3, height: 0.1 }, Some("redaction overlay".into())), reply)).unwrap();
+            }
+            let output = folder.join(format!("{side}-{name}-redacted.pdf"));
+            let saved = call(&service, |reply| Request::RasterRedact(info.id, info.revision, 0, rectangles.clone(), output.clone(), reply)).unwrap();
+            std::fs::write(folder.join(format!("{side}-{name}.images")), redacted_images(&output).concat()).unwrap();
+            call(&service, |reply| Request::Close(saved.document.id, reply)).unwrap();
+            call(&service, |reply| Request::Close(info.id, reply)).unwrap();
+        }
+        if child.is_some() {
+            return;
+        }
+        run_with_helper(NAME, &folder);
+        for (name, _) in &sources {
+            let local = std::fs::read(folder.join(format!("local-{name}.images"))).unwrap();
+            let helper = std::fs::read(folder.join(format!("helper-{name}.images"))).unwrap();
+            assert!(!local.is_empty() && local == helper, "{name}: the redacted page images differ with the helper");
+        }
+    }
+
+    /// T8 and T9: a helper crash fails the print job and the OCR rasterisation in flight without a hang;
+    /// after Try again the print admission is free (four new jobs render the same pixels) and OCR works
+    /// again with the same raster (its worker hold was released).
+    #[cfg(windows)]
+    #[test]
+    fn print_and_ocr_recover_after_a_helper_crash() {
+        const NAME: &str = "service::tests::print_and_ocr_recover_after_a_helper_crash";
+        if std::env::var_os(HELPER_CHILD).is_none() {
+            let folder = tempfile::tempdir().unwrap();
+            assert!(run_with_helper(NAME, folder.path()).contains("helper-crash-recovery-ok"));
+            return;
+        }
+        let _print_guard = print_test_lock();
+        let _ocr_guard = crate::ocr_process::test_lock();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        assert_eq!(engine_kind(&service), "helper");
+        let info = call(&service, |reply| Request::Open(root.join("resources/welcome.pdf"), reply)).unwrap();
+        let kill = || assert_eq!(call(&service, |reply| Request::TestEngine(true, reply)).unwrap(), "true");
+        let retry = || call(&service, |reply| Request::RetryEngine(info.id, reply)).unwrap();
+
+        let snapshot = print_snapshot(&service, info.id, info.revision);
+        let before = call(&service, |reply| Request::PrintRender(snapshot.token, 0, 640, 640, reply)).unwrap();
+        kill();
+        let started = std::time::Instant::now();
+        assert!(call(&service, |reply| Request::PrintRender(snapshot.token, 0, 640, 640, reply)).is_err(), "the page in flight fails");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
+        drop(snapshot);
+        retry();
+        let snapshots = (0..4).map(|_| print_snapshot(&service, info.id, info.revision)).collect::<Vec<_>>();
+        for snapshot in &snapshots {
+            assert_eq!(call(&service, |reply| Request::PrintRender(snapshot.token, 0, 640, 640, reply)).unwrap().bgra, before.bgra);
+        }
+        drop(snapshots);
+
+        // A second death on one document closes its engine side for good (T5), so OCR uses another document.
+        let scan = call(&service, |reply| Request::Open(root.join("../test-corpus/synthetic-scan-98.pdf"), reply)).unwrap();
+        let request = crate::ocr::OcrPageRequest { document_id: scan.id, revision: scan.revision, page: 0 };
+        let raster = ocr_raster(&service, request, crate::ocr_process::OcrCancellation::default()).unwrap();
+        kill();
+        assert!(ocr_raster(&service, request, crate::ocr_process::OcrCancellation::default()).is_err());
+        call(&service, |reply| Request::RetryEngine(scan.id, reply)).unwrap();
+        assert_eq!(ocr_raster(&service, request, crate::ocr_process::OcrCancellation::default()).unwrap().p6, raster.p6);
+        call(&service, |reply| Request::Close(scan.id, reply)).unwrap();
+        call(&service, |reply| Request::Close(info.id, reply)).unwrap();
+        println!("helper-crash-recovery-ok");
     }
 
     #[test]

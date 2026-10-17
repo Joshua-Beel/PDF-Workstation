@@ -537,6 +537,12 @@ impl Supervisor {
         stats
     }
 
+    /// Ends the running helper as a crash would (test only); the next request finds it gone.
+    #[cfg(test)]
+    pub(crate) fn kill_running_helper(&mut self) -> bool {
+        self.helper.as_mut().is_some_and(|helper| helper.child.terminate_job_and_reap(0xdead).is_ok())
+    }
+
     /// Clears the crash-loop stop and its restart history (the user's Retry).
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn reset_after_stop(&mut self) {
