@@ -94,6 +94,8 @@ pub(crate) trait PdfEngine {
     type Document<'a>: EngineDocument where Self: 'a;
     fn load_from_vec(&self, bytes: Vec<u8>, password: Option<&str>) -> Result<Self::Document<'_>, LoadError>;
     fn load_from_slice<'a>(&'a self, bytes: &'a [u8], password: Option<&str>) -> Result<Self::Document<'a>, LoadError>;
+    /// The user's "Try again" after the engine stopped itself (helper crash loop). No-op in process.
+    fn reset_after_stop(&self) {}
 }
 
 pub(crate) trait EngineDocument {
@@ -132,6 +134,8 @@ pub(crate) trait EngineDocument {
     /// Renders a page at exactly `width` x `height` pixels, BGRA, into `out`, which must be exactly
     /// [`bgra_len`] bytes (otherwise `Layout`). The engine never chooses the buffer size.
     fn render_bgra_into(&self, target: PageTarget<'_>, mode: RenderMode, width: u32, height: u32, out: &mut [u8]) -> Result<(), RenderError>;
+    /// The user's "Try again" for a document the engine set aside after a failure. No-op in process.
+    fn retry(&self) {}
 }
 
 /// PDFium in this process.

@@ -168,6 +168,13 @@ impl PdfEngine for SelectedEngine {
             Self::Remote(engine) => engine.load_from_slice(bytes, password).map(SelectedDocument::Remote),
         }
     }
+    fn reset_after_stop(&self) {
+        match self {
+            Self::InProcess(engine) => engine.reset_after_stop(),
+            #[cfg(windows)]
+            Self::Remote(engine) => engine.reset_after_stop(),
+        }
+    }
 }
 
 macro_rules! dispatch {
@@ -235,5 +242,8 @@ impl EngineDocument for SelectedDocument<'_> {
     }
     fn render_bgra_into(&self, target: PageTarget<'_>, mode: RenderMode, width: u32, height: u32, out: &mut [u8]) -> Result<(), RenderError> {
         dispatch!(self, document => document.render_bgra_into(target, mode, width, height, out))
+    }
+    fn retry(&self) {
+        dispatch!(self, document => document.retry())
     }
 }

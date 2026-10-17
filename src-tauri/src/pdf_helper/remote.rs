@@ -42,12 +42,6 @@ impl RemotePdfEngine {
         Self::start(HelperConfig::production())
     }
 
-    /// Lets a crash-looped engine start helpers again (the engine-stopped state's Retry).
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn reset_after_stop(&self) {
-        self.supervisor.borrow_mut().reset_after_stop();
-    }
-
     #[cfg(test)]
     pub(crate) fn stats(&self) -> super::supervisor::SupervisorStats {
         self.supervisor.borrow().stats()
@@ -128,6 +122,10 @@ impl PdfEngine for RemotePdfEngine {
     fn load_from_slice<'a>(&'a self, bytes: &'a [u8], password: Option<&str>) -> Result<RemoteDocument<'a>, LoadError> {
         self.load(bytes, password)
     }
+    /// Lets a crash-looped engine start helpers again (the engine-stopped state's "Try again").
+    fn reset_after_stop(&self) {
+        self.supervisor.borrow_mut().reset_after_stop();
+    }
 }
 
 struct DocState {
@@ -154,16 +152,6 @@ enum Deadline {
 }
 
 impl RemoteDocument<'_> {
-    /// Allows one more reload after a helper died on this document (the suspect tab's Retry). No effect
-    /// once the document has been closed for good.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn retry(&self) {
-        let mut state = self.state.borrow_mut();
-        if state.deaths < MAX_DEATHS {
-            state.suspect = false;
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn is_suspect(&self) -> bool {
         self.state.borrow().suspect
@@ -335,6 +323,15 @@ fn probe_error(error: CallError) -> ProbeError {
 impl EngineDocument for RemoteDocument<'_> {
     fn page_count(&self) -> usize {
         self.page_count
+    }
+
+    /// Allows one more reload after a helper died on this document (the page's "Try again"). No effect
+    /// once the document has been closed for good.
+    fn retry(&self) {
+        let mut state = self.state.borrow_mut();
+        if state.deaths < MAX_DEATHS {
+            state.suspect = false;
+        }
     }
 
     fn page_sizes(&self) -> Result<Vec<PageSize>, String> {
