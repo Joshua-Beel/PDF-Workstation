@@ -5100,6 +5100,10 @@ mod tests {
             "<< /Type /OCG /Name (Screen cover) /Usage << /Print << /PrintState /OFF >> /View << /ViewState /ON >> >> >>".into(),
             format!("<< /Type /XObject /Subtype /Form /BBox [0 0 150 35] /Resources << /Font << /F1 3 0 R >> >> /Length {} >>\nstream\n{print_only_ap}\nendstream", print_only_ap.len()),
         ];
+        assemble_test_pdf(&objects)
+    }
+
+    fn assemble_test_pdf(objects: &[String]) -> Vec<u8> {
         let mut bytes = b"%PDF-1.7\n".to_vec();
         let mut offsets = Vec::new();
         for (index, body) in objects.iter().enumerate() {
@@ -5145,6 +5149,49 @@ mod tests {
         assert_eq!(runs[0].0, runs[1].0, "fixture: the secret must be invisible in the viewer");
         assert_ne!(runs[0].1, runs[1].1, "fixture: a print-mode render must show the secret, or this test proves nothing");
         assert_eq!(runs[0].2, runs[1].2, "the redacted copy carries secret ink the viewer did not show");
+    }
+
+    #[test]
+    fn raster_redaction_with_session_comments_and_rotation_matches_the_viewer_pixels() {
+        // The app comment overlay (note_document) and the page plan go through the same viewer
+        // flags: outside the mark, the redacted page equals the viewer render at the same size.
+        let _print_guard = print_test_lock();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let folder = tempfile::tempdir().unwrap();
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        // A 216 pt square page: 450 px at 150 DPI on both axes, so the viewer's width-driven render
+        // and the redaction's fixed-size render use the same scale and can be compared pixel for pixel.
+        let content = "BT /F1 18 Tf 20 150 Td (Visible text) Tj ET 0 0 1 rg 30 30 80 40 re f";
+        let source = folder.path().join("square.pdf");
+        std::fs::write(&source, assemble_test_pdf(&[
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".into(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 216 216] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>".into(),
+            format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+        ])).unwrap();
+        let mut info = call(&service, |reply| Request::Open(source.clone(), reply)).unwrap();
+        info = call(&service, |reply| Request::Edit(info.id, PageEdit::Rotate { pages: vec![0], clockwise: true }, reply)).unwrap();
+        let (page_width, page_height) = (info.pages[0].width, info.pages[0].height);
+        let dimensions = crate::page_image::dimensions(page_width, page_height, 150, PageImageFormat::Png).unwrap();
+        let before = image::load_from_memory(&call(&service, |reply| Request::Render(info.id, 0, dimensions.width as i32, reply)).unwrap()).unwrap().to_rgb8();
+        info = call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::Create(0, CropRect { x: 0.1, y: 0.1, width: 0.3, height: 0.2 }, "Session note".into()), reply)).unwrap();
+        let view = image::load_from_memory(&call(&service, |reply| Request::Render(info.id, 0, dimensions.width as i32, reply)).unwrap()).unwrap().to_rgb8();
+        assert_eq!((view.width(), view.height()), (dimensions.width, dimensions.height), "viewer render at the 150 DPI size");
+        assert_ne!(before.as_raw(), view.as_raw(), "the session comment must draw in the viewer");
+        let mark = crate::raster_redaction::RasterRedactionRect { x: page_width - 20.0, y: page_height - 20.0, width: 20.0, height: 20.0 };
+        let output = folder.path().join("noted-redacted.pdf");
+        let saved = call(&service, |reply| Request::RasterRedact(info.id, info.revision, 0, vec![mark], output.clone(), reply)).unwrap();
+        let parsed = lopdf::Document::load_mem(&std::fs::read(&output).unwrap()).unwrap();
+        let page = parsed.get_dictionary(parsed.get_pages()[&1]).unwrap();
+        let image_id = page.get(b"Resources").unwrap().as_dict().unwrap().get(b"XObject").unwrap().as_dict().unwrap().get(b"Image").unwrap().as_reference().unwrap();
+        let rgb = parsed.get_object(image_id).unwrap().as_stream().unwrap().decompressed_content().unwrap();
+        let mark_top = ((page_height - 20.0) * dimensions.height as f32 / page_height).floor() as usize - 1;
+        let row = dimensions.width as usize * 3;
+        assert_eq!(&rgb[..mark_top * row], &view.as_raw()[..mark_top * row], "outside the mark the copy must equal the viewer render");
+        assert!(rgb.chunks_exact(3).rev().take(10).all(|pixel| pixel == [0, 0, 0]), "the mark is black");
+        call(&service, |reply| Request::Close(saved.document.id, reply)).unwrap();
+        call(&service, |reply| Request::Close(info.id, reply)).unwrap();
     }
     #[test]
     fn bounded_viewer_backlog_reports_overflow_supersession_and_drains_dropped_receivers(){

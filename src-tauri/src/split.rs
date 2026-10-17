@@ -57,6 +57,51 @@ pub fn new_split_folder(parent: &Path) -> Result<PathBuf, String> {
     Err(format!("That folder already holds {MAX_SPLIT_FOLDER_SUFFIX} split folders. Choose another folder."))
 }
 
+const NOT_A_FOLDER_ON_DISK: &str = "Choose a folder on a drive or network share. Libraries, This PC and other virtual locations cannot hold split files.";
+
+/// The file-system path of a folder chosen in the folder picker, or a clear refusal for a virtual
+/// location (a Library, This PC) that has none.
+#[cfg(windows)]
+fn folder_path_of(item: &windows::Win32::UI::Shell::IShellItem) -> Result<PathBuf, String> {
+    use windows::Win32::{System::Com::CoTaskMemFree, UI::Shell::SIGDN_FILESYSPATH};
+    let name = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH) }.map_err(|_| NOT_A_FOLDER_ON_DISK.to_owned())?;
+    let text = unsafe { name.to_string() };
+    unsafe { CoTaskMemFree(Some(name.0 as *const _)) };
+    let path = PathBuf::from(text.map_err(|_| NOT_A_FOLDER_ON_DISK.to_owned())?);
+    if path.as_os_str().is_empty() || !path.is_dir() { return Err(NOT_A_FOLDER_ON_DISK.into()); }
+    Ok(path)
+}
+
+/// Shows the native folder picker (file-system folders only), owned by `owner`, and returns the new
+/// split folder inside the chosen folder; `Ok(None)` when the user cancels. rfd's `pick_folder`
+/// drops `FOS_FORCEFILESYSTEM` and reports a virtual location (a Library) exactly like Cancel, so
+/// the dialog closed silently. Call it on a blocking thread: it initialises COM there.
+#[cfg(windows)]
+pub fn pick_new_split_folder(owner: *mut std::ffi::c_void, title: &str) -> Result<Option<PathBuf>, String> {
+    use windows::{core::HSTRING, Win32::{Foundation::{ERROR_CANCELLED, HWND}, System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE}, UI::Shell::{FileOpenDialog, IFileOpenDialog, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS}}};
+    let opened = |error: windows::core::Error| format!("The folder picker could not open: {error}");
+    let initialised = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) }.is_ok();
+    let result = (|| unsafe {
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).map_err(opened)?;
+        dialog.SetOptions(dialog.GetOptions().map_err(opened)? | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST).map_err(opened)?;
+        dialog.SetTitle(&HSTRING::from(title)).map_err(opened)?;
+        match dialog.Show(Some(HWND(owner))) {
+            Ok(()) => {}
+            Err(error) if error.code() == ERROR_CANCELLED.to_hresult() => return Ok(None),
+            Err(error) => return Err(format!("The folder picker failed: {error}")),
+        }
+        let item = dialog.GetResult().map_err(|_| NOT_A_FOLDER_ON_DISK.to_owned())?;
+        new_split_folder(&folder_path_of(&item)?).map(Some)
+    })();
+    if initialised { unsafe { CoUninitialize() }; }
+    result
+}
+
+#[cfg(not(windows))]
+pub fn pick_new_split_folder(_: *mut std::ffi::c_void, _: &str) -> Result<Option<PathBuf>, String> {
+    Err("Splitting into a folder is supported on Windows in this build.".into())
+}
+
 #[cfg(windows)]
 fn publish_directory(source: &Path, destination: &Path) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
@@ -85,7 +130,7 @@ pub fn prepare_and_publish(
     if !parent.is_dir() { return Err("Choose an existing output folder.".into()); }
     let folder = parent.join(folder_name);
     match folder.symlink_metadata() {
-        Ok(_) => return Err("That split folder already exists. Choose a new folder name.".into()),
+        Ok(_) => return Err("A split folder with that name already exists now (it appeared in the chosen folder during the split). Split again to use the next free Split PDFs name.".into()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
         Err(error) => return Err(format!("The split folder could not be checked: {error}")),
     }
@@ -128,6 +173,23 @@ mod tests {
         assert!(group_count(0, 1).is_err()); assert!(group_count(6, 0).is_err()); assert!(group_count(65, 1).unwrap_err().contains("64"));
         for name in ["", ".", "..", "../escape", "a/b", "a\\b", "C:\\folder", "NUL", "COM1.pdf", "LPT9", "trailing.", "trailing ", "a\0b"] { assert!(validate_folder_name(OsStr::new(name)).is_err(), "{name:?}"); }
         assert!(validate_folder_name(OsStr::new("split café")).is_ok());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn folder_picker_result_refuses_virtual_locations_with_a_clear_message() {
+        use windows::{core::HSTRING, Win32::{System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED}, UI::Shell::{IShellItem, SHCreateItemFromParsingName}}};
+        let initialised = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+        {
+            let item = |path: &str| -> IShellItem { unsafe { SHCreateItemFromParsingName(&HSTRING::from(path), None) }.unwrap() };
+            let folder = tempfile::tempdir().unwrap();
+            assert_eq!(folder_path_of(&item(folder.path().to_str().unwrap())).unwrap(), folder.path());
+            // The Libraries root and This PC: shell items with no file-system path.
+            for virtual_location in ["::{031E4825-7B94-4dc3-B131-E946B44C8DD5}", "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"] {
+                assert_eq!(folder_path_of(&item(virtual_location)).unwrap_err(), NOT_A_FOLDER_ON_DISK, "{virtual_location}");
+            }
+        }
+        if initialised { unsafe { CoUninitialize() }; }
     }
 
     #[test]

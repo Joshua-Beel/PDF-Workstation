@@ -583,29 +583,47 @@ fn covered_by_screen_only_annotation(s: &str, subtype: &str, ap_content: &str, a
     two_pages(first, "", vec![annot, ap], "")
 }
 
+/// Positive control for the cover tests (SM7 INFO): dark pixels, and all pixels, inside the cover's
+/// displayed area (page y 50–80, x 10–190, inset 2 pt) in the output of the control build, whose
+/// page text is blank, so any ink there is the cover itself.
+fn cover_ink(build: impl Fn(&str) -> Vec<u8>) -> (usize, usize) {
+    let run = redact(&build(&control()), &[BOX]);
+    let image = &output_images(&run.output)[0];
+    let dimensions = page_image::dimensions(200.0, 200.0, 150, PageImageFormat::Png).unwrap();
+    let (width, scale) = (dimensions.width as usize, dimensions.width as f32 / 200.0);
+    let span = |from: f32, to: f32| (from * scale).ceil() as usize..(to * scale).floor() as usize;
+    let (mut dark, mut total) = (0, 0);
+    for y in span(122.0, 148.0) {
+        for x in span(12.0, 188.0) {
+            let offset = (y * width + x) * 3;
+            total += 1;
+            if image[offset..offset + 3].iter().all(|value| *value < 96) { dark += 1; }
+        }
+    }
+    (dark, total)
+}
+
 #[test]
 fn opaque_square_annotation_without_print_flag_keeps_covering_text_in_output() {
-    let report = evaluate(
-        "cover_square_no_print",
-        |s| covered_by_screen_only_annotation(s, "Square", "0 g 0 0 180 30 re f", "/IC [0 0 0] /C [0 0 0]"),
-        &[BOX],
-    );
+    let build = |s: &str| covered_by_screen_only_annotation(s, "Square", "0 g 0 0 180 30 re f", "/IC [0 0 0] /C [0 0 0]");
+    let report = evaluate("cover_square_no_print", build, &[BOX]);
     assert_eq!(report.view_ink, vec![0, 0], "the secret is covered in the viewer");
     // Was a leak (SM7 2026-10-14, S-1, reverse of R-1): the FPDF_PRINTING render dropped the
     // cover, which has no Print flag. Fixed by SM2: the viewer's flags keep it.
     assert_clean(&report);
+    let (dark, total) = cover_ink(build);
+    assert_eq!(dark, total, "the black cover itself must be drawn in the output");
 }
 
 #[test]
 fn opaque_freetext_annotation_without_print_flag_keeps_covering_text_in_output() {
-    let report = evaluate(
-        "cover_freetext_no_print",
-        |s| covered_by_screen_only_annotation(s, "FreeText", "1 g 0 0 180 30 re f BT 0 g /F1 12 Tf 10 10 Td (approved) Tj ET", "/Contents (approved) /DA (/Helv 12 Tf 0 g)"),
-        &[BOX],
-    );
+    let build = |s: &str| covered_by_screen_only_annotation(s, "FreeText", "1 g 0 0 180 30 re f BT 0 g /F1 12 Tf 10 10 Td (approved) Tj ET", "/Contents (approved) /DA (/Helv 12 Tf 0 g)");
+    let report = evaluate("cover_freetext_no_print", build, &[BOX]);
     assert_eq!(report.view_ink, vec![0, 0], "the secret is covered in the viewer");
     // Was a leak (SM7 2026-10-14, S-1): same cause as the Square cover.
     assert_clean(&report);
+    let (dark, total) = cover_ink(build);
+    assert!(dark > 0 && dark < total / 2, "the cover's own \"approved\" text must be drawn in the output: {dark}/{total}");
 }
 
 #[test]
@@ -626,6 +644,8 @@ fn view_only_optional_content_cover_keeps_covering_text_in_output() {
     // Was a leak (SM7 2026-10-14, S-1): FPDF_PRINTING evaluated the cover layer's Print usage
     // (/PrintState /OFF), so the cover vanished. Fixed by SM2: the viewer's flags use View usage.
     assert_clean(&report);
+    let (dark, total) = cover_ink(build);
+    assert_eq!(dark, total, "the black cover layer itself must be drawn in the output");
 }
 
 #[test]
@@ -678,12 +698,20 @@ fn worker_render_path_matches_this_replica() {
     };
     let bgra = method("fn render_bgra_into(&self");
     assert!(bgra.contains("RenderMode::Viewer") && bgra.contains("render_into_bitmap_with_config"), "render_bgra_into slice is not the real method: {bgra}");
-    // The trailing comma pins the whole arm: nothing (such as use_print_quality) may be chained on.
-    assert!(
-        bgra.contains(".set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(false).clear_before_rendering(true).set_clear_color(PdfColor::WHITE);")
-            && bgra.contains("RenderMode::Viewer => config.render_annotations(true),"),
+    // Pin every statement that touches the config whole (SM7 G-1), so no flag can be added before,
+    // inside or after the Viewer arm, or between building the config and rendering with it.
+    let statements: Vec<&str> = bgra.lines().map(str::trim).filter(|line| line.contains("config")).collect();
+    assert_eq!(
+        statements,
+        vec![
+            "let config = PdfRenderConfig::new().set_fixed_size(width as i32, height as i32).set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(false).clear_before_rendering(true).set_clear_color(PdfColor::WHITE);",
+            "let config = match mode { RenderMode::Print => config.render_annotations(true).render_form_data(true).use_print_quality(true), RenderMode::Viewer => config.render_annotations(true), RenderMode::Plain => config };",
+            "page.render_into_bitmap_with_config(&mut bitmap, &config).map_err(|error| RenderError::Render(error.to_string()))?;",
+        ],
         "the engine's redaction (viewer) render flags drifted from the replica"
     );
+    assert_eq!(bgra.matches("use_print_quality").count(), 1, "print quality may appear only in the Print arm");
+    assert!(!bgra.contains("FPDF_"), "no raw PDFium render flag may be applied in render_bgra_into");
     let viewer = method("fn render_viewer_png(&self");
     assert!(viewer.contains("image::ImageFormat::Png"), "render_viewer_png slice is not the real method: {viewer}");
     assert!(

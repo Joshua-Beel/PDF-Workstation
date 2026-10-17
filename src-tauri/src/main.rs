@@ -301,8 +301,8 @@ fn cancel_text_replacement(selections:State<'_,text_edit_commands::TextReplaceme
 async fn split_document(app: tauri::AppHandle, service: State<'_, PdfService>, id: u64, revision: u64, pages_per_file: usize) -> Result<Option<split::SplitOutput>, String> {
     service.split_via(id, revision, pages_per_file, || async move {
         let window = app.get_webview_window("main").ok_or("Application window is unavailable")?;
-        let parent = tauri::async_runtime::spawn_blocking(move || rfd::FileDialog::new().set_parent(&window).set_title("Choose a folder for split PDFs").pick_folder()).await.map_err(|error| error.to_string())?;
-        parent.map(|parent| split::new_split_folder(&parent)).transpose()
+        let owner = window.hwnd().map_err(|error| error.to_string())?.0 as usize;
+        tauri::async_runtime::spawn_blocking(move || split::pick_new_split_folder(owner as *mut std::ffi::c_void, "Choose a folder for split PDFs")).await.map_err(|error| error.to_string())?
     }).await
 }
 

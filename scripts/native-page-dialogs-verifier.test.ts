@@ -30,7 +30,7 @@ describe('native page-dialog verifier', () => {
   });
 
   it('expects the dialog titles and default names that main.rs actually sets', () => {
-    for (const title of ['Save combined PDF as a new file', 'Save PDF with inserted pages as a new file', 'Save PDF with replaced pages as a new file', 'Choose a folder for split PDFs', 'Save a copy as a new file', 'Choose one PNG or JPEG image', 'Save image as a new PDF', 'Choose PNG or JPEG images', 'Save images as a new PDF']) {
+    for (const title of ['Save combined PDF as a new file', 'Save PDF with inserted pages as a new file', 'Save PDF with replaced pages as a new file', 'Save a copy as a new file', 'Choose one PNG or JPEG image', 'Save image as a new PDF', 'Choose PNG or JPEG images', 'Save images as a new PDF']) {
       expect(mainRs).toContain(`set_title("${title}")`);
       expect(verifier).toContain(`'${title}'`);
     }
@@ -41,8 +41,11 @@ describe('native page-dialog verifier', () => {
   });
 
   it('expects Split to use a real folder picker and a new Split PDFs folder inside it', () => {
-    expect(mainRs).toContain('set_title("Choose a folder for split PDFs").pick_folder()');
-    expect(mainRs).toContain('split::new_split_folder(&parent)');
+    const splitRs = readFileSync('src-tauri/src/split.rs', 'utf8');
+    expect(mainRs).toContain('split::pick_new_split_folder(owner as *mut std::ffi::c_void, "Choose a folder for split PDFs")');
+    expect(verifier).toContain("'Choose a folder for split PDFs'");
+    expect(splitRs).toContain('FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM');
+    expect(splitRs).toContain('new_split_folder(&folder_path_of(&item)?)');
     expect(verifier).toContain("Join-Path $parent 'Split PDFs'");
     expect(verifier).toContain('Complete-NativeDialog $dialog $parent');
     expect(verifier).not.toContain("'Save As'");
