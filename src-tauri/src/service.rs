@@ -5186,17 +5186,39 @@ mod tests {
     // Each test below reruns itself in a child process with the helper setting on.
     const HELPER_CHILD: &str = "SM5_SERVICE_HELPER_CHILD";
 
-    /// Runs the test `name` again in a child process with the helper on; the child may write into `folder`.
-    fn run_with_helper(name: &str, folder: &std::path::Path) -> String {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", name, "--nocapture", "--test-threads=1"])
-            .env(HELPER_CHILD, folder)
-            .env(crate::pdf_helper::HELPER_SETTING_VARIABLE, "1")
-            .output()
-            .unwrap();
+    /// Which engine side a child run is forced to (set by `run_child`).
+    const ENGINE_SIDE: &str = "SM5_SERVICE_ENGINE_SIDE";
+
+    /// Runs the test `name` again in a child process with the helper forced on (`helper`) or off (the
+    /// setting removed from its environment, whatever the parent has); the child may write into `folder`.
+    fn run_child(name: &str, folder: &std::path::Path, helper: bool) -> String {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", name, "--nocapture", "--test-threads=1"]).env(HELPER_CHILD, folder).env(ENGINE_SIDE, if helper { "helper" } else { "local" });
+        if helper {
+            command.env(crate::pdf_helper::HELPER_SETTING_VARIABLE, "1");
+        } else {
+            command.env_remove(crate::pdf_helper::HELPER_SETTING_VARIABLE);
+        }
+        let output = command.output().unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        assert!(output.status.success(), "helper child failed:\n{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{} child failed:\n{stdout}\n{}", if helper { "helper" } else { "in-process" }, String::from_utf8_lossy(&output.stderr));
         stdout
+    }
+
+    fn run_with_helper(name: &str, folder: &std::path::Path) -> String {
+        run_child(name, folder, true)
+    }
+
+    /// In a child started by `run_child`: its folder and side ("local" or "helper").
+    fn child_side() -> Option<(PathBuf, String)> {
+        Some((PathBuf::from(std::env::var_os(HELPER_CHILD)?), std::env::var(ENGINE_SIDE).ok()?))
+    }
+
+    /// Starts a service and checks it uses the engine `side` asks for.
+    fn service_on(side: &str) -> PdfService {
+        let service = PdfService::start(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/pdfium/bin/pdfium.dll"));
+        assert_eq!(engine_kind(&service), if side == "helper" { "helper" } else { "in-process" });
+        service
     }
 
     fn engine_kind(service: &PdfService) -> String {
@@ -5215,29 +5237,31 @@ mod tests {
 
     /// Raster redaction through the helper (RenderMode::Viewer into an app-owned section) produces exactly
     /// the page images the in-process worker produces: for SM7's print-only and screen-only vectors (secret
-    /// and control) and for the welcome PDF with a rotation and a highlight (the session overlay path).
+    /// and control) and for the welcome PDF with a rotation and a highlight (the session overlay path). Both
+    /// sides run as children with the engine forced, so a parent run with the helper on still compares
+    /// helper against in-process; on each side the secret run must equal the control run.
     #[test]
     fn raster_redaction_through_the_helper_matches_in_process() {
         const NAME: &str = "service::tests::raster_redaction_through_the_helper_matches_in_process";
+        let names = ["print-screen-secret", "print-screen-control", "welcome-edited"];
+        let Some((folder, side)) = child_side() else {
+            let folder = tempfile::tempdir().unwrap();
+            run_child(NAME, folder.path(), false);
+            run_with_helper(NAME, folder.path());
+            for name in names {
+                let local = std::fs::read(folder.path().join(format!("local-{name}.images"))).unwrap();
+                let helper = std::fs::read(folder.path().join(format!("helper-{name}.images"))).unwrap();
+                assert!(!local.is_empty() && local == helper, "{name}: the redacted page images differ with the helper");
+            }
+            return;
+        };
         let _print_guard = print_test_lock();
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let child = std::env::var_os(HELPER_CHILD).map(PathBuf::from);
-        let temporary = tempfile::tempdir().unwrap();
-        let folder = child.clone().unwrap_or_else(|| temporary.path().to_path_buf());
-        let side = if child.is_some() { "helper" } else { "local" };
-        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
-        if child.is_some() {
-            assert_eq!(engine_kind(&service), "helper");
-        } else if std::env::var_os(crate::pdf_helper::HELPER_SETTING_VARIABLE).is_none() {
-            assert_eq!(engine_kind(&service), "in-process");
-        }
+        let service = service_on(&side);
         let rectangles = vec![crate::raster_redaction::RasterRedactionRect { x: 150.0, y: 170.0, width: 40.0, height: 20.0 }];
-        let sources = [
-            ("print-screen-secret", print_and_screen_only_fixture("SM2SECRET42")),
-            ("print-screen-control", print_and_screen_only_fixture("           ")),
-            ("welcome-edited", std::fs::read(root.join("resources/welcome.pdf")).unwrap()),
-        ];
-        for (name, bytes) in &sources {
+        let sources = [print_and_screen_only_fixture("SM2SECRET42"), print_and_screen_only_fixture("           "), std::fs::read(root.join("resources/welcome.pdf")).unwrap()];
+        let mut images = Vec::new();
+        for (name, bytes) in names.iter().zip(&sources) {
             let source = folder.join(format!("{side}-{name}.pdf"));
             std::fs::write(&source, bytes).unwrap();
             let mut info = call(&service, |reply| Request::Open(source.clone(), reply)).unwrap();
@@ -5247,19 +5271,12 @@ mod tests {
             }
             let output = folder.join(format!("{side}-{name}-redacted.pdf"));
             let saved = call(&service, |reply| Request::RasterRedact(info.id, info.revision, 0, rectangles.clone(), output.clone(), reply)).unwrap();
-            std::fs::write(folder.join(format!("{side}-{name}.images")), redacted_images(&output).concat()).unwrap();
+            images.push(redacted_images(&output).concat());
+            std::fs::write(folder.join(format!("{side}-{name}.images")), images.last().unwrap()).unwrap();
             call(&service, |reply| Request::Close(saved.document.id, reply)).unwrap();
             call(&service, |reply| Request::Close(info.id, reply)).unwrap();
         }
-        if child.is_some() {
-            return;
-        }
-        run_with_helper(NAME, &folder);
-        for (name, _) in &sources {
-            let local = std::fs::read(folder.join(format!("local-{name}.images"))).unwrap();
-            let helper = std::fs::read(folder.join(format!("helper-{name}.images"))).unwrap();
-            assert!(!local.is_empty() && local == helper, "{name}: the redacted page images differ with the helper");
-        }
+        assert_eq!(images[0], images[1], "{side}: the redacted copy carries secret ink the viewer did not show");
     }
 
     /// T8 and T9: a helper crash fails the print job and the OCR rasterisation in flight without a hang;
@@ -5308,6 +5325,102 @@ mod tests {
         call(&service, |reply| Request::Close(scan.id, reply)).unwrap();
         call(&service, |reply| Request::Close(info.id, reply)).unwrap();
         println!("helper-crash-recovery-ok");
+    }
+
+    /// Copies a fixture to a file of its own in `folder`, so every open is a distinct file.
+    fn fixture_copy(folder: &std::path::Path, side: &str, name: &str, source: &str) -> PathBuf {
+        let path = folder.join(format!("{side}-{name}.pdf"));
+        std::fs::copy(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(source), &path).unwrap();
+        path
+    }
+
+    /// Step 6: the output paths that validate their result in the PDF engine (Save a copy of chosen pages,
+    /// Split, Combine, Insert and Replace pages, Fill form copy) write byte-identical files with the helper
+    /// on and in process. Both sides run as children with the engine forced.
+    #[test]
+    fn output_validation_through_the_helper_writes_identical_files() {
+        const NAME: &str = "service::tests::output_validation_through_the_helper_writes_identical_files";
+        let Some((folder, side)) = child_side() else {
+            let folder = tempfile::tempdir().unwrap();
+            run_child(NAME, folder.path(), false);
+            run_with_helper(NAME, folder.path());
+            let mut compared = 0;
+            for entry in std::fs::read_dir(folder.path().join("local-out")).unwrap() {
+                let name = entry.unwrap().file_name();
+                let local = std::fs::read(folder.path().join("local-out").join(&name)).unwrap();
+                let helper = std::fs::read(folder.path().join("helper-out").join(&name)).unwrap();
+                assert!(local == helper, "{name:?} differs with the helper");
+                compared += 1;
+            }
+            assert!(compared >= 8, "only {compared} outputs compared");
+            println!("step6: {compared} output files byte-identical");
+            return;
+        };
+        let service = service_on(&side);
+        let out = folder.join(format!("{side}-out"));
+        std::fs::create_dir_all(&out).unwrap();
+        let open = |name: &str, source: &str| call(&service, |reply| Request::Open(fixture_copy(&folder, &side, name, source), reply)).unwrap();
+        let mut welcome = open("welcome", "resources/welcome.pdf");
+        welcome = call(&service, |reply| Request::Edit(welcome.id, PageEdit::Rotate { pages: vec![0], clockwise: true }, reply)).unwrap();
+        call(&service, |reply| Request::Save(welcome.id, Some(vec![0, 2]), out.join("save-pages.pdf"), reply)).unwrap();
+        call(&service, |reply| Request::Save(welcome.id, None, out.join("save-all.pdf"), reply)).unwrap();
+        let split = call(&service, |reply| Request::Split(welcome.id, welcome.revision, 2, folder.join(format!("{side}-split")), reply)).unwrap();
+        for (index, file) in split.files.iter().enumerate() {
+            std::fs::copy(&file.path, out.join(format!("split-{index}.pdf"))).unwrap();
+        }
+        let donor = open("donor", "resources/welcome.pdf");
+        let first = CombineSource { id: welcome.id, revision: welcome.revision };
+        let second = CombineSource { id: donor.id, revision: donor.revision };
+        for (name, request) in [
+            ("combine.pdf", CopyOperation::Combine),
+            ("insert.pdf", CopyOperation::Insert { at: 1 }),
+            ("replace.pdf", CopyOperation::Replace { start: 1, count: 1 }),
+        ] {
+            let saved = call(&service, |reply| Request::CreateCopy(first, second, request, out.join(name), reply)).unwrap();
+            call(&service, |reply| Request::Close(saved.document.id, reply)).unwrap();
+        }
+        let form = open("form", "tests/fixtures/reportlab-plain-fields.pdf");
+        let fields = call(&service, |reply| Request::FormFields(form.id, form.revision, reply)).unwrap().fields;
+        let values = fields.iter().map(|field| match field.checked {
+            Some(checked) => crate::forms::FieldValue::Checkbox { field_id: field.field_id.clone(), checked: !checked },
+            None => crate::forms::FieldValue::Text { field_id: field.field_id.clone(), value: "SM5 step 6".into() },
+        }).collect::<Vec<_>>();
+        assert!(!values.is_empty());
+        let filled = call(&service, |reply| Request::FillFormCopy(form.id, form.revision, values, out.join("filled.pdf"), reply)).unwrap();
+        for id in [filled.document.id, form.id, donor.id, welcome.id] {
+            call(&service, |reply| Request::Close(id, reply)).unwrap();
+        }
+    }
+
+    /// Step 6: a helper crash during output validation fails that operation, publishes nothing (no file,
+    /// no split folder) and leaves the source untouched; the same operation then succeeds.
+    #[test]
+    fn output_validation_survives_a_helper_crash() {
+        const NAME: &str = "service::tests::output_validation_survives_a_helper_crash";
+        let Some((folder, side)) = child_side() else {
+            let folder = tempfile::tempdir().unwrap();
+            assert!(run_with_helper(NAME, folder.path()).contains("output-crash-ok"));
+            return;
+        };
+        let service = service_on(&side);
+        let welcome = call(&service, |reply| Request::Open(fixture_copy(&folder, &side, "welcome", "resources/welcome.pdf"), reply)).unwrap();
+        let kill = || assert_eq!(call(&service, |reply| Request::TestEngine(true, reply)).unwrap(), "true");
+        let saved = folder.join("saved.pdf");
+        kill();
+        assert!(call(&service, |reply| Request::Save(welcome.id, None, saved.clone(), reply)).is_err());
+        assert!(!saved.exists(), "a failed validation must not publish the copy");
+        call(&service, |reply| Request::Save(welcome.id, None, saved.clone(), reply)).unwrap();
+        assert_eq!(lopdf::Document::load(&saved).unwrap().get_pages().len(), welcome.pages.len());
+        let split_folder = folder.join("split");
+        kill();
+        assert!(call(&service, |reply| Request::Split(welcome.id, welcome.revision, 1, split_folder.clone(), reply)).is_err());
+        assert!(!split_folder.exists(), "a failed split must not leave its folder");
+        let split = call(&service, |reply| Request::Split(welcome.id, welcome.revision, 1, split_folder.clone(), reply)).unwrap();
+        assert_eq!(split.files.len(), welcome.pages.len());
+        let reopened = call(&service, |reply| Request::Render(welcome.id, 0, 300, reply));
+        assert!(reopened.is_ok(), "the source is not blamed for a crash during its output's validation: {reopened:?}");
+        call(&service, |reply| Request::Close(welcome.id, reply)).unwrap();
+        println!("output-crash-ok");
     }
 
     #[test]

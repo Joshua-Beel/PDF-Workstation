@@ -605,6 +605,14 @@ impl Supervisor {
         failure
     }
 
+    /// The failure for a running helper whose process has exited: a limit it hit, else how it exited.
+    fn ended_helper_failure(&mut self) -> HelperFailure {
+        match &self.helper {
+            Some(helper) => helper.child.limit_violation().map_or_else(|| HelperFailure::Exited(helper.child.exit_code().ok().map(classify_exit_code)), HelperFailure::LimitViolation),
+            None => HelperFailure::Stopped,
+        }
+    }
+
     fn fail(&mut self, failure: HelperFailure) -> CallError {
         let helper = self.helper.take();
         CallError::Failure(self.record(failure, helper))
@@ -617,7 +625,19 @@ impl Supervisor {
 
     /// A running helper, starting one if needed: immediately for the first restart in the window, after a
     /// growing backoff for later ones, and not at all once `max_restarts` restarts fall within the window.
+    /// Drops a helper that died while no request was in flight (recording why), so documents see that
+    /// their handles are gone and reload. No document was in flight, so none is blamed.
+    pub(crate) fn drop_if_exited(&mut self) {
+        if self.helper.as_ref().is_some_and(|helper| helper.child.wait_for_exit(Duration::ZERO)) {
+            let failure = self.ended_helper_failure();
+            let helper = self.helper.take();
+            self.record(failure, helper);
+        }
+    }
+
     fn ensure_running(&mut self) -> Result<u64, HelperFailure> {
+        // A helper that died while idle is replaced below; the restart counts toward the crash-loop cap.
+        self.drop_if_exited();
         if self.helper.is_some() {
             return Ok(self.generation);
         }
@@ -663,7 +683,15 @@ impl Supervisor {
     ) -> Result<T, CallError> {
         self.ensure_running().map_err(CallError::Failure)?;
         let shared = match &self.helper {
-            Some(helper) => helper.child.share_handle(handle, access).map_err(|error| CallError::Engine(class::GENERAL, error.0))?,
+            Some(helper) => match helper.child.share_handle(handle, access) {
+                Ok(shared) => shared,
+                // The helper died after `ensure_running` looked: a helper failure, not an engine error.
+                Err(_) if helper.child.wait_for_exit(Duration::ZERO) => {
+                    let failure = self.ended_helper_failure();
+                    return Err(self.fail(failure));
+                }
+                Err(error) => return Err(CallError::Engine(class::GENERAL, error.0)),
+            },
             None => return Err(CallError::Failure(HelperFailure::Stopped)),
         };
         self.call_running(request_kind, capacity, |writer| payload(writer, shared), reply_limit, deadline, allowed, decode)

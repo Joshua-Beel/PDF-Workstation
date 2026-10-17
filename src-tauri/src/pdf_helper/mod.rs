@@ -157,12 +157,12 @@ impl SelectedEngine {
         }
     }
 
-    /// Ends the running helper as a crash would; `false` in process (test only).
+    /// Makes the helper crash while its next request is in flight; `false` in process (test only).
     pub(crate) fn test_kill_helper(&self) -> bool {
         match self {
             Self::InProcess(_) => false,
             #[cfg(windows)]
-            Self::Remote(engine) => engine.kill_helper(),
+            Self::Remote(engine) => engine.crash_on_next_request(),
         }
     }
 }

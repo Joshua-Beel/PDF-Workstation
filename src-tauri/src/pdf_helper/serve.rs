@@ -86,6 +86,8 @@ pub(crate) fn serve(input: &mut impl Read, output: &mut impl Write) -> u32 {
         next_handle: 1,
         #[cfg(test)]
         misreply: None,
+        #[cfg(test)]
+        exit_armed: false,
     };
     loop {
         let body = match read_request(input) {
@@ -146,6 +148,8 @@ struct State<'e> {
     next_handle: u32,
     #[cfg(test)]
     misreply: Option<super::faults::Misreply>,
+    #[cfg(test)]
+    exit_armed: bool,
 }
 
 /// Maps the render target section the app passed with a render request. The passed handle is closed on
@@ -213,6 +217,8 @@ impl<'e> State<'e> {
     /// The reply to one request; `Err` only when the request itself is malformed.
     fn handle(&mut self, header: Header, body: Vec<u8>) -> Result<Reply, Malformed> {
         let Header { kind: request_kind, sequence } = header;
+        #[cfg(test)]
+        super::faults::exit_if_armed(&mut self.exit_armed);
         let (_, mut reader) = parse_body(&body)?;
         if request_kind == kind::LOAD {
             let (password, section, len) = get_load(&mut reader)?;
@@ -223,7 +229,7 @@ impl<'e> State<'e> {
         if request_kind == kind::FAULT {
             let fault = super::faults::Fault::read(&mut reader)?;
             reader.finish()?;
-            return Ok(super::faults::run(fault, &mut self.misreply, sequence));
+            return Ok(super::faults::run(fault, &mut self.misreply, &mut self.exit_armed, sequence));
         }
         if !DOCUMENT_KINDS.contains(&request_kind) {
             return Err(Malformed::new(format!("unknown request kind {request_kind}")));
