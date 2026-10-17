@@ -118,7 +118,7 @@ jobs:
           $platform = $manifest.platforms.'windows-x86_64'
           $signature = (Get-Content (Join-Path $bundle "$installerName.sig") -Raw -Encoding UTF8).Trim()
           $assetName = $installerName.Replace(' ', '.')
-          $expectedUrl = "https://github.com/Joshua-Beel/Smacrobat/releases/download/v$($env:RELEASE_VERSION)/$assetName"
+          $expectedUrl = "https://github.com/Joshua-Beel/PDF-Workstation/releases/download/v$($env:RELEASE_VERSION)/$assetName"
           $notes = Get-Content docs/release-notes.md -Raw -Encoding UTF8
           if ($manifest.version -cne $env:RELEASE_VERSION -or $platform.url -cne $expectedUrl -or $platform.signature -cne $signature -or $manifest.notes -cne $notes) {
             throw 'Updater manifest is not bound to the exact version, installer, detached signature, and release notes.'
@@ -175,7 +175,7 @@ jobs:
           $manifest = Get-Content (Join-Path release-assets 'latest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
           $signature = (Get-Content (Join-Path release-assets "$installerName.sig") -Raw -Encoding UTF8).Trim()
           $notes = Get-Content $notesFiles[0].FullName -Raw -Encoding UTF8
-          $expectedUrl = "https://github.com/Joshua-Beel/Smacrobat/releases/download/v$($env:RELEASE_VERSION)/$($installerName.Replace(' ', '.'))"
+          $expectedUrl = "https://github.com/Joshua-Beel/PDF-Workstation/releases/download/v$($env:RELEASE_VERSION)/$($installerName.Replace(' ', '.'))"
           if ($manifest.version -cne $env:RELEASE_VERSION -or $manifest.platforms.'windows-x86_64'.url -cne $expectedUrl -or $manifest.platforms.'windows-x86_64'.signature -cne $signature -or $manifest.notes -cne $notes) {
             throw 'Downloaded updater manifest is not bound to the exact version, installer URL, detached signature, and release notes.'
           }

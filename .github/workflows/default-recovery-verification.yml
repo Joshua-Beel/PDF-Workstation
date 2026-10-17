@@ -43,12 +43,12 @@ jobs:
       - name: Require a manual master dispatch
         shell: pwsh
         run: |
-          if ($env:GITHUB_REPOSITORY -cne 'Joshua-Beel/Smacrobat' -or $env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or $env:GITHUB_REF -cne 'refs/heads/master') { throw 'Dispatch only from master.' }
+          if ($env:GITHUB_REPOSITORY -cne 'Joshua-Beel/PDF-Workstation' -or $env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or $env:GITHUB_REF -cne 'refs/heads/master') { throw 'Dispatch only from master.' }
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with: { ref: '${{ github.sha }}', fetch-depth: 0, persist-credentials: false }
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          repository: Joshua-Beel/Smacrobat
+          repository: Joshua-Beel/PDF-Workstation
           ref: ${{ inputs.target_source_revision }}
           fetch-depth: 0
           persist-credentials: false
@@ -71,7 +71,7 @@ jobs:
         with:
           artifact-ids: ${{ inputs.draft_proof_artifact_id }}
           github-token: ${{ github.token }}
-          repository: Joshua-Beel/Smacrobat
+          repository: Joshua-Beel/PDF-Workstation
           run-id: ${{ inputs.draft_proof_run_id }}
           path: ${{ env.DRAFT_PROOF_ROOT }}
       - name: Prepare exact pinned PDFium resources in target source

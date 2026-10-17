@@ -7,7 +7,7 @@ export function createManifest(version, installer, signature, notes, date = new 
   if (!installer.endsWith('_x64-setup.exe')) throw new Error('Expected a Windows x64 NSIS installer.');
   if (!signature.trim()) throw new Error('Installer signature is missing.');
   const assetName = basename(installer).replace(/ /g, '.');
-  return { version, notes, pub_date: date, platforms: { 'windows-x86_64': { signature: signature.trim(), url: `https://github.com/Joshua-Beel/Smacrobat/releases/download/v${version}/${encodeURIComponent(assetName)}` } } };
+  return { version, notes, pub_date: date, platforms: { 'windows-x86_64': { signature: signature.trim(), url: `https://github.com/Joshua-Beel/PDF-Workstation/releases/download/v${version}/${encodeURIComponent(assetName)}` } } };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

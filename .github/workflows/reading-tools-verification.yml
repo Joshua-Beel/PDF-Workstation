@@ -19,7 +19,7 @@ jobs:
       - name: Require a manual master dispatch
         shell: pwsh
         run: |
-          if ($env:GITHUB_REPOSITORY -cne 'Joshua-Beel/Smacrobat' -or
+          if ($env:GITHUB_REPOSITORY -cne 'Joshua-Beel/PDF-Workstation' -or
               $env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or
               $env:GITHUB_REF -cne 'refs/heads/master') {
             throw 'Dispatch reading-tools verification only from the master branch.'
@@ -77,13 +77,13 @@ jobs:
           if (Test-Path -LiteralPath $env:BASELINE_ROOT) { throw 'Baseline download root must be fresh.' }
           [IO.Directory]::CreateDirectory($env:BASELINE_ROOT) | Out-Null
           $headers = @{ Authorization="Bearer $env:GITHUB_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2022-11-28' }
-          $asset = Invoke-RestMethod -Uri 'https://api.github.com/repos/Joshua-Beel/Smacrobat/releases/assets/569181842' -Headers $headers
+          $asset = Invoke-RestMethod -Uri 'https://api.github.com/repos/Joshua-Beel/PDF-Workstation/releases/assets/569181842' -Headers $headers
           if ([uint64]$asset.id -ne 569181842 -or [string]$asset.name -cne 'PDF.Workstation_0.2.0_x64-setup.exe' -or
               [uint64]$asset.size -ne 6418229 -or [string]$asset.digest -cne 'sha256:17788cb82bb42deac35ea197a385a9bafc8cd331422446a2b834e115a90c4d2e') {
             throw 'Published baseline metadata does not match its exact pin.'
           }
           $headers.Accept = 'application/octet-stream'
-          Invoke-WebRequest -Uri 'https://api.github.com/repos/Joshua-Beel/Smacrobat/releases/assets/569181842' -Headers $headers -OutFile (Join-Path $env:BASELINE_ROOT $asset.name)
+          Invoke-WebRequest -Uri 'https://api.github.com/repos/Joshua-Beel/PDF-Workstation/releases/assets/569181842' -Headers $headers -OutFile (Join-Path $env:BASELINE_ROOT $asset.name)
 
       - name: Verify exact signed artifact metadata
         shell: pwsh
@@ -92,7 +92,7 @@ jobs:
         run: |
           if (Test-Path -LiteralPath $env:SIGNED_ARTIFACT_ROOT) { throw 'Signed artifact root must be fresh.' }
           $headers = @{ Authorization="Bearer $env:GITHUB_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2022-11-28' }
-          $artifact = Invoke-RestMethod -Uri 'https://api.github.com/repos/Joshua-Beel/Smacrobat/actions/artifacts/11005152678' -Headers $headers
+          $artifact = Invoke-RestMethod -Uri 'https://api.github.com/repos/Joshua-Beel/PDF-Workstation/actions/artifacts/11005152678' -Headers $headers
           if ([uint64]$artifact.id -ne 11005152678 -or [string]$artifact.name -cne 'signed-ocr-installer-67d238218f4796ba7b8505d072868da0f397174a' -or
               [uint64]$artifact.size_in_bytes -ne 10437483 -or [string]$artifact.digest -cne 'sha256:c0e89b5ae821d5875c31855c6596a7d47b7ca052468a026745a5d638e50ca569' -or
               [uint64]$artifact.workflow_run.id -ne 36499724415 -or [string]$artifact.workflow_run.head_sha -cne '67d238218f4796ba7b8505d072868da0f397174a' -or [bool]$artifact.expired) {
@@ -104,7 +104,7 @@ jobs:
         with:
           artifact-ids: '11005152678'
           github-token: ${{ github.token }}
-          repository: Joshua-Beel/Smacrobat
+          repository: Joshua-Beel/PDF-Workstation
           run-id: '36499724415'
           merge-multiple: true
           path: ${{ env.SIGNED_ARTIFACT_ROOT }}

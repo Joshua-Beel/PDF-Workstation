@@ -85,7 +85,7 @@ describe('release workflow contract', () => {
     expect(publish).toContain('--notes-file release-notes/release-notes.md');
     expect(publish).toContain("throw 'Downloaded updater manifest is not bound to the exact version, installer URL, detached signature, and release notes.'");
     expect(publish).toContain("$manifest.platforms.'windows-x86_64'.url -cne $expectedUrl");
-    expect(publish).toContain('$expectedUrl = "https://github.com/Joshua-Beel/Smacrobat/releases/download/v$($env:RELEASE_VERSION)/$($installerName.Replace(\' \', \'.\'))"');
+    expect(publish).toContain('$expectedUrl = "https://github.com/Joshua-Beel/PDF-Workstation/releases/download/v$($env:RELEASE_VERSION)/$($installerName.Replace(\' \', \'.\'))"');
     expect(publish).toContain('$signedFiles[0] -cne $installerName');
     expect(publish.indexOf("throw 'Downloaded updater signature does not name the exact installer in its trusted comment.'")).toBeGreaterThan(0);
     expect(publish.indexOf("throw 'Downloaded updater signature does not name the exact installer in its trusted comment.'")).toBeLessThan(publish.indexOf('- name: Create draft release'));
@@ -175,7 +175,7 @@ describe('release workflow contract', () => {
     expect([pkg.version, npmLock.version, npmLock.packages[''].version, tauri.version, cargo, cargoLock]).toEqual(Array(6).fill(currentVersion));
     expect(tauri.plugins.updater).toEqual({
       pubkey: 'dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg1OTcwQzM0QUVBQkQ3NzUKUldSMTE2dXVOQXlYaFdZN0k1Mk1CcSt2NS81bzNRTERRbU16ejYxTDNiS3V6b1RTZ0tuTlRjZVEK',
-      endpoints: ['https://github.com/Joshua-Beel/Smacrobat/releases/latest/download/latest.json'],
+      endpoints: ['https://github.com/Joshua-Beel/PDF-Workstation/releases/latest/download/latest.json'],
       windows: { installMode: 'passive' },
     });
     const notes = readFileSync('docs/release-notes.md', 'utf8');

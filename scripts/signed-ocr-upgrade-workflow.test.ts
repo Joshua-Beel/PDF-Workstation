@@ -79,7 +79,7 @@ function functionHarness(names: string[], body: string, loadDependencies = true)
       Invoke-Expression $function.Extent.Text
     }
     $script:Pins = [ordered]@{
-      Repository = 'Joshua-Beel/Smacrobat'
+      Repository = 'Joshua-Beel/PDF-Workstation'
       BaselineName = 'PDF.Workstation_0.2.0_x64-setup.exe'
       BaselineBytes = [uint64]6418229
       BaselineSha256 = '17788CB82BB42DEAC35EA197A385A9BAFC8CD331422446A2B834E115A90C4D2E'
@@ -130,7 +130,7 @@ describe('manual signed OCR installer upgrade workflow', () => {
     expect(verifier).toContain('-SettingsSentinelPath $settingsSentinel');
     expect(verifier).toContain('-SettingsSentinelBytes $settingsSentinelBytes');
     expect(verifier).toContain('-SettingsSentinelSha256 $settingsSentinelSha256');
-    expect(workflow).toContain("$env:GITHUB_REPOSITORY -cne 'Joshua-Beel/Smacrobat'");
+    expect(workflow).toContain("$env:GITHUB_REPOSITORY -cne 'Joshua-Beel/PDF-Workstation'");
     expect(workflow).toContain("$env:GITHUB_REF -cne 'refs/heads/master'");
     expect(workflow).toContain('ref: ${{ github.sha }}');
     expect(workflow).toContain('persist-credentials: false');
@@ -240,7 +240,7 @@ describe('manual signed OCR installer upgrade workflow', () => {
       String.raw`
         $facts = [pscustomobject]@{
           githubActions='true'; runnerEnvironment='github-hosted'; runnerOs='Windows'; imageOs='win22'
-          eventName='workflow_dispatch'; ref='refs/heads/master'; repository='Joshua-Beel/Smacrobat'
+          eventName='workflow_dispatch'; ref='refs/heads/master'; repository='Joshua-Beel/PDF-Workstation'
           githubSha=('a' * 40); headSha=('a' * 40); trackedClean=$true; indexClean=$true
           githubTokenPresent=$false; ghTokenPresent=$false; ambientSigningConfigurationPresent=$false
         }

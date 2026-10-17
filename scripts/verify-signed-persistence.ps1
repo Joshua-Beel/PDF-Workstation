@@ -14,7 +14,7 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'installed-persistence.ps1')
 
 $script:PersistenceArtifactPins = [ordered]@{
-    Repository = 'Joshua-Beel/Smacrobat'
+    Repository = 'Joshua-Beel/PDF-Workstation'
     SourceRevision = '67d238218f4796ba7b8505d072868da0f397174a'
     InstallerName = 'PDF Workstation_0.2.6_x64-setup.exe'
     InstallerBytes = [uint64]10456616
