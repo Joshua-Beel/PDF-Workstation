@@ -8,7 +8,7 @@ You can already read PDFs, rearrange pages, and save your changes to a new file.
 
 PDF Workstation is free, open-source software under the [MIT License](LICENSE).
 
-Download the Windows setup file from the [latest release](https://github.com/Joshua-Beel/Smacrobat/releases/latest). The installer includes the PDF engine. It does not include Microsoft's WebView2 Runtime: on a machine without WebView2, the installer is configured to download it, so that install needs network access once. Installing without WebView2 has not been exercised. Once installed, open a file or choose **Explore a sample PDF** to try it out.
+Download the Windows setup file from the [latest release](https://github.com/Joshua-Beel/PDF-Workstation/releases/latest). The installer includes the PDF engine. It does not include Microsoft's WebView2 Runtime: on a machine without WebView2, the installer is configured to download it, so that install needs network access once. Installing without WebView2 has not been exercised. Once installed, open a file or choose **Explore a sample PDF** to try it out.
 
 For updates, use **Menu > Check for updates**. The app shows what's new and lets you choose when to install. Save any edited documents first; the app won't install an update while you have unsaved changes.
 
@@ -116,7 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
-- README restructured: one-line feature and change summaries here; full feature text moved to [docs/features.md](docs/features.md) and the full change log to [docs/changelog.md](docs/changelog.md), verbatim (docs only).
+- README restructured: one-line feature and change summaries here; full feature text moved to [docs/features.md](docs/features.md) and the full change log to [docs/changelog.md](docs/changelog.md), verbatim; README links now use the renamed repo `Joshua-Beel/PDF-Workstation` (docs only).
 - CI on every push to `master` and every pull request: tests, type-check and build, read-only, no secrets (SM6). Unverified until its first hosted run.
 - Viewer scroll follow-ups: tighter Find cancellation and stale-page tests (SM1; tests only).
 - Find in document keeps up to 8 page-text requests in flight and throttles progress updates (SM1; source build).
