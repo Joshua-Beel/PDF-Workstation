@@ -27,6 +27,8 @@ pub(crate) struct LoadError { password: bool, message: String }
 impl LoadError {
     /// The document is encrypted and the password (or no password) was not accepted.
     pub(crate) fn is_password(&self) -> bool { self.password }
+    /// A load error reported by another engine implementation (the helper process).
+    pub(crate) fn new(password: bool, message: String) -> Self { Self { password, message } }
 }
 impl std::fmt::Display for LoadError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { formatter.write_str(&self.message) }
@@ -157,7 +159,7 @@ impl InProcessDocument<'_> {
     fn with_target<T>(&self, target: PageTarget<'_>, action: impl FnOnce(&PdfPage<'_>) -> T) -> Result<T, String> {
         match target {
             PageTarget::Planned(spec) => with_planned_page(&self.inner, spec, |page| Ok(action(page))),
-            PageTarget::Source(index) => { let page = self.inner.pages().get(index as i32).map_err(|error| error.to_string())?; Ok(action(&page)) }
+            PageTarget::Source(index) => { let page = self.inner.pages().get(index as i32).map_err(|error| format!("Unable to read page {}: {error}", index + 1))?; Ok(action(&page)) }
         }
     }
 }
@@ -168,8 +170,9 @@ impl EngineDocument for InProcessDocument<'_> {
         let pages = self.inner.pages();
         if pages.is_empty() { return Err("This PDF has no pages.".into()); }
         if pages.len() > u16::MAX as i32 + 1 { return Err("This PDF exceeds the supported limit of 65,536 pages.".into()); }
+        // FPDF_GetPageSizeByIndexF reads each page's size (rotation applied) without loading the page.
         (0..pages.len()).map(|index| {
-            let page = pages.get(index).map_err(|error| format!("Unable to read page {}: {error}", index + 1))?;
+            let page = pages.page_size(index).map_err(|error| format!("Unable to read page {}: {error}", index + 1))?;
             let size = PageSize { width: page.width().value, height: page.height().value };
             if !size.width.is_finite() || !size.height.is_finite() || size.width <= 0.0 || size.height <= 0.0 { return Err(format!("Invalid dimensions on page {}.", index + 1)); }
             Ok(size)
@@ -412,5 +415,105 @@ mod tests {
     fn document_layout_error(engine: &InProcessEngine, root: &std::path::Path, out: &mut [u8]) -> Result<(), RenderError> {
         let document = engine.load_from_vec(std::fs::read(root.join("resources/welcome.pdf")).unwrap(), None).unwrap();
         document.render_bgra_into(PageTarget::Source(0), RenderMode::Plain, 10, 10, out)
+    }
+
+    const SIZES_CHILD: &str = "SM5_PAGE_SIZES_CHILD";
+    const SIZES_NAME: &str = "pdf_engine::tests::page_sizes_by_index_match_loading_every_page";
+    /// Optional: a text file listing more PDFs (one path per line, read only) to compare as well.
+    const SIZES_EXTRA: &str = "SM5_PAGE_SIZES_EXTRA";
+
+    /// One page per case: inherited MediaBox and /Rotate, every quarter turn (and -90), CropBox with and
+    /// without rotation, offset and reversed MediaBox, CropBox past the MediaBox, /UserUnit, and a
+    /// non-quarter /Rotate.
+    fn edge_pages() -> Vec<u8> {
+        use lopdf::{dictionary, Document, Object, Stream};
+        let mut document = Document::with_version("1.7");
+        let pages = document.new_object_id();
+        let content = document.add_object(Stream::new(dictionary! {}, b"0 0 m 100 100 l S".to_vec()));
+        let boxed = |values: [i64; 4]| Object::Array(values.into_iter().map(Object::Integer).collect());
+        let cases: Vec<Vec<(&str, Object)>> = vec![
+            vec![],
+            vec![("MediaBox", boxed([0, 0, 612, 792])), ("Rotate", Object::Integer(0))],
+            vec![("Rotate", Object::Integer(180))],
+            vec![("Rotate", Object::Integer(270))],
+            vec![("Rotate", Object::Integer(-90))],
+            vec![("MediaBox", boxed([0, 0, 612, 792])), ("CropBox", boxed([50, 60, 400, 500])), ("Rotate", Object::Integer(0))],
+            vec![("CropBox", boxed([50, 60, 400, 500]))],
+            vec![("MediaBox", boxed([100, 200, 712, 992])), ("Rotate", Object::Integer(0))],
+            vec![("MediaBox", boxed([612, 792, 0, 0])), ("Rotate", Object::Integer(0))],
+            vec![("MediaBox", boxed([0, 0, 300, 300])), ("CropBox", boxed([-50, -50, 500, 500])), ("Rotate", Object::Integer(0))],
+            vec![("UserUnit", Object::Real(2.0)), ("Rotate", Object::Integer(0))],
+            vec![("Rotate", Object::Integer(45))],
+        ];
+        let kids = cases
+            .into_iter()
+            .map(|extra| {
+                let mut page = dictionary! { "Type" => "Page", "Parent" => pages, "Contents" => content };
+                for (key, value) in extra {
+                    page.set(key, value);
+                }
+                Object::Reference(document.add_object(page))
+            })
+            .collect::<Vec<_>>();
+        let count = kids.len() as i64;
+        document.objects.insert(pages, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => count, "MediaBox" => boxed([0, 0, 600, 800]), "Rotate" => 90 }));
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    /// `page_sizes` reads sizes with `FPDF_GetPageSizeByIndexF` instead of loading every page. It must give
+    /// exactly (bit for bit) what loading each page and reading its width and height gave, on every fixture
+    /// PDF and the constructed edge pages (plus any PDFs listed in `SM5_PAGE_SIZES_EXTRA`). Runs in a child
+    /// process so this test binary binds PDFium only once per process.
+    #[test]
+    fn page_sizes_by_index_match_loading_every_page() {
+        if std::env::var_os(SIZES_CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", SIZES_NAME, "--nocapture", "--test-threads=1"]).env(SIZES_CHILD, "1").output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success() && stdout.contains("page-sizes-identical"), "child failed:\n{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+            if let Some(line) = stdout.lines().find(|line| line.contains("page-sizes-identical")) { println!("{line}"); }
+            return;
+        }
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let engine = InProcessEngine::bind(root.join("resources/pdfium/bin/pdfium.dll")).unwrap();
+        let mut sources: Vec<(String, Vec<u8>)> = vec![("edge pages".into(), edge_pages())];
+        let mut paths = vec![root.join("resources/welcome.pdf")];
+        for folder in [root.join("../test-corpus"), root.join("tests/fixtures"), root.join("tests/fixtures/searchable-ocr")] {
+            if let Ok(entries) = std::fs::read_dir(folder) {
+                let mut found = entries.filter_map(|entry| entry.ok().map(|entry| entry.path())).filter(|path| path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))).collect::<Vec<_>>();
+                found.sort();
+                paths.extend(found);
+            }
+        }
+        let extra = std::env::var_os(SIZES_EXTRA).map(|list| std::fs::read_to_string(list).unwrap()).unwrap_or_default();
+        let extra_paths = extra.lines().map(str::trim).filter(|line| !line.is_empty()).map(PathBuf::from).collect::<Vec<_>>();
+        let fixture_count = paths.len();
+        paths.extend(extra_paths.iter().cloned());
+        for (index, path) in paths.iter().enumerate() {
+            let label = if index < fixture_count { path.display().to_string() } else { format!("extra file {}", index - fixture_count + 1) };
+            sources.push((label, std::fs::read(path).unwrap()));
+        }
+        let (mut documents, mut pages, mut unloadable) = (0, 0, 0);
+        for (label, bytes) in sources {
+            let Ok(document) = engine.load_from_vec(bytes, None) else { unloadable += 1; continue };
+            let legacy = {
+                let all = document.inner.pages();
+                (0..all.len()).map(|index| all.get(index).map(|page| (page.width().value.to_bits(), page.height().value.to_bits())).map_err(|error| error.to_string())).collect::<Result<Vec<_>, _>>()
+            };
+            let current = document.page_sizes().map(|sizes| sizes.iter().map(|size| (size.width.to_bits(), size.height.to_bits())).collect::<Vec<_>>());
+            match (&legacy, &current) {
+                (Ok(legacy), Ok(current)) => assert_eq!(legacy, current, "{label}: page sizes differ"),
+                (Ok(legacy), Err(error)) => assert!(legacy.iter().any(|&(width, height)| { let (width, height) = (f32::from_bits(width), f32::from_bits(height)); !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 }), "{label}: refused only now: {error}"),
+                (Err(error), _) => panic!("{label}: a page the old path could not load ({error}); decide how to treat it"),
+            }
+            documents += 1;
+            pages += legacy.map_or(0, |sizes| sizes.len());
+        }
+        assert!(documents >= 10, "{documents} documents compared");
+        println!("page-sizes-identical documents={documents} pages={pages} extra_files={} unloadable={unloadable}", extra_paths.len());
     }
 }

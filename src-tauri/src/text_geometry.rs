@@ -2,7 +2,7 @@ use pdfium_render::prelude::*;
 use serde::Serialize;
 use crate::editor::CropBox;
 
-const MAX_CHARACTERS: usize = 20_000;
+pub(crate) const MAX_CHARACTERS: usize = 20_000;
 const COORDINATE_SIZE: i32 = 1_000_000;
 
 #[derive(Debug, Serialize)]
@@ -45,7 +45,7 @@ fn normalized_bounds(corners: [(i32, i32); 4]) -> Result<Option<TextBounds>, &'s
     Ok(Some(TextBounds { x, y, width: right.min(1.0) - x, height: bottom.min(1.0) - y }))
 }
 
-pub struct InspectedGeometry { pub geometry: PageTextGeometry, source_bounds: Vec<Option<CropBox>> }
+pub struct InspectedGeometry { pub geometry: PageTextGeometry, pub(crate) source_bounds: Vec<Option<CropBox>> }
 impl InspectedGeometry {
     pub fn highlight_bounds(&self, start: usize, end: usize) -> Result<Vec<CropBox>, String> {
         if self.geometry.status != "ok" || self.geometry.truncated { return Err(self.geometry.reason.clone().unwrap_or_else(|| "This page does not support text highlights.".into())); }

@@ -1,6 +1,6 @@
 //! A child process confined to its own Windows Job Object, with bounded pipes.
 //!
-//! Shared by the OCR engine child (`ocr_process.rs`) and the planned PDF-engine helper. The parent holds the
+//! Shared by the OCR engine child (`ocr_process.rs`) and the PDF-engine helper (`pdf_helper`). The parent holds the
 //! only job handle, so closing it (or the parent exiting) kills the child (`KILL_ON_JOB_CLOSE`). Optional
 //! hardening for children that run untrusted input: no error dialogs and no Windows Error Reporting for
 //! unhandled exceptions or refused allocations (`DIE_ON_UNHANDLED_EXCEPTION` plus `harden_job_child_process`
@@ -247,7 +247,7 @@ impl JobChild {
         }
     }
 
-    fn wait_for_exit(&self, limit: Duration) -> bool {
+    pub(crate) fn wait_for_exit(&self, limit: Duration) -> bool {
         let millis = u32::try_from(limit.as_millis()).unwrap_or(u32::MAX - 1);
         (unsafe { WaitForSingleObject(as_windows_handle(&self.process), millis) }) == WAIT_OBJECT_0
     }
@@ -477,7 +477,7 @@ pub(crate) fn run_bounded(
                 break TerminalReason::TimedOut;
             }
         };
-        finish_io(&workers, bounds.drain_grace);
+        finish_io(&workers.each_ref(), bounds.drain_grace);
         let writer_result = writer.join().map_err(|_| ChildSystemError(format!("{label} input worker panicked")))?;
         let stdout = stdout_reader.join().map_err(|_| ChildSystemError(format!("{label} stdout worker panicked")))??;
         let stderr = stderr_reader.join().map_err(|_| ChildSystemError(format!("{label} stderr worker panicked")))??;
@@ -493,15 +493,16 @@ pub(crate) fn run_bounded(
         stdout,
         stderr,
         limit_violation,
-        io_cancelled: workers.iter().any(|worker| worker.cancelled_io.load(Ordering::Acquire)),
+        io_cancelled: workers.iter().any(IoWorker::was_cancelled),
         child,
     })
 }
 
-/// One pipe thread of `run_bounded`: its own thread handle (so blocked synchronous I/O can be cancelled from
-/// the supervising thread), whether it has finished, and whether it was cancelled.
+/// One pipe thread of `run_bounded` or of the PDF-engine helper's supervisor: its own thread handle (so
+/// blocked synchronous I/O can be cancelled from the supervising thread), whether it has finished, and
+/// whether it was cancelled.
 #[derive(Default)]
-struct IoWorker {
+pub(crate) struct IoWorker {
     thread: Mutex<Option<OwnedHandle>>,
     done: AtomicBool,
     stop: AtomicBool,
@@ -509,7 +510,7 @@ struct IoWorker {
 }
 
 impl IoWorker {
-    fn run<T>(&self, work: impl FnOnce(&IoWorker) -> T) -> T {
+    pub(crate) fn run<T>(&self, work: impl FnOnce(&IoWorker) -> T) -> T {
         struct MarkDone<'a>(&'a AtomicBool);
         impl Drop for MarkDone<'_> {
             fn drop(&mut self) {
@@ -536,17 +537,21 @@ impl IoWorker {
         }
     }
 
-    fn is_done(&self) -> bool {
+    pub(crate) fn is_done(&self) -> bool {
         self.done.load(Ordering::Acquire)
     }
 
-    fn should_stop(&self) -> bool {
+    pub(crate) fn should_stop(&self) -> bool {
         self.stop.load(Ordering::Acquire)
     }
 
     /// Records that the I/O was cut short; the caller then returns what it has.
-    fn mark_cancelled(&self) {
+    pub(crate) fn mark_cancelled(&self) {
         self.cancelled_io.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn was_cancelled(&self) -> bool {
+        self.cancelled_io.load(Ordering::Acquire)
     }
 
     fn cancel_blocked_io(&self) {
@@ -559,8 +564,8 @@ impl IoWorker {
 
 /// Waits up to `grace` for every pipe thread, then keeps cancelling the blocked ones (repeatedly, so a
 /// thread that was between its stop check and the system call is caught) for up to `IO_CANCEL_LIMIT`.
-fn finish_io(workers: &[IoWorker], grace: Duration) {
-    let all_done = || workers.iter().all(IoWorker::is_done);
+pub(crate) fn finish_io(workers: &[&IoWorker], grace: Duration) {
+    let all_done = || workers.iter().all(|worker| worker.is_done());
     let started = Instant::now();
     while !all_done() && started.elapsed() < grace {
         std::thread::sleep(Duration::from_millis(1));
@@ -844,7 +849,7 @@ static STDERR_HANDLE: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::nu
 /// report on the system drive.
 ///
 /// Call it only from a child's own entry point: the helper's mode-flag branch in `main` before Tauri
-/// starts (helper step 3), or a test child. Never in the app process: it replaces the process-wide
+/// starts (`pdf_helper::run_helper_mode`), or a test child. Never in the app process: it replaces the process-wide
 /// error mode, WER flags and unhandled-exception filter. Debug builds assert it runs once per process.
 pub(crate) fn harden_job_child_process() {
     static HARDENED: AtomicBool = AtomicBool::new(false);
@@ -905,6 +910,50 @@ unsafe impl GlobalAlloc for TerminatingAllocator {
             exit_after_allocation_failure();
         }
         resized
+    }
+}
+
+static TERMINATE_ON_REFUSED_ALLOCATION: AtomicBool = AtomicBool::new(false);
+
+/// Makes `ModeSwitchAllocator` behave like `TerminatingAllocator` for the rest of the process. Call it only
+/// from a hardened child's own entry point (the PDF-engine helper's mode branch, or a test child), never in
+/// the app process.
+pub(crate) fn arm_terminating_allocator() {
+    TERMINATE_ON_REFUSED_ALLOCATION.store(true, Ordering::Release);
+}
+
+/// The exe's `#[global_allocator]`. A `#[global_allocator]` is fixed for the whole binary and cannot depend
+/// on the launch mode, so this one is the system allocator, unchanged, until `arm_terminating_allocator`
+/// runs; after that a refused allocation ends the process with `EXIT_ALLOCATION_FAILURE`. The flag is read
+/// only once the system allocator has already returned null, so the app process (never armed) gets exactly
+/// the system allocator's results and Rust's usual allocation-failure handling.
+pub(crate) struct ModeSwitchAllocator;
+
+impl ModeSwitchAllocator {
+    #[inline]
+    fn refused(pointer: *mut u8) -> *mut u8 {
+        if pointer.is_null() && TERMINATE_ON_REFUSED_ALLOCATION.load(Ordering::Acquire) {
+            exit_after_allocation_failure();
+        }
+        pointer
+    }
+}
+
+unsafe impl GlobalAlloc for ModeSwitchAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        Self::refused(unsafe { System.alloc(layout) })
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        Self::refused(unsafe { System.alloc_zeroed(layout) })
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) }
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        Self::refused(unsafe { System.realloc(pointer, layout, new_size) })
     }
 }
 
