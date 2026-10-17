@@ -354,6 +354,32 @@ fn appearance(style: &Style, value: &str) -> Content<Vec<Operation>> {
 }
 // A filled copy keeps only objects reachable from the trailer, so replaced appearances and superseded revisions do not carry old values.
 use crate::pdf_load::reachable;
+fn without_object_streams(id: ObjectId, object: &mut Object) -> Option<(ObjectId, Object)> {
+    if matches!(object, Object::Stream(stream) if stream.dict.has_type(b"ObjStm")) { None } else { Some((id, std::mem::replace(object, Object::Null))) }
+}
+fn resolves_to_zero(document: &Document, stream: &Stream) -> bool {
+    stream.dict.get(b"Length").and_then(|value| document.dereference(value)).ok().is_some_and(|(_, value)| match value { Object::Integer(0) => true, Object::Real(real) => *real == 0.0, _ => false })
+}
+// Refuses a load whose copy would silently differ from the source: an in-use object that failed to load,
+// a stale object-stream copy standing in for a newest copy that failed to parse, or a stream left empty by an unresolvable /Length.
+pub(crate) fn check_faithful_load(document: &Document, source: &[u8]) -> Result<(), String> {
+    const DROPPED: &str = "Some PDF objects could not be loaded within the form-loading limits; a filled copy would drop them.";
+    for object in document.objects.values() { if let Object::Stream(stream) = object { if stream.content.is_empty() && !resolves_to_zero(document, stream) { return Err("A PDF stream could not be read (its /Length does not resolve); a filled copy would drop its content.".into()); } } }
+    // Every in-use entry must have loaded. An `n` entry at offset 0 is the unused `0000000000 00000 n` row some writers emit: offset 0
+    // is the file header, so it cannot hold an object and viewers skip it.
+    if document.reference_table.entries.iter().any(|(number, entry)| match entry { XrefEntry::Normal { offset, generation } => *offset != 0 && !document.objects.contains_key(&(*number, *generation)), XrefEntry::Compressed { .. } => !document.objects.contains_key(&(*number, 0)), _ => false }) { return Err(DROPPED.into()); }
+    // lopdf substitutes an older object-stream copy of a number when its newest (direct) copy fails to parse. Reload without the
+    // object streams: a direct entry must then come from its own offset, never from the stale copy.
+    if document.objects.values().any(|object| matches!(object, Object::Stream(stream) if stream.dict.has_type(b"ObjStm"))) {
+        let direct: Vec<ObjectId> = document.reference_table.entries.iter().filter_map(|(number, entry)| match entry { XrefEntry::Normal { offset, generation } if *offset != 0 => Some((*number, *generation)), _ => None }).filter(|id| !matches!(document.objects.get(id), Some(Object::Stream(stream)) if stream.dict.has_type(b"ObjStm"))).collect();
+        if !direct.is_empty() {
+            let mut options = LoadOptions::with_filter(without_object_streams); options.max_decompressed_size = Some(MAX_TEXT);
+            let Ok(direct_only) = Document::load_mem_with_options(source, options) else { return Err(DROPPED.into()) };
+            if direct.iter().any(|id| !direct_only.objects.contains_key(id)) { return Err("A PDF object's newest copy could not be read and an older copy was substituted; a filled copy would change it.".into()); }
+        }
+    }
+    Ok(())
+}
 fn same_object(a: &Object, b: &Object) -> bool {
     match (a, b) { (Object::Integer(_) | Object::Real(_), Object::Integer(_) | Object::Real(_)) => number(a).ok().zip(number(b).ok()).is_some_and(|(a, b)| (a - b).abs() < 0.0001), _ => a == b }
 }
@@ -567,7 +593,7 @@ impl FormDocument {
         let document = Document::load_mem_with_options(&session.source, LoadOptions::with_max_decompressed_size(MAX_TEXT)).map_err(|_| "The PDF cannot be parsed within the form-loading limits.")?;
         if document.is_encrypted() || document.encryption_state.is_some() { return Err("Encrypted PDFs cannot be filled in this build.".into()); }
         if document.objects.len() > 50000 { return Err("This PDF exceeds the form object-count limit.".into()); }
-        if document.reference_table.entries.iter().any(|(number, entry)| match entry { XrefEntry::Normal { generation, .. } => !document.objects.contains_key(&(*number, *generation)), XrefEntry::Compressed { .. } => !document.objects.contains_key(&(*number, 0)), _ => false }) { return Err("Some PDF objects could not be loaded within the form-loading limits; a filled copy would drop them.".into()); }
+        check_faithful_load(&document, &session.source)?;
         let catalog = document.catalog().map_err(|_| "The PDF catalog is invalid.")?;
         if catalog.has(b"Perms") { return Err("Signed or certified PDFs cannot be filled in this build.".into()); }
         let mut nodes = 0;
@@ -688,3 +714,7 @@ impl FormDocument {
         let mut bytes = Vec::new(); self.document.save_to(&mut bytes).map_err(|_| "Could not serialize the filled form.")?; if bytes.len() > MAX_OUTPUT { return Err("The filled form output exceeds 256 MiB.".into()); } Ok((bytes, self.fields.into_iter().map(|field| field.dto).collect()))
     }
 }
+
+#[cfg(test)]
+#[path = "forms_h2_tests.rs"]
+mod h2_tests;
