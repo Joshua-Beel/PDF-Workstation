@@ -42,7 +42,7 @@ fn unused_zero_offset_entries_and_free_entries_do_not_refuse() {
 fn a_header_that_disagrees_with_its_entry_and_an_object_that_fails_to_load_are_still_refused() {
     for body_header in [9, 5] {
         let mut parts = base("/Extra 5 0 R"); let mut moved = part(5, if body_header == 9 { "<</Marker(new)>>" } else { "<</Marker(new)" }); moved.header = body_header; parts.push(moved);
-        assert!(check(&assemble(&parts, 10)).unwrap_err().contains("would drop"), "header {body_header}");
+        let refusal = check(&assemble(&parts, 10)).unwrap_err(); assert!(refusal.contains(if body_header == 9 { "not backed" } else { "would drop" }), "header {body_header}: {refusal}");
     }
     let mut orphan = base(""); orphan.push(part(5, "<</Marker(new)"));
     assert!(check(&assemble(&orphan, 6)).unwrap_err().contains("would drop"), "an unreferenced in-use entry that did not load is refused too");
@@ -57,4 +57,22 @@ fn a_stream_whose_indirect_length_does_not_resolve_is_refused() {
     assert!(check_faithful_load(&document, &dangling).unwrap_err().contains("/Length"));
     let missing = build("(x)", false); assert!(check(&missing).unwrap_err().contains("/Length"));
     let empty_by_design = { let mut parts = base("/Extra 5 0 R"); parts.push(part(5, "<</Length 0>>\nstream\n\nendstream")); assemble(&parts, 6) }; assert!(check(&empty_by_design).is_ok());
+}
+
+fn object_stream_part(number: u32, object: &str) -> Part { let header = format!("{number} 0 "); part(4, &format!("<</Type/ObjStm/N 1/First {}/Length {}>>\nstream\n{header}{object}\nendstream", header.len(), header.len() + object.len())) }
+
+#[test]
+fn an_object_supplied_only_by_an_object_stream_is_refused_when_its_own_entry_is_free_missing_or_offset_zero() {
+    let build = |row: Option<&str>| { let mut parts = base("/Extra 6 0 R"); parts.push(object_stream_part(6, "<</Marker(stream)>>")); let mut bytes = assemble(&parts, 7); if let Some(row) = row { let marker = b"0000000000 00001 f \n"; let at = bytes.windows(marker.len()).rposition(|w| w == marker).unwrap(); bytes[at..at + 20].copy_from_slice(row.as_bytes()); } bytes };
+    for (name, bytes) in [("free", build(None)), ("offset zero", build(Some("0000000000 00000 n \n")))] {
+        let document = load(&bytes); assert!(document.objects.contains_key(&(6, 0)), "lopdf keeps the object-stream copy: {name}");
+        assert!(check_faithful_load(&document, &bytes).unwrap_err().contains("not backed"), "{name}");
+    }
+}
+
+#[test]
+fn a_length_that_resolves_late_to_zero_while_data_follows_is_refused() {
+    let mut parts = base("/Extra 5 0 R"); parts.push(object_stream_part(6, "0")); parts.push(part(5, "<</Length 6 0 R>>\nstream\nabc\nendstream"));
+    let bytes = assemble(&parts, 7); let document = load(&bytes); assert!(document.get_object((5, 0)).unwrap().as_stream().unwrap().content.is_empty(), "the late zero length drops the data, which is the hazard under test");
+    assert!(check_faithful_load(&document, &bytes).unwrap_err().contains("resolves to zero"));
 }
