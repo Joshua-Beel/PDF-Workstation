@@ -198,7 +198,7 @@ async fn reset_crops(service: State<'_, PdfService>, id: u64, revision: u64, pag
 async fn save_copy(app: tauri::AppHandle, service: State<'_, PdfService>, id: u64, revision: u64, pages: Option<Vec<usize>>) -> Result<Option<service::SavedCopy>, String> {
     let window = app.get_webview_window("main").ok_or("Application window is unavailable")?;
     service.save_copy_via(id, revision, pages, |suggested| async move {
-        tauri::async_runtime::spawn_blocking(move || rfd::FileDialog::new().set_parent(&window).add_filter("PDF documents", &["pdf"]).set_file_name(suggested).save_file()).await.map_err(|e| e.to_string())
+        tauri::async_runtime::spawn_blocking(move || rfd::FileDialog::new().set_parent(&window).set_title("Save a copy as a new file").add_filter("PDF documents", &["pdf"]).set_file_name(suggested).save_file()).await.map_err(|e| e.to_string())
     }).await
 }
 
@@ -301,7 +301,8 @@ fn cancel_text_replacement(selections:State<'_,text_edit_commands::TextReplaceme
 async fn split_document(app: tauri::AppHandle, service: State<'_, PdfService>, id: u64, revision: u64, pages_per_file: usize) -> Result<Option<split::SplitOutput>, String> {
     service.split_via(id, revision, pages_per_file, || async move {
         let window = app.get_webview_window("main").ok_or("Application window is unavailable")?;
-        tauri::async_runtime::spawn_blocking(move || rfd::FileDialog::new().set_parent(&window).set_title("Choose a new folder for split PDFs").set_file_name("Split PDFs").save_file()).await.map_err(|error| error.to_string())
+        let parent = tauri::async_runtime::spawn_blocking(move || rfd::FileDialog::new().set_parent(&window).set_title("Choose a folder for split PDFs").pick_folder()).await.map_err(|error| error.to_string())?;
+        parent.map(|parent| split::new_split_folder(&parent)).transpose()
     }).await
 }
 

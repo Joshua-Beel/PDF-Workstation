@@ -38,6 +38,25 @@ fn validate_folder_name(name: &OsStr) -> Result<(), String> {
     Ok(())
 }
 
+const SPLIT_FOLDER_NAME: &str = "Split PDFs";
+const MAX_SPLIT_FOLDER_SUFFIX: u32 = 99;
+
+/// The new split folder inside `parent` (a folder the user picked in the native dialog): the
+/// first of "Split PDFs", "Split PDFs (2)", ... "Split PDFs (99)" that does not exist yet. Nothing
+/// is created here; publishing stays atomic and still refuses a folder that appears meanwhile.
+pub fn new_split_folder(parent: &Path) -> Result<PathBuf, String> {
+    for suffix in 1..=MAX_SPLIT_FOLDER_SUFFIX {
+        let name = if suffix == 1 { SPLIT_FOLDER_NAME.to_owned() } else { format!("{SPLIT_FOLDER_NAME} ({suffix})") };
+        let folder = parent.join(&name);
+        match folder.symlink_metadata() {
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(folder),
+            Err(error) => return Err(format!("The split folder could not be checked: {error}")),
+        }
+    }
+    Err(format!("That folder already holds {MAX_SPLIT_FOLDER_SUFFIX} split folders. Choose another folder."))
+}
+
 #[cfg(windows)]
 fn publish_directory(source: &Path, destination: &Path) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
@@ -109,6 +128,20 @@ mod tests {
         assert!(group_count(0, 1).is_err()); assert!(group_count(6, 0).is_err()); assert!(group_count(65, 1).unwrap_err().contains("64"));
         for name in ["", ".", "..", "../escape", "a/b", "a\\b", "C:\\folder", "NUL", "COM1.pdf", "LPT9", "trailing.", "trailing ", "a\0b"] { assert!(validate_folder_name(OsStr::new(name)).is_err(), "{name:?}"); }
         assert!(validate_folder_name(OsStr::new("split café")).is_ok());
+    }
+
+    #[test]
+    fn new_split_folder_picks_the_first_unused_name_inside_the_chosen_folder() {
+        let parent = tempfile::tempdir().unwrap();
+        assert_eq!(new_split_folder(parent.path()).unwrap(), parent.path().join("Split PDFs"));
+        std::fs::create_dir(parent.path().join("Split PDFs")).unwrap();
+        std::fs::write(parent.path().join("Split PDFs (2)"), b"a file, not a folder").unwrap();
+        let next = new_split_folder(parent.path()).unwrap();
+        assert_eq!(next, parent.path().join("Split PDFs (3)"));
+        assert!(!next.exists(), "nothing is created before publishing");
+        validate_folder_name(next.file_name().unwrap()).unwrap();
+        for suffix in 3..=MAX_SPLIT_FOLDER_SUFFIX { std::fs::create_dir(parent.path().join(format!("Split PDFs ({suffix})"))).unwrap(); }
+        assert!(new_split_folder(parent.path()).unwrap_err().contains("Choose another folder"));
     }
 
     #[test]
