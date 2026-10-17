@@ -280,7 +280,30 @@ impl Bounds {
             && child_right <= right
             && child_bottom <= bottom
     }
+
+    fn contains_within(self, child: Self, slack: u32) -> bool {
+        let (Some(right), Some(bottom), Some(child_right), Some(child_bottom)) = (
+            self.left.checked_add(self.width),
+            self.top.checked_add(self.height),
+            child.left.checked_add(child.width),
+            child.top.checked_add(child.height),
+        ) else {
+            return false;
+        };
+        child.left.saturating_add(slack) >= self.left
+            && child.top.saturating_add(slack) >= self.top
+            && child_right <= right.saturating_add(slack)
+            && child_bottom <= bottom.saturating_add(slack)
+    }
 }
+
+/// Raster resolution the OCR page images are rendered at (matches `ocr.rs`).
+const RASTER_DPI: u32 = 150;
+/// Rounding slack for parent/child TSV boxes: 3.84 pt at the raster DPI,
+/// 8 px at 150 DPI. It applies at three levels (paragraph in block, line in
+/// paragraph, word in line), so a word can sit up to three times this far
+/// outside its block while staying exactly inside the page.
+const CONTAINMENT_SLACK_PIXELS: u32 = (RASTER_DPI * 384).div_ceil(7200);
 
 #[derive(Default)]
 struct Hierarchy {
@@ -343,7 +366,7 @@ impl Hierarchy {
                 && self.last_paragraph.checked_add(1) == Some(paragraph)
                 && line == 0
                 && word == 0
-                && self.block.unwrap().1.contains(bounds) =>
+                && self.block.unwrap().1.contains_within(bounds, CONTAINMENT_SLACK_PIXELS) =>
             {
                 self.paragraph = Some((paragraph, bounds));
                 self.line = None;
@@ -357,7 +380,7 @@ impl Hierarchy {
                 && paragraph == self.last_paragraph
                 && self.last_line.checked_add(1) == Some(line)
                 && word == 0
-                && self.paragraph.unwrap().1.contains(bounds) =>
+                && self.paragraph.unwrap().1.contains_within(bounds, CONTAINMENT_SLACK_PIXELS) =>
             {
                 self.line = Some((line, bounds));
                 self.last_line = line;
@@ -384,7 +407,7 @@ impl Hierarchy {
             && paragraph == self.last_paragraph
             && line == self.last_line
             && self.last_word.checked_add(1) == Some(word)
-            && self.line.unwrap().1.contains(bounds);
+            && self.line.unwrap().1.contains_within(bounds, CONTAINMENT_SLACK_PIXELS);
         if !valid {
             return Err(format!(
                 "OCR TSV row {row} violates the required word hierarchy"
@@ -425,8 +448,8 @@ fn validate_word(word: &OcrWord, raster_width: u32, raster_height: u32) -> Resul
         .ok_or_else(|| "OCR line box overflows".to_string())?;
     if word.line_height == 0
         || line_bottom > raster_height
-        || word.top < word.line_top
-        || bottom > line_bottom
+        || word.top.saturating_add(CONTAINMENT_SLACK_PIXELS) < word.line_top
+        || bottom > line_bottom.saturating_add(CONTAINMENT_SLACK_PIXELS)
     {
         return Err("OCR word is outside its line band".to_string());
     }

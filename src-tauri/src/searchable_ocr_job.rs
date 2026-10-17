@@ -125,3 +125,73 @@ fn p6_rgb(input: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
     if pixels.len() != expected { return Err("OCR raster P6 length is inconsistent".into()); }
     Ok(pixels.to_vec())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn smoke_png(pnm: &std::path::Path, png_path: &std::path::Path) {
+        let p6 = std::fs::read(pnm).unwrap();
+        let mut lines = p6.splitn(4, |byte| *byte == 10);
+        assert_eq!(lines.next(), Some(b"P6".as_slice()));
+        let dimensions = std::str::from_utf8(lines.next().unwrap()).unwrap().split_once(' ').unwrap();
+        assert_eq!(lines.next(), Some(b"255".as_slice()));
+        let (width, height): (u32, u32) = (dimensions.0.parse().unwrap(), dimensions.1.parse().unwrap());
+        let mut encoder = png::Encoder::new(std::fs::File::create(png_path).unwrap(), width, height);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(lines.next().unwrap()).unwrap();
+        writer.finish().unwrap();
+    }
+
+    #[test]
+    #[ignore = "needs PDF_WORKSTATION_OCR_SETUP_ROOT pointing at a scripts/setup-ocr.ps1 output root"]
+    fn real_engine_creates_searchable_copies_that_pdfium_extracts() {
+        let Some(setup) = crate::ocr_test_support::require_local_setup("real_engine_creates_searchable_copies_that_pdfium_extracts") else { return; };
+        let _serial = crate::ocr_process::test_lock();
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let runner = OcrProcessRunner::new(
+            setup.root.join("engine/bin/tesseract.exe"),
+            setup.root.join("engine/tessdata"),
+            setup.engine,
+        ).unwrap();
+        let coordinator = SearchableOcrCoordinator::new(service.clone(), runner);
+        let folder = tempfile::tempdir().unwrap();
+        let png_path = folder.path().join("known-text.png");
+        smoke_png(&setup.smoke_pnm(), &png_path);
+        let scan = folder.path().join("known-text-scan.pdf");
+        crate::image_pdf::prepare_and_write(
+            &png_path,
+            &scan,
+            crate::image_pdf::ImagePdfOptions {
+                page_size: crate::image_pdf::ImagePdfPageSize::Letter,
+                orientation: crate::image_pdf::ImagePdfOrientation::Landscape,
+                margin_points: 24.0,
+            },
+            |_| Ok(()),
+        ).unwrap();
+        let cases = [
+            ("known-text-scan", scan, vec!["Receipt", "#A-17:", "Coffee", "&", "Tea,", "$12.50.", "Mixed", "case:", "3rd", "Avenue;", "ready."]),
+            ("repo-fixture", root.join("tests/fixtures/reportlab-plain-fields.pdf"), vec!["Independent", "AcroForm", "compatibility", "fixture"]),
+        ];
+        for (name, source, expected) in cases {
+            let opened = tauri::async_runtime::block_on(service.open(source)).unwrap();
+            let request = opened.ocr_request(0);
+            let output = folder.path().join(format!("{name}-searchable.pdf"));
+            tauri::async_runtime::block_on(coordinator.create(request.document_id, request.revision, 1, output.clone(), OcrCancellation::default()))
+                .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+            let reopened = tauri::async_runtime::block_on(service.open(output)).unwrap();
+            let reopened_request = reopened.ocr_request(0);
+            let text = tauri::async_runtime::block_on(service.text(reopened_request.document_id, 0, reopened_request.revision)).unwrap();
+            eprintln!("{name}: PDFium extracted {text:?}");
+            let extracted = text.split_whitespace().collect::<std::collections::HashSet<_>>();
+            for word in expected {
+                assert!(extracted.contains(word), "{name}: PDFium text {text:?} lacks {word:?}");
+            }
+            tauri::async_runtime::block_on(service.close(request.document_id)).unwrap();
+            tauri::async_runtime::block_on(service.close(reopened_request.document_id)).unwrap();
+        }
+    }
+}

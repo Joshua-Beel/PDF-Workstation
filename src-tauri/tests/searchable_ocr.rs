@@ -264,16 +264,51 @@ fn forged_pages_cannot_produce_invalid_display_geometry() {
     };
     assert!(map_words_to_display(&outside, 100.0, 100.0).is_err());
     let inside = OcrWord { left: 0, ..word };
-    let page = |word: OcrWord| ParsedTsvPage { raster_width: 10, raster_height: 10, words: vec![word], extracted_text: "A".into() };
+    let page = |word: OcrWord| ParsedTsvPage { raster_width: 100, raster_height: 100, words: vec![word], extracted_text: "A".into() };
     assert!(map_words_to_display(&page(inside.clone()), 100.0, 100.0).is_ok());
     for bad in [
         OcrWord { line_height: 0, ..inside.clone() },
-        OcrWord { top: 2, height: 1, line_top: 0, line_height: 2, ..inside.clone() },
-        OcrWord { top: 0, line_top: 1, line_height: 3, ..inside.clone() },
-        OcrWord { line_top: 5, line_height: 6, top: 5, ..inside.clone() },
+        OcrWord { top: 20, height: 1, line_top: 0, line_height: 2, ..inside.clone() },
+        OcrWord { top: 0, line_top: 12, line_height: 3, ..inside.clone() },
+        OcrWord { line_top: 95, line_height: 6, top: 95, ..inside.clone() },
         OcrWord { line_top: u32::MAX, line_height: 2, ..inside.clone() },
         OcrWord { text: "a\u{200b}".into(), ..inside.clone() },
     ] {
         assert!(map_words_to_display(&page(bad), 100.0, 100.0).is_err());
     }
+}
+
+#[test]
+fn tolerates_rounding_overhang_seen_in_real_engine_output() {
+    let tsv = document(&[
+        "1\t1\t0\t0\t0\t0\t0\t0\t1000\t500\t-1\t",
+        "2\t1\t1\t0\t0\t0\t10\t10\t400\t100\t-1\t",
+        "3\t1\t1\t1\t0\t0\t10\t10\t400\t100\t-1\t",
+        "4\t1\t1\t1\t1\t0\t10\t14\t400\t100\t-1\t",
+        "5\t1\t1\t1\t1\t1\t10\t17\t100\t96\t90\tHello",
+        "5\t1\t1\t1\t1\t2\t120\t14\t100\t104\t90\tthere",
+    ]);
+    let parsed = parse_tesseract_tsv(tsv.as_bytes(), 1000, 500).unwrap();
+    assert_eq!(parsed.extracted_text, "Hello there");
+    let mapped = map_words_to_display(&parsed, 1000.0, 500.0).unwrap();
+    assert_eq!(mapped.len(), 2);
+}
+
+#[test]
+fn still_refuses_line_and_word_boxes_far_outside_their_parents() {
+    let far_line = document(&[
+        "1\t1\t0\t0\t0\t0\t0\t0\t1000\t500\t-1\t",
+        "2\t1\t1\t0\t0\t0\t10\t10\t400\t100\t-1\t",
+        "3\t1\t1\t1\t0\t0\t10\t10\t400\t100\t-1\t",
+        "4\t1\t1\t1\t1\t0\t10\t19\t400\t100\t-1\t",
+    ]);
+    assert!(parse_tesseract_tsv(far_line.as_bytes(), 1000, 500).is_err());
+    let rows = [
+        "1\t1\t0\t0\t0\t0\t0\t0\t1000\t500\t-1\t",
+        "2\t1\t1\t0\t0\t0\t0\t0\t1000\t500\t-1\t",
+        "3\t1\t1\t1\t0\t0\t0\t0\t1000\t500\t-1\t",
+        "4\t1\t1\t1\t1\t0\t0\t100\t400\t20\t-1\t",
+        "5\t1\t1\t1\t1\t1\t0\t100\t10\t29\t90\tA",
+    ];
+    assert!(parse_tesseract_tsv(document(&rows).as_bytes(), 1000, 500).is_err());
 }
