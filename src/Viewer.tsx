@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { renderPage, retryPdfEngine, type Annotation, type CommentRect } from './bridge';
 import { clampPage, currentPageAt, fitPageScale, maxPageWidth, pageLayout, scaleAnchoredTop, visiblePageRange, type DocumentInfo } from './model';
 import type { FitMode } from './preferences';
@@ -9,35 +9,68 @@ import type { TextHighlightSelection, TextHighlightSelectionSource } from './tex
 import type { ActiveSearch } from './SearchPanel';
 import styles from './Workspace.module.css';
 
-function Page({ id, index, width, height, scale, revision, selectable, search, annotations, commentMode, highlightMode, redactionMode, redactions, annotationAvailable, annotationInteractive, onCommentCreate, onHighlightCreate, onRedactionCreate, onAnnotationSelect, onTextSelection }: { id: number; index: number; width: number; height: number; scale: number; revision: number; selectable: boolean; search?: ActiveSearch; annotations: Annotation[]; commentMode: boolean; highlightMode: boolean; redactionMode: boolean; redactions: CommentRect[]; annotationAvailable: boolean; annotationInteractive: boolean; onCommentCreate: (page: number, rect: CommentRect) => void; onHighlightCreate: (page: number, rect: CommentRect) => void; onRedactionCreate: (page: number, rect: CommentRect) => void; onAnnotationSelect: (annotation: Annotation) => void; onTextSelection?: (selection: TextHighlightSelection | null, source: TextHighlightSelectionSource) => void }) {
+const NO_ANNOTATIONS: Annotation[] = [];
+const NO_RECTS: CommentRect[] = [];
+const noop = () => {};
+
+const Page = memo(function Page({ id, index, width, height, scale, revision, selectable, search, annotations, commentMode, highlightMode, redactionMode, redactions, annotationAvailable, annotationInteractive, onCommentCreate, onHighlightCreate, onRedactionCreate, onAnnotationSelect, onTextSelection }: { id: number; index: number; width: number; height: number; scale: number; revision: number; selectable: boolean; search?: ActiveSearch; annotations: Annotation[]; commentMode: boolean; highlightMode: boolean; redactionMode: boolean; redactions: CommentRect[]; annotationAvailable: boolean; annotationInteractive: boolean; onCommentCreate: (page: number, rect: CommentRect) => void; onHighlightCreate: (page: number, rect: CommentRect) => void; onRedactionCreate: (page: number, rect: CommentRect) => void; onAnnotationSelect: (annotation: Annotation) => void; onTextSelection?: (selection: TextHighlightSelection | null, source: TextHighlightSelectionSource) => void }) {
   const image = useRef<HTMLImageElement>(null);
   const [url, setUrl] = useState('');
   const [error, setError] = useState('');
   const [imageReady, setImageReady] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const shown = useRef({ url: '', revision });
   useEffect(() => {
     let disposed = false;
-    let objectUrl = '';
-    setUrl(''); setError(''); setImageReady(false);
+    setError('');
+    if (shown.current.revision !== revision) { shown.current = { url: shown.current.url, revision }; setUrl(''); setImageReady(false); }
     const timer = window.setTimeout(() => {
       renderPage(id, index, Math.min(3000, Math.round(width * scale * window.devicePixelRatio))).then(result => {
-        objectUrl = result;
-        if (disposed) URL.revokeObjectURL(result); else setUrl(result);
-      }).catch(e => { if (!disposed) setError(String(e)); });
+        if (disposed) { URL.revokeObjectURL(result); return; }
+        const previous = shown.current.url;
+        shown.current = { url: result, revision };
+        setUrl(result);
+        if (previous) URL.revokeObjectURL(previous);
+      }).catch(e => {
+        if (disposed) return;
+        const previous = shown.current.url;
+        shown.current = { url: '', revision };
+        setUrl(''); setImageReady(false); setError(String(e));
+        if (previous) URL.revokeObjectURL(previous);
+      });
     }, 35);
-    return () => { disposed = true; clearTimeout(timer); if (objectUrl) URL.revokeObjectURL(objectUrl); };
+    return () => { disposed = true; clearTimeout(timer); };
   }, [id, index, width, scale, revision, attempt]);
+  useEffect(() => () => { if (shown.current.url) URL.revokeObjectURL(shown.current.url); }, []);
   const tryAgain = () => { void retryPdfEngine(id).catch(() => undefined).finally(() => setAttempt(value => value + 1)); };
   return <div className={styles.paper} style={{ width: width * scale, height: height * scale }} aria-label={`Page ${index + 1}`}>
     {url ? <><img ref={image} src={url} alt={`Page ${index + 1}`} draggable={false} onLoad={() => setImageReady(true)} /><TextLayer id={id} page={index} revision={revision} enabled={selectable} imageReady={imageReady} pageWidth={width * scale} pageHeight={height * scale} search={search} onTextSelection={onTextSelection} />{imageReady && <CommentLayer page={index} pageWidth={width} pageHeight={height} annotations={annotations} creatingComment={commentMode && annotationAvailable} creatingHighlight={highlightMode && annotationAvailable} creatingRedaction={redactionMode} redactions={redactions} interactive={annotationInteractive && annotationAvailable} onCommentCreate={onCommentCreate} onHighlightCreate={onHighlightCreate} onRedactionCreate={onRedactionCreate} onSelect={onAnnotationSelect} imageBounds={() => image.current?.getBoundingClientRect() ?? null} layoutKey={`${revision}:${width * scale}:${height * scale}`} />}</> : <div className={styles.pageLoading}>{error ? <><span role="alert">{error}</span> <button type="button" aria-label={`Try again to render page ${index + 1}`} onClick={tryAgain}>Try again</button></> : `Rendering page ${index + 1}…`}</div>}
   </div>;
-}
+});
 
-export default function Viewer({ document, zoom, fit, target, onPage, onView, hand, search, annotations = [], commentMode = false, highlightMode = false, redactionPage = null, redactions = [], annotationAvailable = false, annotationInteractive = false, onCommentCreate = () => {}, onHighlightCreate = () => {}, onRedactionCreate = () => {}, onAnnotationSelect = () => {}, onTextSelection }: { document: DocumentInfo; zoom: number; fit: FitMode; target: { page: number; token: number; destination?: BookmarkDestination | null }; onPage: (page: number) => void; onView?: (fit: FitMode, zoom: number) => void; hand: boolean; search?: ActiveSearch | null; annotations?: Annotation[]; commentMode?: boolean; highlightMode?: boolean; redactionPage?: number | null; redactions?: CommentRect[]; annotationAvailable?: boolean; annotationInteractive?: boolean; onCommentCreate?: (page: number, rect: CommentRect) => void; onHighlightCreate?: (page: number, rect: CommentRect) => void; onRedactionCreate?: (page: number, rect: CommentRect) => void; onAnnotationSelect?: (annotation: Annotation) => void; onTextSelection?: (selection: TextHighlightSelection | null, source: TextHighlightSelectionSource) => void }) {
+export default function Viewer({ document, zoom, fit, target, onPage, onView, hand, search, annotations = NO_ANNOTATIONS, commentMode = false, highlightMode = false, redactionPage = null, redactions = NO_RECTS, annotationAvailable = false, annotationInteractive = false, onCommentCreate = noop, onHighlightCreate = noop, onRedactionCreate = noop, onAnnotationSelect = noop, onTextSelection }: { document: DocumentInfo; zoom: number; fit: FitMode; target: { page: number; token: number; destination?: BookmarkDestination | null }; onPage: (page: number) => void; onView?: (fit: FitMode, zoom: number) => void; hand: boolean; search?: ActiveSearch | null; annotations?: Annotation[]; commentMode?: boolean; highlightMode?: boolean; redactionPage?: number | null; redactions?: CommentRect[]; annotationAvailable?: boolean; annotationInteractive?: boolean; onCommentCreate?: (page: number, rect: CommentRect) => void; onHighlightCreate?: (page: number, rect: CommentRect) => void; onRedactionCreate?: (page: number, rect: CommentRect) => void; onAnnotationSelect?: (annotation: Annotation) => void; onTextSelection?: (selection: TextHighlightSelection | null, source: TextHighlightSelectionSource) => void }) {
   const viewport = useRef<HTMLDivElement>(null);
   const [bounds, setBounds] = useState({ width: 900, height: 800 });
   const [top, setTop] = useState(0);
   const drag = useRef<{ x: number; y: number; top: number; left: number } | null>(null);
+  const latest = useRef({ onCommentCreate, onHighlightCreate, onRedactionCreate, onAnnotationSelect, onTextSelection });
+  latest.current = { onCommentCreate, onHighlightCreate, onRedactionCreate, onAnnotationSelect, onTextSelection };
+  const stable = useMemo(() => ({
+    onCommentCreate: (page: number, rect: CommentRect) => latest.current.onCommentCreate(page, rect),
+    onHighlightCreate: (page: number, rect: CommentRect) => latest.current.onHighlightCreate(page, rect),
+    onRedactionCreate: (page: number, rect: CommentRect) => latest.current.onRedactionCreate(page, rect),
+    onAnnotationSelect: (annotation: Annotation) => latest.current.onAnnotationSelect(annotation),
+    onTextSelection: (selection: TextHighlightSelection | null, source: TextHighlightSelectionSource) => latest.current.onTextSelection?.(selection, source)
+  }), []);
+  const pageAnnotations = useRef(new Map<number, Annotation[]>());
+  const annotationsFor = (index: number) => {
+    const next = annotations.filter(annotation => annotation.page === index && annotation.rect);
+    const previous = pageAnnotations.current.get(index) ?? NO_ANNOTATIONS;
+    if (previous.length === next.length && previous.every((annotation, position) => annotation === next[position])) return previous;
+    const chosen = next.length ? next : NO_ANNOTATIONS;
+    pageAnnotations.current.set(index, chosen);
+    return chosen;
+  };
   useEffect(() => {
     const element = viewport.current!;
     const observer = new ResizeObserver(([entry]) => setBounds({ width: entry.contentRect.width, height: entry.contentRect.height }));
@@ -93,7 +126,7 @@ export default function Viewer({ document, zoom, fit, target, onPage, onView, ha
   }} onPointerUp={() => { drag.current = null; }} onLostPointerCapture={() => { drag.current = null; }}>
     <div className={styles.pageStack} style={{ height: layout.height, minWidth: layout.maxWidth * scale + 144 }}>
       {visible.map(index => <div key={`${document.id}-${index}`} className={styles.pagePosition} style={{ top: layout.offsets[index] }}>
-        <Page id={document.id} index={index} {...document.pages[index]} scale={scale} revision={document.revision} selectable={!hand && !commentMode && !highlightMode && redactionPage === null} search={search?.documentId === document.id && search.revision === document.revision && search.pages.includes(index) ? search : undefined} annotations={annotations.filter(annotation => annotation.page === index && annotation.rect)} commentMode={commentMode} highlightMode={highlightMode} redactionMode={redactionPage === index} redactions={redactionPage === index ? redactions : []} annotationAvailable={annotationAvailable} annotationInteractive={annotationInteractive} onCommentCreate={onCommentCreate} onHighlightCreate={onHighlightCreate} onRedactionCreate={onRedactionCreate} onAnnotationSelect={onAnnotationSelect} onTextSelection={onTextSelection} />
+        <Page id={document.id} index={index} {...document.pages[index]} scale={scale} revision={document.revision} selectable={!hand && !commentMode && !highlightMode && redactionPage === null} search={search?.documentId === document.id && search.revision === document.revision && search.pages.includes(index) ? search : undefined} annotations={annotationsFor(index)} commentMode={commentMode} highlightMode={highlightMode} redactionMode={redactionPage === index} redactions={redactionPage === index ? redactions : NO_RECTS} annotationAvailable={annotationAvailable} annotationInteractive={annotationInteractive} onCommentCreate={stable.onCommentCreate} onHighlightCreate={stable.onHighlightCreate} onRedactionCreate={stable.onRedactionCreate} onAnnotationSelect={stable.onAnnotationSelect} onTextSelection={onTextSelection ? stable.onTextSelection : undefined} />
       </div>)}
     </div>
   </div>;
