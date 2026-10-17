@@ -11,9 +11,8 @@
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -135,7 +134,6 @@ impl HelperLaunch {
 pub(crate) struct HelperConfig {
     pub(crate) launch: HelperLaunch,
     pub(crate) limits: JobLimits,
-    pub(crate) library: PathBuf,
     pub(crate) deadlines: Deadlines,
     pub(crate) restart: RestartPolicy,
 }
@@ -143,14 +141,13 @@ pub(crate) struct HelperConfig {
 impl HelperConfig {
     /// The app's helper: this exe, hardened job, 1 GiB cap, production deadlines and restart policy. In
     /// the test binary the helper is the test entry instead (the harness cannot take the mode flag).
-    pub(crate) fn production(library: PathBuf) -> Self {
+    pub(crate) fn production() -> Self {
         Self {
             #[cfg(not(test))]
             launch: HelperLaunch::ThisExe,
             #[cfg(test)]
             launch: HelperLaunch::TestEntry { mode: "serve".into() },
             limits: JobLimits::hardened_single_process(crate::open_limits::HELPER_MEMORY_LIMIT),
-            library,
             deadlines: Deadlines::PRODUCTION,
             restart: RestartPolicy::PRODUCTION,
         }
@@ -234,6 +231,7 @@ struct Helper {
 
 /// What was left of a discarded helper.
 struct Discarded {
+    /// How the helper exited, if it exited on its own; `None` when the app ended it.
     exit: Option<ExitKind>,
     io_cancelled: bool,
     stderr: Vec<u8>,
@@ -245,7 +243,7 @@ impl Helper {
         let suspended = spawn_suspended::<ChildSystemError>(HELPER_LABEL, &config.limits, || config.launch.command(), || Ok(())).map_err(start)?;
         let RunningChild { child, pipes } = suspended.resume().map_err(start)?;
         let reply_limit = Arc::new(AtomicUsize::new(MAX_CONTROL_REPLY));
-        let (event_sender, events) = mpsc::channel();
+        let (event_sender, events) = mpsc::sync_channel(1);
         let (requests, request_receiver) = mpsc::channel::<Vec<u8>>();
         let workers: [Arc<IoWorker>; 3] = Default::default();
         let stderr = Arc::new(Mutex::new(Vec::new()));
@@ -271,16 +269,30 @@ impl Helper {
         if header != (Header { kind: kind::HELLO, sequence: 0 }) || pid != self.child.process_id() {
             return Err(HelperFailure::Malformed("the helper's hello does not match the process".into()));
         }
+        self.reply_limit.store(0, Ordering::Release);
         Ok(())
     }
 
     /// Sends one request frame and returns the matching reply body (its kind or `ERROR`, same sequence).
+    ///
+    /// Between requests the reply limit is 0, so a frame the helper writes while nothing is pending is
+    /// refused by the reader before anything is allocated, and at most one event waits in the bounded queue;
+    /// the next exchange finds it and ends the helper.
     fn exchange(&mut self, frame: Vec<u8>, request: Header, reply_limit: usize, deadline: Instant) -> Result<(Header, Vec<u8>), HelperFailure> {
+        match self.events.try_recv() {
+            Ok(Event::Frame(_) | Event::BadLength(_) | Event::NoSync) => {
+                return Err(HelperFailure::Malformed("the helper wrote while no request was pending".into()));
+            }
+            Ok(event) => return Err(self.ended(event)),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
+        }
         self.reply_limit.store(reply_limit, Ordering::Release);
         if let Some(requests) = &self.requests {
             let _ = requests.send(frame);
         }
-        let body = self.next_frame(deadline)?;
+        let reply = self.next_frame(deadline);
+        self.reply_limit.store(0, Ordering::Release);
+        let body = reply?;
         let (header, _) = parse_body(&body).map_err(|error| HelperFailure::Malformed(error.0))?;
         if header.sequence != request.sequence {
             return Err(HelperFailure::Malformed(format!("reply to request {} while {} was in flight", header.sequence, request.sequence)));
@@ -347,9 +359,11 @@ impl Helper {
     /// their blocked I/O is cancelled (recorded as `io_cancelled`). Threads that still have not finished are
     /// left detached.
     fn discard(mut self, exit_code: u32) -> Discarded {
+        let exited_itself = self.child.wait_for_exit(Duration::ZERO);
         let _ = self.child.terminate_job_and_reap(exit_code);
-        let exit = self.child.exit_code().ok().map(classify_exit_code);
+        let exit = if exited_itself { self.child.exit_code().ok().map(classify_exit_code) } else { None };
         self.requests = None;
+        drop(std::mem::replace(&mut self.events, mpsc::sync_channel(0).1));
         let workers = [&*self.workers[0], &*self.workers[1], &*self.workers[2]];
         finish_io(&workers, DISCARD_DRAIN_GRACE);
         let io_cancelled = workers.iter().any(|worker| worker.was_cancelled());
@@ -363,7 +377,7 @@ impl Helper {
     }
 }
 
-fn write_requests(io: &IoWorker, mut stdin: File, requests: Receiver<Vec<u8>>, events: Sender<Event>) {
+fn write_requests(io: &IoWorker, mut stdin: File, requests: Receiver<Vec<u8>>, events: SyncSender<Event>) {
     for frame in requests {
         if io.should_stop() {
             io.mark_cancelled();
@@ -379,7 +393,7 @@ fn write_requests(io: &IoWorker, mut stdin: File, requests: Receiver<Vec<u8>>, e
     }
 }
 
-fn read_replies(io: &IoWorker, mut stdout: File, banner_allowance: usize, limit: Arc<AtomicUsize>, events: Sender<Event>) {
+fn read_replies(io: &IoWorker, mut stdout: File, banner_allowance: usize, limit: Arc<AtomicUsize>, events: SyncSender<Event>) {
     let finish = |event: Event| {
         if io.should_stop() {
             io.mark_cancelled();
@@ -473,7 +487,11 @@ pub(crate) struct SupervisorStats {
     pub(crate) spawns: u64,
     pub(crate) stopped: bool,
     pub(crate) last_failure: Option<HelperFailure>,
+    /// The last discarded helper's own exit; `None` when the app ended it (see `last_ended_by_app`).
     pub(crate) last_exit: Option<ExitKind>,
+    /// The app ended the last discarded helper (deadline, limit, malformed reply, shutdown); the reason
+    /// is `last_failure`.
+    pub(crate) last_ended_by_app: bool,
     pub(crate) last_io_cancelled: bool,
     pub(crate) last_stderr: Vec<u8>,
     pub(crate) process_id: Option<u32>,
@@ -537,8 +555,7 @@ impl Supervisor {
         let deadline = started + self.config.deadlines.startup;
         let init = helper.hello(deadline).and_then(|()| {
             let sequence = self.sequence();
-            let mut frame = FrameWriter::new(kind::INIT, sequence);
-            put_library(&mut frame, &self.config.library.to_string_lossy());
+            let frame = FrameWriter::new(kind::INIT, sequence);
             let (header, body) = helper.exchange(frame.finish(), Header { kind: kind::INIT, sequence }, MAX_CONTROL_REPLY, deadline)?;
             let (_, mut reader) = parse_body(&body).map_err(|error| HelperFailure::Malformed(error.0))?;
             if header.kind == kind::ERROR {
@@ -567,6 +584,7 @@ impl Supervisor {
     fn record(&mut self, failure: HelperFailure, helper: Option<Helper>) -> HelperFailure {
         if let Some(helper) = helper {
             let discarded = helper.discard(EXIT_RESOURCE_LIMIT);
+            self.stats.last_ended_by_app = discarded.exit.is_none();
             self.stats.last_exit = discarded.exit;
             self.stats.last_io_cancelled = discarded.io_cancelled;
             self.stats.last_stderr = discarded.stderr;
@@ -579,6 +597,11 @@ impl Supervisor {
     fn fail(&mut self, failure: HelperFailure) -> CallError {
         let helper = self.helper.take();
         CallError::Failure(self.record(failure, helper))
+    }
+
+    /// Ends the running helper for a reply that decoded but contradicts the app's own state.
+    pub(crate) fn fail_malformed(&mut self, reason: &str) -> CallError {
+        self.fail(HelperFailure::Malformed(reason.into()))
     }
 
     /// A running helper, starting one if needed: immediately for the first restart in the window, after a

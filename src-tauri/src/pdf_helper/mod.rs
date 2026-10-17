@@ -8,6 +8,12 @@
 //! The helper is off by default. [`SelectedEngine`] chooses it only when [`helper_enabled`] is true: in a
 //! debug build with the environment variable [`HELPER_SETTING_VARIABLE`] set to `1`. Release builds compile
 //! the check to `false`, and no command or webview request can change it.
+//!
+//! The helper is a crash and memory boundary, not a privilege sandbox: it runs with the user's full token,
+//! at the same integrity level, with file and network access. Code running in it can do what the user can.
+
+// Release builds have no helper mode (SM7 M1): its code stays compiled but is unreachable there.
+#![cfg_attr(not(debug_assertions), allow(dead_code))]
 
 #[cfg(windows)]
 mod protocol;
@@ -44,6 +50,39 @@ pub(crate) fn helper_enabled() -> bool {
     {
         false
     }
+}
+
+/// Whether this build has a helper mode at all: debug builds only, until the helper is enabled for release
+/// (SM7 M1). `main` gates its check on the same configuration, so a release build ignores
+/// `--pdf-engine-helper` and starts the app normally.
+pub(crate) const HELPER_MODE_AVAILABLE: bool = cfg!(all(debug_assertions, windows));
+
+/// Whether `main` must run the helper instead of the app: helper mode exists in this build and the mode
+/// flag is the one and only argument.
+#[cfg(windows)]
+#[cfg_attr(not(any(test, debug_assertions)), allow(dead_code))]
+pub(crate) fn helper_mode_requested(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> bool {
+    HELPER_MODE_AVAILABLE && is_helper_invocation(arguments)
+}
+
+/// Where the bundled PDFium sits below the resource folder, as `main` and `tauri.conf.json` have it.
+#[cfg(windows)]
+pub(crate) const PDFIUM_RELATIVE_PATH: &str = "resources/pdfium/bin/pdfium.dll";
+
+/// The PDFium library the helper loads. The helper works this out itself and never takes a path from a
+/// request: the bundled DLL below this exe's folder, which is the app's resource folder on Windows, so it
+/// is the same file the app would load. Test builds use the source tree's copy.
+#[cfg(windows)]
+pub(crate) fn helper_library() -> Result<PathBuf, String> {
+    #[cfg(test)]
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    #[cfg(not(test))]
+    let root = std::env::current_exe()
+        .map_err(|error| format!("The PDF engine helper could not locate itself: {error}"))?
+        .parent()
+        .ok_or("The PDF engine helper could not locate its folder.")?
+        .to_path_buf();
+    Ok(root.join(PDFIUM_RELATIVE_PATH))
 }
 
 /// Whether this process was started as the helper: the mode flag is the one and only argument.
@@ -95,7 +134,11 @@ impl SelectedEngine {
     pub(crate) fn bind(library: PathBuf) -> Result<Self, String> {
         #[cfg(windows)]
         if helper_enabled() {
-            return RemotePdfEngine::production(library).map(Self::Remote);
+            let same = |path: &std::path::Path| std::fs::canonicalize(path).ok();
+            if same(&helper_library()?).is_none() || same(&helper_library()?) != same(&library) {
+                return Err("PDF engine could not start: the helper would load a different PDFium library than the app.".into());
+            }
+            return RemotePdfEngine::production().map(Self::Remote);
         }
         InProcessEngine::bind(library).map(Self::InProcess)
     }

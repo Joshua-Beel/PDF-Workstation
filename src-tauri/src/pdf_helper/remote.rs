@@ -8,9 +8,8 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
-use std::path::PathBuf;
 
 use super::protocol::*;
 use super::supervisor::{CallError, HelperConfig, HelperFailure, Supervisor};
@@ -25,16 +24,18 @@ const MAX_DEATHS: u8 = 2;
 
 pub(crate) struct RemotePdfEngine {
     supervisor: RefCell<Supervisor>,
+    /// Handles loaded in the running helper generation: a handle the helper gives out twice is refused.
+    live: RefCell<(u64, HashSet<u32>)>,
 }
 
 impl RemotePdfEngine {
     pub(crate) fn start(config: HelperConfig) -> Result<Self, String> {
-        Supervisor::start(config).map(|supervisor| Self { supervisor: RefCell::new(supervisor) }).map_err(|failure| failure.message())
+        Supervisor::start(config).map(|supervisor| Self { supervisor: RefCell::new(supervisor), live: RefCell::new((0, HashSet::new())) }).map_err(|failure| failure.message())
     }
 
     /// The app's helper (see [`HelperConfig::production`]).
-    pub(crate) fn production(library: PathBuf) -> Result<Self, String> {
-        Self::start(HelperConfig::production(library))
+    pub(crate) fn production() -> Result<Self, String> {
+        Self::start(HelperConfig::production())
     }
 
     /// Lets a crash-looped engine start helpers again (the engine-stopped state's Retry).
@@ -61,6 +62,13 @@ impl RemotePdfEngine {
         let capacity = source.len().saturating_add(password.map_or(0, str::len) + 16);
         let loaded = supervisor.call(kind::LOAD, capacity, |writer| put_load(writer, password, source), MAX_CONTROL_REPLY, deadline, class::LOAD, get_loaded)?;
         let generation = supervisor.running_generation().ok_or(CallError::Failure(HelperFailure::Stopped))?;
+        let mut live = self.live.borrow_mut();
+        if live.0 != generation {
+            *live = (generation, HashSet::new());
+        }
+        if !live.1.insert(loaded.handle) {
+            return Err(supervisor.fail_malformed("the helper gave two documents the same handle"));
+        }
         Ok((generation, loaded))
     }
 
@@ -414,6 +422,9 @@ impl Drop for RemoteDocument<'_> {
         let Ok(mut supervisor) = self.engine.supervisor.try_borrow_mut() else { return };
         if supervisor.running_generation() != Some(generation) {
             return;
+        }
+        if let Ok(mut live) = self.engine.live.try_borrow_mut() {
+            live.1.remove(&handle);
         }
         let deadline = supervisor.deadlines().close;
         let _ = supervisor.call_running(kind::CLOSE, 4, |writer| writer.u32(handle), MAX_CONTROL_REPLY, deadline, class::ONLY_GENERAL, |_| Ok(()));

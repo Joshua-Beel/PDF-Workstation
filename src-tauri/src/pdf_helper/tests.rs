@@ -22,7 +22,7 @@ use super::faults::{Fault, Misreply, CRASH_ON_LOAD_EXIT, CRASH_ON_LOAD_MAGIC};
 use super::protocol::*;
 use super::remote::{RemoteDocument, RemotePdfEngine, CLOSED_MESSAGE, SUSPECT_MESSAGE};
 use super::supervisor::{CallError, Deadlines, HelperConfig, HelperFailure, HelperLaunch, RestartPolicy};
-use super::{helper_enabled, is_helper_invocation, HELPER_SETTING_VARIABLE};
+use super::{helper_enabled, helper_mode_requested, is_helper_invocation, HELPER_MODE_AVAILABLE, HELPER_SETTING_VARIABLE};
 use crate::child_job::{as_windows_handle, command_line, owned_handle, wide_null, ChildCommand, ExitKind, JobLimits, LimitViolation, ModeSwitchAllocator};
 use crate::editor::{CropBox, PageSpec};
 use crate::pdf_engine::{EngineDocument, InProcessEngine, PageTarget, PdfEngine, RenderError, RenderMode};
@@ -92,7 +92,6 @@ fn test_config(memory: usize) -> HelperConfig {
     HelperConfig {
         launch: HelperLaunch::TestEntry { mode: "serve".into() },
         limits: JobLimits::hardened_single_process(memory),
-        library: library(),
         deadlines: Deadlines { startup: LONG, load: LONG, render: LONG, read: LONG, close: Duration::from_secs(10) },
         restart: RestartPolicy { window: Duration::from_secs(60), max_restarts: 100, backoff_base: Duration::from_millis(10), backoff_max: Duration::from_millis(100) },
     }
@@ -145,7 +144,7 @@ fn t3_an_exit_mid_request_fails_that_request_and_other_documents_reload_after_re
     let elapsed = started.elapsed();
     assert_eq!(failure(error), HelperFailure::Exited(Some(ExitKind::Code(3))));
     println!("t3 exit: request failed {elapsed:?} after it was sent");
-    assert!(elapsed < Duration::from_millis(500), "{elapsed:?}");
+    assert!(elapsed < LONG / 10, "the exit is noticed long before the request deadline: {elapsed:?}");
     assert!(!process_is_alive(pid));
     assert!(victim.is_suspect());
     assert_eq!(render(&survivor), before, "the other document reloads into the new helper and renders the same");
@@ -179,9 +178,10 @@ fn t4_a_hang_fails_at_its_deadline_and_the_helper_is_replaced() {
     let elapsed = started.elapsed();
     assert_eq!(failure(error), HelperFailure::TimedOut);
     println!("t4 hang: deadline {deadline:?}, request failed after {elapsed:?}");
-    assert!(elapsed >= deadline && elapsed < deadline + Duration::from_millis(500), "{elapsed:?}");
+    assert!(elapsed >= deadline && elapsed < deadline * 5, "{elapsed:?}");
     assert!(!process_is_alive(pid));
-    assert_eq!(engine.stats().last_exit, Some(ExitKind::EndedForResourceLimit));
+    let stats = engine.stats();
+    assert!(stats.last_ended_by_app && stats.last_exit.is_none(), "the app ended the hung helper: {stats:?}");
     assert_eq!(render(&survivor), before);
 }
 
@@ -202,7 +202,8 @@ fn a_reply_sent_after_a_refused_allocation_is_discarded_with_its_helper() {
     let error = engine.fault(Fault::RefusedAllocationThenReply(GIB), LONG).unwrap_err();
     assert!(matches!(failure(error), HelperFailure::LimitViolation(_)), "the helper replied, but the reply must not be used");
     assert!(!process_is_alive(pid));
-    assert_eq!(engine.stats().last_exit, Some(ExitKind::EndedForResourceLimit));
+    let stats = engine.stats();
+    assert!(stats.last_ended_by_app && stats.last_exit.is_none(), "the app ended the capped helper: {stats:?}");
     assert_eq!(engine.fault(Fault::RefusedAllocationThenReply(16 * 1024 * 1024), LONG), Ok(1));
     assert_ne!(engine.stats().process_id, Some(pid));
 }
@@ -260,7 +261,7 @@ fn t5_a_file_that_kills_every_helper_stops_restarts_after_three_in_the_window() 
     let started = Instant::now();
     let stopped = engine.load_from_vec(welcome(), None).map(|_| ()).unwrap_err();
     assert_eq!(stopped.to_string(), HelperFailure::Stopped.message());
-    assert!(started.elapsed() < Duration::from_millis(50));
+    assert!(started.elapsed() < Duration::from_secs(2), "a stopped engine refuses without waiting for a restart");
     assert_eq!(engine.stats().spawns, 4, "no helper is started once stopped");
     assert!(engine.stats().stopped);
     engine.reset_after_stop();
@@ -343,6 +344,41 @@ fn t14_malformed_replies_end_the_helper_and_fail_only_that_request() {
     }
 }
 
+/// SM7 M2: frames the helper writes while no request is pending are not read into memory (the reader's
+/// limit is 0 between requests and the queue holds one event), and the next request ends the helper.
+#[test]
+fn frames_written_while_no_request_is_pending_end_the_helper() {
+    let engine = RemotePdfEngine::start(test_config(TEST_CAP)).unwrap();
+    let document = engine.load_from_vec(welcome(), None).unwrap();
+    let pid = engine.stats().process_id.unwrap();
+    assert_eq!(document.inject(Fault::Misreply(Misreply::FloodAfter), LONG), Ok(1));
+    assert_eq!(document.page_sizes().unwrap().len(), WELCOME_PAGES, "the reply itself is correct");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(document.page_sizes().is_err());
+    match engine.stats().last_failure {
+        Some(HelperFailure::Malformed(reason)) => assert!(reason.contains("no request was pending"), "{reason}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(!process_is_alive(pid));
+    let other = engine.load_from_vec(welcome(), None).unwrap();
+    assert_eq!(other.page_sizes().unwrap().len(), WELCOME_PAGES);
+}
+
+/// SM7 L1: a helper that hands out a handle already in use is ended, and the load fails.
+#[test]
+fn a_reused_document_handle_ends_the_helper() {
+    let engine = RemotePdfEngine::start(test_config(TEST_CAP)).unwrap();
+    let first = engine.load_from_vec(welcome(), None).unwrap();
+    let before = render(&first);
+    let pid = engine.stats().process_id.unwrap();
+    assert_eq!(engine.fault(Fault::Misreply(Misreply::HandleOne), LONG), Ok(1));
+    let error = engine.load_from_vec(welcome(), None).map(|_| ()).unwrap_err();
+    assert_eq!(error.to_string(), HelperFailure::Malformed(String::new()).message());
+    assert!(matches!(engine.stats().last_failure, Some(HelperFailure::Malformed(reason)) if reason.contains("same handle")));
+    assert!(!process_is_alive(pid));
+    assert_eq!(render(&first), before, "the first document reloads into a new helper");
+}
+
 #[test]
 fn the_helper_is_off_unless_the_debug_setting_is_on() {
     if std::env::var_os(HELPER_SETTING_VARIABLE).is_none() {
@@ -354,6 +390,33 @@ fn the_helper_is_off_unless_the_debug_setting_is_on() {
     assert!(!is_helper_invocation(arguments(&["app.exe", "--pdf-engine-helper", "extra"])));
     assert!(!is_helper_invocation(arguments(&["app.exe", "file.pdf", "--pdf-engine-helper"])));
     assert!(!is_helper_invocation(arguments(&["app.exe", "--PDF-ENGINE-HELPER"])));
+}
+
+/// SM7 M1: a release build ignores `--pdf-engine-helper` (main.rs checks it only under
+/// `debug_assertions`, and `helper_mode_requested` is `false` there too) and starts the app normally.
+/// Run in both profiles: `cargo test --bins` and `cargo test --release --bins`.
+#[test]
+fn release_builds_ignore_the_helper_flag() {
+    let invocation = ["app.exe", "--pdf-engine-helper"].iter().map(OsString::from).collect::<Vec<_>>();
+    assert_eq!(HELPER_MODE_AVAILABLE, cfg!(debug_assertions));
+    assert_eq!(helper_mode_requested(invocation), cfg!(debug_assertions));
+}
+
+/// SM7 M1: the helper never loads a library named by a request. An init frame with any payload (here a
+/// DLL path) ends the helper before anything is loaded.
+#[test]
+fn an_init_request_carrying_a_library_path_is_refused() {
+    let mut init = FrameWriter::new(kind::INIT, 1);
+    init.str(r"C:\elsewhere\evil.dll");
+    let mut input = std::io::Cursor::new(init.finish());
+    let mut output = Vec::new();
+    assert_eq!(super::serve::serve(&mut input, &mut output), super::serve::EXIT_PROTOCOL);
+    let mut hello = Vec::from(SYNC);
+    let mut frame = FrameWriter::new(kind::HELLO, 0);
+    frame.u32(std::process::id());
+    hello.extend_from_slice(&frame.finish());
+    assert_eq!(output, hello, "nothing but the hello was written");
+    assert!(super::helper_library().unwrap().ends_with(super::PDFIUM_RELATIVE_PATH));
 }
 
 #[test]

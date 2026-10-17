@@ -349,8 +349,8 @@ async fn fill_form_copy(app: tauri::AppHandle, service: State<'_, PdfService>, i
 }
 
 fn main() {
-    #[cfg(windows)]
-    if pdf_helper::is_helper_invocation(std::env::args_os()) {
+    #[cfg(all(debug_assertions, windows))]
+    if pdf_helper::helper_mode_requested(std::env::args_os()) {
         pdf_helper::run_helper_mode();
     }
     tauri::Builder::default().plugin(tauri_plugin_updater::Builder::new().build()).manage(update_commands::PendingUpdate::default()).setup(|app| {

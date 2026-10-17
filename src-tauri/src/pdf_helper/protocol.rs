@@ -54,7 +54,6 @@ const MAX_METADATA_ENTRIES: usize = 8;
 const MAX_METADATA_VALUE_BYTES: usize = 4 * 4096;
 const MAX_DIMENSION_GROUPS: usize = 128;
 const MAX_VERSION_BYTES: usize = 16;
-const MAX_LIBRARY_PATH_BYTES: usize = 32 * 1024;
 const MAX_PASSWORD_BYTES: usize = 64 * 1024;
 
 pub(crate) mod kind {
@@ -437,13 +436,6 @@ pub(crate) fn take_load(mut body: Vec<u8>) -> Result<(Option<String>, Vec<u8>), 
     Ok((password, body))
 }
 
-pub(crate) fn put_library(writer: &mut FrameWriter, library: &str) {
-    writer.str(library);
-}
-
-pub(crate) fn get_library(reader: &mut WireReader<'_>) -> Result<String, Malformed> {
-    reader.str(MAX_LIBRARY_PATH_BYTES)
-}
 
 pub(crate) fn put_form_fields(writer: &mut FrameWriter, fields: &[FormField]) {
     writer.count(fields.len());

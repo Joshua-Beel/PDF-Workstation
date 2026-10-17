@@ -57,9 +57,13 @@ pub(crate) enum Misreply {
     BumpFirstPayloadU32,
     /// Page sizes with the last page removed and the count reduced to match.
     DropLastPage,
+    /// A load reply that reuses handle 1 (the first document's).
+    HandleOne,
+    /// The correct reply, then unsolicited frames while no request is pending.
+    FloodAfter,
 }
 
-const MISREPLIES: [Misreply; 10] = [
+const MISREPLIES: [Misreply; 12] = [
     Misreply::OversizedLength,
     Misreply::WrongVersion,
     Misreply::WrongSequence,
@@ -70,6 +74,8 @@ const MISREPLIES: [Misreply; 10] = [
     Misreply::CorruptLastByte,
     Misreply::BumpFirstPayloadU32,
     Misreply::DropLastPage,
+    Misreply::HandleOne,
+    Misreply::FloodAfter,
 ];
 
 impl Misreply {
@@ -204,6 +210,21 @@ pub(crate) fn send_misreply(output: &mut impl Write, misreply: Misreply, mut fra
         Misreply::BumpFirstPayloadU32 => {
             let value = u32::from_le_bytes(frame[12..16].try_into().unwrap()).wrapping_add(1);
             frame[12..16].copy_from_slice(&value.to_le_bytes());
+        }
+        Misreply::HandleOne => frame[12..16].copy_from_slice(&1_u32.to_le_bytes()),
+        Misreply::FloodAfter => {
+            if output.write_all(&frame).and_then(|()| output.flush()).is_err() {
+                return false;
+            }
+            let mut stray = FrameWriter::new(kind::PAGE_SIZES, 0);
+            stray.raw(&vec![0; 60 * 1024]);
+            let stray = stray.finish();
+            for _ in 0..64 {
+                if output.write_all(&stray).and_then(|()| output.flush()).is_err() {
+                    break;
+                }
+            }
+            return true;
         }
         Misreply::DropLastPage => {
             let count = u32::from_le_bytes(frame[12..16].try_into().unwrap()) - 1;

@@ -1,12 +1,12 @@
 //! The helper's request loop: PDFium in this process, driven over stdin/stdout by the app.
 //!
 //! Runs only in the helper process, after `harden_job_child_process` and `arm_terminating_allocator`. It
-//! writes [`SYNC`] and a hello frame, binds PDFium from the path in the first (init) request, then answers
-//! one request at a time until stdin closes. A request that does not follow the protocol ends the helper.
+//! writes [`SYNC`] and a hello frame, binds the PDFium library it finds itself (`helper_library`) on the
+//! first (init) request, which carries no payload, then answers one request at a time until stdin closes. A
+//! request that does not follow the protocol ends the helper.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::PathBuf;
 
 use super::protocol::*;
 use crate::pdf_engine::{bgra_len, EngineDocument, InProcessDocument, InProcessEngine, LoadError, PdfEngine, ProbeError, RenderError, TextError};
@@ -65,12 +65,11 @@ pub(crate) fn serve(input: &mut impl Read, output: &mut impl Write) -> u32 {
         Ok(body) => body,
         Err(code) => return code,
     };
-    let Ok((Header { kind: kind::INIT, sequence }, mut reader)) = parse_body(&body) else { return EXIT_PROTOCOL };
-    let Ok(library) = get_library(&mut reader) else { return EXIT_PROTOCOL };
+    let Ok((Header { kind: kind::INIT, sequence }, reader)) = parse_body(&body) else { return EXIT_PROTOCOL };
     if reader.finish().is_err() {
         return EXIT_PROTOCOL;
     }
-    let engine = match InProcessEngine::bind(PathBuf::from(library)) {
+    let engine = match super::helper_library().and_then(InProcessEngine::bind) {
         Ok(engine) => engine,
         Err(message) => {
             send(output, Err((class::GENERAL, message)), sequence);
