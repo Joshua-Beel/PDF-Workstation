@@ -57,6 +57,8 @@ mod ocr_commands;
 mod ocr_build;
 #[cfg(all(test, windows))]
 mod ocr_test_support;
+#[cfg(all(test, windows))]
+mod viewer_perf;
 use service::{DocumentInfo, PdfService};
 use tauri::{Manager, State};
 
