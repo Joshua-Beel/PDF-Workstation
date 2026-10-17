@@ -23,14 +23,14 @@ Version 0.2.0 is the current published release, with a signed update package but
 - Drop to open (source build): drop one `.pdf` onto the window; native drag/drop remains unverified.
 - Pages sidebar (source build): renders only nearby rows, with keyboard navigation.
 - Page labels (source build): PDF page labels beside physical page numbers. [Guide](docs/tools/page-labels.md)
-- Bookmarks (source build): up to 1,000 nested bookmarks with destination zoom; no bookmark editing.
+- Bookmarks (source build): up to 1,000 nested bookmarks with destination zoom; no bookmark editing, and scroll and zoom feel in the running app unverified.
 - Passwords (source build): open, retry or cancel; passwords aren't saved and encrypted PDFs stay read-only. Verified in the signed installed app on controlled fixtures.
 - Document properties (source build): Ctrl+D shows metadata, sizes, permissions and signature count; signatures aren't validated.
 
 **[Text and search](docs/features.md#text-and-search)**
 - Page text (source build): view and copy the current page's embedded text.
 - On-page text selection (source build): select supported embedded text directly on the page.
-- Search (source build): Ctrl+F across embedded text, with case matching, excerpts and on-page highlights.
+- Search (source build): Ctrl+F across embedded text, with case matching, one excerpt per matching page (up to 500 pages) and on-page highlights where text geometry is supported.
 
 **[OCR](docs/features.md#ocr)** (source build; planned for the default installer from 0.3.0, not yet verified in an installed build)
 - Current-page OCR: recognize one page into a copyable dialog with a local English engine; accuracy and real-document use unverified.
@@ -43,7 +43,7 @@ Version 0.2.0 is the current published release, with a signed update package but
 - Organize pages: rotate, move, delete, extract; the source build adds Move to page, Split, Crop, Reset crop, Insert and Replace pages. [Guide](docs/tools/organize-pages.md)
 - Combine two PDFs into a new copy (source build).
 - Saving: undo/redo, then **Save a Copy**; the original is never overwritten.
-- Create a PDF from one or up to 32 PNG/JPEG images (source build). [Guide](docs/tools/create-pdf.md)
+- Create a PDF from one or up to 32 PNG/JPEG images (source build); installed-app and release behaviour unverified. [Guide](docs/tools/create-pdf.md)
 - Replace a strict full-page image in a new copy (source build); installed-app behaviour unverified.
 - Export the current page as PNG or JPEG at 72, 150 or 300 DPI (source build). [Guide](docs/tools/export-page-image.md)
 - Raster redaction of rectangles on one page into a fully rasterized new copy (source build). [Guide](docs/tools/redaction.md)
@@ -71,7 +71,7 @@ Version 0.2.0 is the current published release, with a signed update package but
 ## What's still missing
 
 - Not ready yet: general image conversion, arbitrary text and image editing, OCR in a published release (planned for 0.3.0), signatures, form preparation, content-preserving or multi-page redaction, replies, author identity, and foreign-annotation interchange.
-- Saving always writes a new copy; some page operations are blocked on signed, form, tagged or annotated files ([Organize Pages guide](docs/tools/organize-pages.md)).
+- Saving always writes a new copy; some page operations are blocked on signed, form, tagged, bookmarked or annotated files ([Organize Pages guide](docs/tools/organize-pages.md)).
 - Printing is unverified on physical paper and non-Microsoft drivers; more real-document testing is needed.
 - Per-tool limits: [Known limits](docs/features.md#known-limits). Priorities: [Known gaps](docs/gaps.md) and the [development roadmap](docs/development-roadmap.md).
 
@@ -130,7 +130,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 - PDF-engine helper step 4 review follow-ups: section handles always closed, viewer renders copied out, finite-value checks (SM5).
 - Flaky OCR child-process test fixed (SM4; test only).
 - PDF-engine helper step 4c: viewer renders at in-process speed, plus memory, real-file and performance checks (SM5; debug-only, off by default).
-- PDF-engine helper step 4b: **Try again** on a page that failed to render (SM5).
+- PDF-engine helper step 4b: **Try again** on a page that failed to render (SM5; source build).
 - PDF-engine helper step 4a: sources and bitmaps in app-owned shared sections (SM5; debug-only, off by default).
 
 Full history: [docs/changelog.md](docs/changelog.md)
