@@ -11,6 +11,7 @@ describe('push and pull request CI workflow', () => {
     expect(workflow.match(/permissions:/g)).toHaveLength(1);
     expect(workflow).not.toMatch(/secrets\.|environment:|id-token|:\s*write\b|GITHUB_TOKEN|github\.token/i);
     expect(workflow).toContain('persist-credentials: false');
+    expect(workflow, 'signed-artifact workflow tests read pinned commits from git history').toContain('        with:\n          fetch-depth: 0\n          persist-credentials: false\n');
     expect(workflow).toContain('runs-on: windows-latest');
     expect(workflow).toContain('timeout-minutes: 45');
   });

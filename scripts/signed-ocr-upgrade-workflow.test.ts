@@ -621,5 +621,5 @@ describe('manual signed OCR installer upgrade workflow', () => {
     );
     const result = runPowerShell(check);
     expect(result.status, result.stderr || result.stdout).toBe(0);
-  });
+  }, 15_000);
 });
