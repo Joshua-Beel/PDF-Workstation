@@ -26,8 +26,9 @@ pub(crate) const PROTOCOL_VERSION: u16 = 1;
 /// Written once by the helper before its first frame.
 pub(crate) const SYNC: [u8; 8] = *b"SM5PDFH1";
 pub(crate) const HEADER_LEN: usize = 8;
-/// Largest request: a load carries the source bytes (until sources move to shared sections).
-pub(crate) const MAX_REQUEST_FRAME: usize = crate::open_limits::MAX_OPEN_SOURCE_BYTES as usize + 1024 * 1024;
+/// Largest request. Sources and bitmaps travel in shared sections, so requests carry only small data (the
+/// largest is a form-value check with its field list).
+pub(crate) const MAX_REQUEST_FRAME: usize = 64 * 1024 * 1024;
 /// Replies that carry no document content: hello, init, load, close, sizes, flags, errors.
 pub(crate) const MAX_CONTROL_REPLY: usize = 64 * 1024;
 /// Replies that carry text or structured page data.
@@ -63,7 +64,9 @@ pub(crate) mod kind {
     pub(crate) const CLOSE: u16 = 4;
     pub(crate) const PAGE_SIZES: u16 = 5;
     pub(crate) const PLANNED_PAGE_SIZE: u16 = 6;
-    pub(crate) const VIEWER_PNG: u16 = 7;
+    /// Retired in step 4 (viewer PNGs are encoded in the app); never reuse the value.
+    #[allow(dead_code)]
+    pub(crate) const RETIRED_VIEWER_PNG: u16 = 7;
     pub(crate) const VISIBLE_TEXT: u16 = 8;
     pub(crate) const TEXT_GEOMETRY: u16 = 9;
     pub(crate) const TEXT_GEOMETRY_WITH_SOURCE: u16 = 10;
@@ -76,6 +79,8 @@ pub(crate) mod kind {
     pub(crate) const SOURCE_PAGE_SIZE: u16 = 17;
     pub(crate) const THUMBNAIL_CHECK: u16 = 18;
     pub(crate) const RENDER_BGRA: u16 = 19;
+    /// A viewer render in RGBA order into an app-owned section (step 4).
+    pub(crate) const RENDER_VIEWER_RGBA: u16 = 21;
     #[cfg(test)]
     pub(crate) const PAGE_LABELS: u16 = 20;
     #[cfg(test)]
@@ -175,14 +180,9 @@ impl FrameWriter {
         }
     }
     /// Bytes with no length prefix (the rest of the payload).
+    #[cfg(test)]
     pub(crate) fn raw(&mut self, value: &[u8]) {
         self.bytes.extend_from_slice(value);
-    }
-    /// Appends `count` zero bytes and returns them for the caller to fill (a bitmap rendered in place).
-    pub(crate) fn zeroed(&mut self, count: usize) -> &mut [u8] {
-        let start = self.bytes.len();
-        self.bytes.resize(start + count, 0);
-        &mut self.bytes[start..]
     }
     /// The finished frame. A body longer than `u32::MAX` gets the length `u32::MAX`, which every reader refuses.
     pub(crate) fn finish(mut self) -> Vec<u8> {
@@ -276,9 +276,6 @@ impl<'a> WireReader<'a> {
             1 => get(self).map(Some),
             other => Err(Malformed::new(format!("invalid option tag {other}"))),
         }
-    }
-    pub(crate) fn rest(&mut self) -> &'a [u8] {
-        std::mem::take(&mut self.bytes)
     }
     pub(crate) fn finish(self) -> Result<(), Malformed> {
         if self.bytes.is_empty() { Ok(()) } else { Err(Malformed::new(format!("{} trailing bytes", self.bytes.len()))) }
@@ -422,21 +419,21 @@ pub(crate) fn get_mode(reader: &mut WireReader<'_>) -> Result<RenderMode, Malfor
     }
 }
 
-pub(crate) fn put_load(writer: &mut FrameWriter, password: Option<&str>, bytes: &[u8]) {
+/// A load names the source by a read-only section handle (its value in the helper) and the source length.
+pub(crate) fn put_load(writer: &mut FrameWriter, password: Option<&str>, section: u64, len: usize) {
     writer.opt(password, |writer, password| writer.str(password));
-    writer.raw(bytes);
+    writer.u64(section);
+    writer.u64(len as u64);
 }
 
-/// Splits a load request body in place: the password, then the source bytes as the rest of the body
-/// (no second copy of the source).
-pub(crate) fn take_load(mut body: Vec<u8>) -> Result<(Option<String>, Vec<u8>), Malformed> {
-    let (password, offset) = {
-        let (_, mut reader) = parse_body(&body)?;
-        let password = reader.opt(|reader| reader.str(MAX_PASSWORD_BYTES))?;
-        (password, body.len() - reader.remaining())
-    };
-    body.drain(..offset);
-    Ok((password, body))
+pub(crate) fn get_load(reader: &mut WireReader<'_>) -> Result<(Option<String>, u64, usize), Malformed> {
+    let password = reader.opt(|reader| reader.str(MAX_PASSWORD_BYTES))?;
+    let section = reader.u64()?;
+    let len = reader.usize()?;
+    if len == 0 || len as u64 > crate::open_limits::MAX_OPEN_SOURCE_BYTES {
+        return Err(Malformed::new("source length out of range"));
+    }
+    Ok((password, section, len))
 }
 
 
@@ -578,38 +575,18 @@ pub(crate) fn get_pair(reader: &mut WireReader<'_>) -> Result<(f32, f32), Malfor
     Ok((reader.f32()?, reader.f32()?))
 }
 
-pub(crate) fn put_png(writer: &mut FrameWriter, width: u32, height: u32, png: &[u8]) {
-    writer.u32(width);
-    writer.u32(height);
-    writer.raw(png);
-}
-
-/// Largest viewer reply for a requested width: an uncompressed RGBA PNG at the maximum height plus
-/// filter bytes and generous container overhead.
-pub(crate) fn viewer_reply_limit(width: i32) -> usize {
-    let width = width.clamp(1, MAX_VIEWER_WIDTH) as usize;
-    HEADER_LEN + 8 + width * MAX_VIEWER_HEIGHT as usize * 4 + MAX_VIEWER_HEIGHT as usize + 1024 * 1024
-}
-
-/// A viewer PNG: the reported size must be within the request (width at most the requested width,
-/// height at most 5,000) and match the PNG's own header.
-pub(crate) fn get_png(reader: &mut WireReader<'_>, requested_width: i32) -> Result<(u32, u32, Vec<u8>), Malformed> {
-    let width = reader.u32()?;
-    let height = reader.u32()?;
-    let png = reader.rest();
-    if width == 0 || height == 0 || i64::from(width) > i64::from(requested_width) || height > MAX_VIEWER_HEIGHT {
-        return Err(Malformed::new(format!("viewer render {width}x{height} outside the request")));
+/// The pixel size of a viewer render of a page `page_width` x `page_height` points wide at `width`
+/// pixels, at most 5,000 high: the same arithmetic pdfium-render 0.9.4 applies for
+/// `set_target_width(width).set_maximum_height(5000)` (`PdfRenderConfig::apply_to_page`), so the app can
+/// size the bitmap before asking. `None` when the result is empty.
+pub(crate) fn viewer_size(page_width: f32, page_height: f32, width: i32) -> Option<(u32, u32)> {
+    let mut scale = width as f32 / page_width;
+    let maximum = MAX_VIEWER_HEIGHT as f32;
+    if page_height * scale > maximum {
+        scale = maximum / page_height;
     }
-    const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
-    if png.len() < 24 || png[..8] != SIGNATURE || png[8..12] != [0, 0, 0, 13] || &png[12..16] != b"IHDR" {
-        return Err(Malformed::new("viewer render is not a PNG"));
-    }
-    let header_width = u32::from_be_bytes(png[16..20].try_into().unwrap());
-    let header_height = u32::from_be_bytes(png[20..24].try_into().unwrap());
-    if (header_width, header_height) != (width, height) {
-        return Err(Malformed::new("viewer render size differs from its PNG header"));
-    }
-    Ok((width, height, png.to_vec()))
+    let (pixels_wide, pixels_high) = ((page_width * scale).round() as i32, (page_height * scale).round() as i32);
+    (pixels_wide > 0 && pixels_high > 0).then_some((pixels_wide as u32, pixels_high as u32))
 }
 
 pub(crate) fn put_text(writer: &mut FrameWriter, text: &str) {

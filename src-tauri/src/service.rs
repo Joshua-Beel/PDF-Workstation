@@ -163,6 +163,7 @@ enum Request {
     InspectTextReplacement(u64, u64, u16, Reply<TextReplacementInspection>),
     ReplaceTextCopy(u64, u64, u16, TextReplacementInspection, String, PathBuf, Reply<ReplyLease<SavedCopy>>),
     Close(u64, Reply<()>),
+    RetryEngine(u64, Reply<()>),
     Edit(u64, PageEdit, Reply<DocumentInfo>),
     DurableEdit(u64, PageEdit, u32, Reply<DocumentInfo>),
     DurableEditAt(u64, u64, PageEdit, u32, Reply<DocumentInfo>),
@@ -1363,6 +1364,12 @@ impl PdfService {
                         })();
                         let _ = reply.send(result);
                     }
+                    Request::RetryEngine(id, reply) => {
+                        if let Ok(engine) = pdfium.as_ref() { engine.reset_after_stop(); }
+                        if let Some(document) = documents.get(&id) { document.retry(); }
+                        if let Some((_, document)) = note_documents.get(&id) { document.retry(); }
+                        let _ = reply.send(Ok(()));
+                    }
                     Request::Close(id, reply) => {
                         let result = (|| {
                             if let Some((session, original)) = sessions.get(&id) {
@@ -1450,6 +1457,10 @@ impl PdfService {
     }
     pub async fn render(&self, id: u64, page: u16, width: i32) -> Result<Vec<u8>, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Render(id, page, width, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
+    }
+    /// The page's "Try again": lets a stopped PDF engine start again and a document it set aside reload.
+    pub async fn retry_engine(&self, id: u64) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::RetryEngine(id, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
     }
     pub async fn close(&self, id: u64) -> Result<(), String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Close(id, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
@@ -2052,6 +2063,17 @@ mod tests {
         assert!(cancelled.unwrap().is_none());
         let closed = tauri::async_runtime::block_on(service.save_copy_via(u64::MAX, 0, None, |_| async { Ok(None) }));
         assert!(closed.is_err());
+        call(&service, |reply| Request::Close(info.id, reply)).unwrap();
+    }
+    #[test]
+    fn retry_engine_is_accepted_and_leaves_rendering_unchanged() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let info = call(&service, |reply| Request::Open(root.join("resources/welcome.pdf"), reply)).unwrap();
+        let before = tauri::async_runtime::block_on(service.render(info.id, 0, 300)).unwrap();
+        tauri::async_runtime::block_on(service.retry_engine(info.id)).unwrap();
+        tauri::async_runtime::block_on(service.retry_engine(u64::MAX)).unwrap();
+        assert_eq!(tauri::async_runtime::block_on(service.render(info.id, 0, 300)).unwrap(), before);
         call(&service, |reply| Request::Close(info.id, reply)).unwrap();
     }
     #[test]

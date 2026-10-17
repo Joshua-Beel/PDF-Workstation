@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { renderPage, type Annotation, type CommentRect } from './bridge';
+import { renderPage, retryPdfEngine, type Annotation, type CommentRect } from './bridge';
 import { clampPage, currentPageAt, fitPageScale, maxPageWidth, pageLayout, scaleAnchoredTop, visiblePageRange, type DocumentInfo } from './model';
 import type { FitMode } from './preferences';
 import { planDestination, type BookmarkDestination, type DestinationPlan } from './bookmarkDestination';
@@ -14,6 +14,7 @@ function Page({ id, index, width, height, scale, revision, selectable, search, a
   const [url, setUrl] = useState('');
   const [error, setError] = useState('');
   const [imageReady, setImageReady] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let disposed = false;
     let objectUrl = '';
@@ -25,9 +26,10 @@ function Page({ id, index, width, height, scale, revision, selectable, search, a
       }).catch(e => { if (!disposed) setError(String(e)); });
     }, 35);
     return () => { disposed = true; clearTimeout(timer); if (objectUrl) URL.revokeObjectURL(objectUrl); };
-  }, [id, index, width, scale, revision]);
+  }, [id, index, width, scale, revision, attempt]);
+  const tryAgain = () => { void retryPdfEngine(id).catch(() => undefined).finally(() => setAttempt(value => value + 1)); };
   return <div className={styles.paper} style={{ width: width * scale, height: height * scale }} aria-label={`Page ${index + 1}`}>
-    {url ? <><img ref={image} src={url} alt={`Page ${index + 1}`} draggable={false} onLoad={() => setImageReady(true)} /><TextLayer id={id} page={index} revision={revision} enabled={selectable} imageReady={imageReady} pageWidth={width * scale} pageHeight={height * scale} search={search} onTextSelection={onTextSelection} />{imageReady && <CommentLayer page={index} pageWidth={width} pageHeight={height} annotations={annotations} creatingComment={commentMode && annotationAvailable} creatingHighlight={highlightMode && annotationAvailable} creatingRedaction={redactionMode} redactions={redactions} interactive={annotationInteractive && annotationAvailable} onCommentCreate={onCommentCreate} onHighlightCreate={onHighlightCreate} onRedactionCreate={onRedactionCreate} onSelect={onAnnotationSelect} imageBounds={() => image.current?.getBoundingClientRect() ?? null} layoutKey={`${revision}:${width * scale}:${height * scale}`} />}</> : <div className={styles.pageLoading}>{error || `Rendering page ${index + 1}…`}</div>}
+    {url ? <><img ref={image} src={url} alt={`Page ${index + 1}`} draggable={false} onLoad={() => setImageReady(true)} /><TextLayer id={id} page={index} revision={revision} enabled={selectable} imageReady={imageReady} pageWidth={width * scale} pageHeight={height * scale} search={search} onTextSelection={onTextSelection} />{imageReady && <CommentLayer page={index} pageWidth={width} pageHeight={height} annotations={annotations} creatingComment={commentMode && annotationAvailable} creatingHighlight={highlightMode && annotationAvailable} creatingRedaction={redactionMode} redactions={redactions} interactive={annotationInteractive && annotationAvailable} onCommentCreate={onCommentCreate} onHighlightCreate={onHighlightCreate} onRedactionCreate={onRedactionCreate} onSelect={onAnnotationSelect} imageBounds={() => image.current?.getBoundingClientRect() ?? null} layoutKey={`${revision}:${width * scale}:${height * scale}`} />}</> : <div className={styles.pageLoading}>{error ? <>{error} <button type="button" onClick={tryAgain}>Try again</button></> : `Rendering page ${index + 1}…`}</div>}
   </div>;
 }
 

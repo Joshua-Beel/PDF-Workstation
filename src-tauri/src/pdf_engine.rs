@@ -94,6 +94,8 @@ pub(crate) trait PdfEngine {
     type Document<'a>: EngineDocument where Self: 'a;
     fn load_from_vec(&self, bytes: Vec<u8>, password: Option<&str>) -> Result<Self::Document<'_>, LoadError>;
     fn load_from_slice<'a>(&'a self, bytes: &'a [u8], password: Option<&str>) -> Result<Self::Document<'a>, LoadError>;
+    /// The user's "Try again" after the engine stopped itself (helper crash loop). No-op in process.
+    fn reset_after_stop(&self) {}
 }
 
 pub(crate) trait EngineDocument {
@@ -132,6 +134,8 @@ pub(crate) trait EngineDocument {
     /// Renders a page at exactly `width` x `height` pixels, BGRA, into `out`, which must be exactly
     /// [`bgra_len`] bytes (otherwise `Layout`). The engine never chooses the buffer size.
     fn render_bgra_into(&self, target: PageTarget<'_>, mode: RenderMode, width: u32, height: u32, out: &mut [u8]) -> Result<(), RenderError>;
+    /// The user's "Try again" for a document the engine set aside after a failure. No-op in process.
+    fn retry(&self) {}
 }
 
 /// PDFium in this process.
@@ -161,6 +165,21 @@ impl InProcessDocument<'_> {
             PageTarget::Planned(spec) => with_planned_page(&self.inner, spec, |page| Ok(action(page))),
             PageTarget::Source(index) => { let page = self.inner.pages().get(index as i32).map_err(|error| format!("Unable to read page {}: {error}", index + 1))?; Ok(action(&page)) }
         }
+    }
+
+    /// A viewer render of a planned page at exactly `width` x `height` with the viewer's flags (annotations
+    /// and form data as displayed), written in RGBA order (`FPDF_REVERSE_BYTE_ORDER`, as the viewer render's
+    /// own bitmap is), into `out` of exactly [`bgra_len`] bytes. The helper renders viewer pages this way into
+    /// an app-owned section so the app can PNG-encode them without a channel swap.
+    pub(crate) fn render_viewer_rgba_into(&self, spec: &PageSpec, width: u32, height: u32, out: &mut [u8]) -> Result<(), RenderError> {
+        if bgra_len(width, height) != Some(out.len()) { return Err(RenderError::Layout); }
+        with_planned_page(&self.inner, spec, |page| {
+            let settings = PdfRenderConfig::new().set_fixed_size(width as i32, height as i32).set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(true).clear_before_rendering(true).set_clear_color(PdfColor::WHITE).render_annotations(true);
+            let rendered = PdfBitmap::from_bytes(width as i32, height as i32, PdfBitmapFormat::BGRA, out)
+                .map_err(|error| RenderError::Render(error.to_string()))
+                .and_then(|mut bitmap| page.render_into_bitmap_with_config(&mut bitmap, &settings).map(|()| (bitmap.width(), bitmap.height())).map_err(|error| RenderError::Render(error.to_string())));
+            Ok(rendered.and_then(|size| if size == (width as i32, height as i32) { Ok(()) } else { Err(RenderError::Layout) }))
+        }).map_err(RenderError::Page)?
     }
 }
 

@@ -23,7 +23,8 @@ use std::time::{Duration, Instant};
 
 use windows::core::{BOOL, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    DuplicateHandle, SetHandleInformation, DUPLICATE_HANDLE_OPTIONS, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Security::SECURITY_ATTRIBUTES;
 use windows::Win32::System::Diagnostics::Debug::{
@@ -216,6 +217,17 @@ impl JobChild {
 
     pub(crate) fn process_id(&self) -> u32 {
         unsafe { GetProcessId(as_windows_handle(&self.process)) }
+    }
+
+    /// Duplicates `source` into the child with exactly `access` (never the source's own access) and
+    /// returns the handle value in the child. The child owns and must close it; it dies with the child.
+    pub(crate) fn share_handle(&self, source: HANDLE, access: u32) -> Result<u64, ChildSystemError> {
+        let mut target = HANDLE::default();
+        unsafe {
+            DuplicateHandle(GetCurrentProcess(), source, as_windows_handle(&self.process), &mut target, access, false, DUPLICATE_HANDLE_OPTIONS(0))
+        }
+        .map_err(|error| ChildSystemError(format!("Could not share a handle with the {} process: {error}", self.label)))?;
+        Ok(target.0 as usize as u64)
     }
 
     /// Drains the job's completion port without waiting and returns the first limit violation it has ever

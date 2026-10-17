@@ -1,11 +1,11 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import Viewer from './Viewer';
-import { renderPage } from './bridge';
+import { renderPage, retryPdfEngine } from './bridge';
 import { pageTopOffset } from './bookmarkDestination';
 import { fitPageScale, pageLayout, scaleAnchoredTop, visiblePageRange, type DocumentInfo } from './model';
 
-vi.mock('./bridge', () => ({ renderPage: vi.fn() }));
+vi.mock('./bridge', () => ({ renderPage: vi.fn(), retryPdfEngine: vi.fn() }));
 vi.mock('./TextLayer', () => ({ default: () => null }));
 vi.mock('./CommentLayer', () => ({ default: () => null }));
 
@@ -24,6 +24,23 @@ beforeEach(() => {
   vi.stubGlobal('ResizeObserver', class { constructor(callback: typeof resize) { resize = callback; } observe() {} disconnect() {} });
 });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+it('offers Try again on a failed page render, which resets the engine for that document and renders again', async () => {
+  vi.mocked(renderPage).mockRejectedValueOnce("This file couldn't be displayed. Try again to reload it.");
+  vi.mocked(retryPdfEngine).mockResolvedValue(undefined);
+  const info = document(7, 1, 1); let ui!: ReactTestRenderer;
+  act(() => { ui = create(<Viewer {...props(info)} />, { createNodeMock: () => viewport }); });
+  await act(async () => { vi.advanceTimersByTime(35); await Promise.resolve(); await Promise.resolve(); });
+  const tryAgain = () => ui.root.findAll(node => node.type === 'button' && node.props.children === 'Try again');
+  expect(tryAgain()).toHaveLength(1);
+  expect(vi.mocked(renderPage)).toHaveBeenCalledTimes(1);
+  await act(async () => { tryAgain()[0].props.onClick(); await Promise.resolve(); await Promise.resolve(); });
+  expect(vi.mocked(retryPdfEngine)).toHaveBeenCalledWith(7);
+  await act(async () => { vi.advanceTimersByTime(35); await Promise.resolve(); });
+  expect(vi.mocked(renderPage)).toHaveBeenCalledTimes(2);
+  expect(tryAgain()).toHaveLength(0);
+  act(() => ui.unmount());
+});
 
 it('requests renders only for the binary visible range after a far 65,536-page scroll', async () => {
   const info = document(4, 1, 65_536); let ui!: ReactTestRenderer;

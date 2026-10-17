@@ -497,6 +497,8 @@ pub(crate) struct SupervisorStats {
     pub(crate) last_io_cancelled: bool,
     pub(crate) last_stderr: Vec<u8>,
     pub(crate) process_id: Option<u32>,
+    /// Peak committed memory of the running helper's job (`PeakJobMemoryUsed`).
+    pub(crate) peak_commit: Option<usize>,
 }
 
 /// Owns at most one helper. Not thread-safe: the pdf-worker thread is its only user.
@@ -531,6 +533,7 @@ impl Supervisor {
     pub(crate) fn stats(&self) -> SupervisorStats {
         let mut stats = self.stats.clone();
         stats.process_id = self.helper.as_ref().map(|helper| helper.child.process_id());
+        stats.peak_commit = self.helper.as_ref().and_then(|helper| helper.child.peak_job_commit().ok());
         stats
     }
 
@@ -634,6 +637,30 @@ impl Supervisor {
         }
         self.restarts.push_back(Instant::now());
         self.spawn_now()
+    }
+
+    /// As `call`, after duplicating `handle` with exactly `access` into the helper that will receive the
+    /// request; `payload` gets the handle's value in the helper, which the helper closes after use. If the
+    /// helper dies first, the handle dies with it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn call_sharing<T>(
+        &mut self,
+        handle: windows::Win32::Foundation::HANDLE,
+        access: u32,
+        request_kind: u16,
+        capacity: usize,
+        payload: impl FnOnce(&mut FrameWriter, u64),
+        reply_limit: usize,
+        deadline: Duration,
+        allowed: &[u8],
+        decode: impl FnOnce(&mut WireReader<'_>) -> Result<T, Malformed>,
+    ) -> Result<T, CallError> {
+        self.ensure_running().map_err(CallError::Failure)?;
+        let shared = match &self.helper {
+            Some(helper) => helper.child.share_handle(handle, access).map_err(|error| CallError::Engine(class::GENERAL, error.0))?,
+            None => return Err(CallError::Failure(HelperFailure::Stopped)),
+        };
+        self.call_running(request_kind, capacity, |writer| payload(writer, shared), reply_limit, deadline, allowed, decode)
     }
 
     /// Sends one request and decodes its reply. `payload` writes the request after the header;

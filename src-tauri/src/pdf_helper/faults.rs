@@ -37,6 +37,9 @@ pub(crate) enum Fault {
     Misreply(Misreply),
     /// Calls `SetEvent` on this handle value and replies with whether it succeeded.
     SetEvent(u64),
+    /// Maps the passed section handle (value, length) for write and for read, then closes it. Replies with
+    /// bit 0 = write mapping succeeded, bit 1 = read mapping succeeded, bit 2 = first byte is 0xA5.
+    ProbeSection(u64, u64),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -109,6 +112,11 @@ impl Fault {
                 writer.u8(6);
                 writer.u64(handle);
             }
+            Self::ProbeSection(handle, len) => {
+                writer.u8(7);
+                writer.u64(handle);
+                writer.u64(len);
+            }
         }
     }
 
@@ -121,6 +129,7 @@ impl Fault {
             4 => Self::RefusedAllocationThenReply(reader.u64()?),
             5 => Self::Misreply(*MISREPLIES.get(reader.u8()? as usize).ok_or_else(|| Malformed::new("unknown misreply"))?),
             6 => Self::SetEvent(reader.u64()?),
+            7 => Self::ProbeSection(reader.u64()?, reader.u64()?),
             other => return Err(Malformed::new(format!("unknown fault {other}"))),
         })
     }
@@ -172,6 +181,17 @@ pub(crate) fn run(fault: Fault, misreply: &mut Option<Misreply>, sequence: u32) 
         Fault::SetEvent(handle) => {
             let set = unsafe { SetEvent(HANDLE(handle as usize as *mut core::ffi::c_void)) }.is_ok();
             out.u8(u8::from(set));
+        }
+        Fault::ProbeSection(handle, len) => {
+            let raw = HANDLE(handle as usize as *mut core::ffi::c_void);
+            let len = usize::try_from(len).unwrap();
+            let writable = unsafe { super::section::View::map(raw, len, true) }.is_ok();
+            let read = unsafe { super::section::View::map(raw, len, false) };
+            let readable = read.is_ok();
+            let first = read.as_ref().is_ok_and(|view| view.as_slice()[0] == 0xa5);
+            drop(read);
+            let _ = unsafe { windows::Win32::Foundation::CloseHandle(raw) };
+            out.u8(u8::from(writable) | (u8::from(readable) << 1) | (u8::from(first) << 2));
         }
     }
     Ok(out)

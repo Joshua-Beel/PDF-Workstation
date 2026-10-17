@@ -13,6 +13,7 @@ export async function openDocument(example = false): Promise<OpenResult | null> 
   return example ? { status: 'opened', document: await invoke<DocumentInfo>('open_example') } : invoke<OpenResult | null>('open_document');
 }
 export const closeDocument = (id: number) => invoke<void>('close_document', { id });
+export const retryPdfEngine = (id: number) => invoke<void>('retry_pdf_engine', { id });
 export const reopenDocument = (path: string) => invoke<OpenResult>('reopen_document', { path });
 export type RecoveryCheckpointReceipt = { documentId: number; revision: number; currentPage: number };
 export type RecoveryDiscardReceipt = { documentId: number; revision: number };
