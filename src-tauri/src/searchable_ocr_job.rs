@@ -8,6 +8,11 @@ use crate::{
     service::PdfService,
 };
 
+const _: () = assert!(
+    crate::searchable_ocr::RASTER_DPI == crate::ocr::OCR_DPI as u32 && crate::ocr_commands::OCR_DPI == crate::ocr::OCR_DPI,
+    "the containment slack DPI must equal the OCR raster DPI"
+);
+
 pub(crate) const MAX_DOCUMENT_PAGES: usize = 32;
 pub(crate) const MAX_DOCUMENT_RUNTIME: Duration = Duration::from_secs(300);
 

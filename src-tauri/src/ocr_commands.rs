@@ -12,7 +12,7 @@ use crate::service::PdfService;
 use crate::searchable_ocr_job::SearchableOcrCoordinator;
 
 const OCR_REQUEST_LIMIT: usize = 4_096;
-const OCR_DPI: u16 = 150;
+pub(crate) const OCR_DPI: u16 = 150;
 const UNAVAILABLE_DEFAULT: &str = "OCR is not enabled in this source build.";
 const UNAVAILABLE_RESOURCES: &str = "OCR resources could not be verified for this source build.";
 const REQUEST_LIMIT_ERROR: &str = "The OCR request limit was reached. Restart the application before starting another OCR request.";

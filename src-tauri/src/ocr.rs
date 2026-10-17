@@ -6,7 +6,7 @@ use crate::ocr_process::{
 };
 use crate::service::PdfService;
 
-const OCR_DPI: u16 = 150;
+pub(crate) const OCR_DPI: u16 = 150;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct OcrPageRequest {
