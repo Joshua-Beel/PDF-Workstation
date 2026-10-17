@@ -1009,13 +1009,14 @@ fn main() {
         let _serial = test_lock();
         let timed = fake_case("sleep");
         let timed_directory = timed.directory.clone();
+        let published = || { wait_for_pid(&timed_directory); };
         let result = timed.runner.recognize_with_options(
             TEST_P6,
             &OcrCancellation::default(),
-            RunOptions { timeout: Duration::from_millis(200), before_resume: None, after_resume: None, before_finish: None },
+            RunOptions { timeout: Duration::from_millis(200), before_resume: None, after_resume: Some(&published), before_finish: None },
         );
         assert_eq!(result, Err(OcrProcessError::TimedOut));
-        assert_process_reaped(wait_for_pid(&timed_directory));
+        assert_process_reaped(wait_for_pid(&timed.directory));
 
         let unwound = fake_case("sleep");
         let directory = unwound.directory.clone();
