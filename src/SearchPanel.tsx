@@ -4,7 +4,9 @@ import type { DocumentInfo } from './model';
 import { literalMatches, type SearchHighlightQuery } from './searchHighlights';
 import s from './SearchPanel.module.css';
 
-type Hit = { page: number; before: string; match: string; after: string };
+const PREFETCH_PAGES = 8;
+const STATUS_INTERVAL_MS = 120;
+type Hit ={ page: number; before: string; match: string; after: string };
 export type ActiveSearch = SearchHighlightQuery & { documentId: number; revision: number; pages: number[] };
 export default function SearchPanel({ document, go, close, onHighlights }: { document: DocumentInfo; go: (page: number) => void; close: () => void; onHighlights?: (search: ActiveSearch | null) => void }) {
   const [query, setQuery] = useState('');
@@ -26,10 +28,23 @@ export default function SearchPanel({ document, go, close, onHighlights }: { doc
     onHighlights?.(null);
     const found: Hit[] = [];
     try {
+      const pending = new Map<number, Promise<string>>();
+      const fetchAhead = (from: number) => {
+        for (let ahead = from; ahead < Math.min(document.pages.length, from + PREFETCH_PAGES); ahead++) {
+          if (pending.has(ahead)) continue;
+          const text = pageText(document.id, ahead, document.revision);
+          text.catch(() => undefined);
+          pending.set(ahead, text);
+        }
+      };
+      let lastStatus = 0;
       for (let page = 0; page < document.pages.length; page++) {
         if (request !== generation.current) return;
-        setStatus(`Searching page ${page + 1} of ${document.pages.length}…`);
-        const text = await pageText(document.id, page, document.revision);
+        const now = Date.now();
+        if (page === 0 || now - lastStatus >= STATUS_INTERVAL_MS) { lastStatus = now; setStatus(`Searching page ${page + 1} of ${document.pages.length}…`); }
+        fetchAhead(page);
+        const text = await pending.get(page)!;
+        pending.delete(page);
         if (request !== generation.current) return;
         const match = literalMatches(text, needle, matchCase, 1)[0];
         if (match) {
