@@ -15,8 +15,9 @@ describe('push and pull request CI workflow', () => {
     expect(workflow).toContain('timeout-minutes: 45');
   });
 
-  it('cancels superseded runs on the same pull request or ref', () => {
-    expect(workflow).toContain('concurrency:\n  group: ci-${{ github.event.pull_request.number || github.ref }}\n  cancel-in-progress: true\n');
+  it('cancels superseded pull request runs but lets every master push finish', () => {
+    expect(workflow).toContain("concurrency:\n  group: ci-${{ github.event.pull_request.number || github.ref }}\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n");
+    expect(workflow).not.toContain('cancel-in-progress: true');
   });
 
   it('never builds installers, signs, uploads or touches releases', () => {
@@ -39,6 +40,7 @@ describe('push and pull request CI workflow', () => {
       'run: npm test -- --pool=threads --maxWorkers=1 --no-file-parallelism',
       'run: npm run build',
       'run: cargo test --locked --manifest-path src-tauri/Cargo.toml --bins',
+      'Keep only compiled dependencies in the Cargo cache',
       'actions/cache/save@',
       'Recheck tracked source',
     ];
@@ -51,9 +53,19 @@ describe('push and pull request CI workflow', () => {
     }
   });
 
-  it('writes the Cargo cache only from master pushes', () => {
-    const save = workflow.slice(workflow.indexOf('Save Cargo cache'), workflow.indexOf('actions/cache/save@'));
-    expect(save).toContain("if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/master' }}");
+  it('writes a bounded dependency-only Cargo cache, keyed on toolchain and lockfile, only from master pushes', () => {
+    const key = "key: ci-cargo-deps-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('src-tauri/Cargo.lock') }}\n";
+    expect(workflow.split(key)).toHaveLength(3);
+    expect(workflow).toContain('- id: toolchain\n        uses: dtolnay/rust-toolchain@');
+    expect(workflow).not.toContain('restore-keys');
+    expect(workflow).not.toContain('github.sha');
+    const guard = "if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cargo-cache.outputs.cache-hit != 'true' }}";
+    expect(workflow.split(guard)).toHaveLength(3);
+    const prune = workflow.slice(workflow.indexOf('Keep only compiled dependencies'), workflow.indexOf('Save Cargo dependency cache'));
+    expect(prune).toContain("'incremental'");
+    expect(prune).toContain("-Filter 'pdf?workstation*'");
+    expect(prune).toContain("-Filter 'pdf-workstation-*'");
+    expect(prune).toContain('CARGO_CACHE_TARGET_BYTES=');
     expect(workflow).not.toMatch(/uses: actions\/cache@/);
     expect(workflow).not.toMatch(/CARGO_TARGET_DIR/);
   });

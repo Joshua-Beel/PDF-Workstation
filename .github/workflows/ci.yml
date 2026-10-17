@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -30,9 +30,11 @@ jobs:
           node-version: '22'
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable branch head on 2026-10-07
+      - id: toolchain
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable branch head on 2026-10-07
 
-      - name: Restore Cargo cache
+      - name: Restore Cargo dependency cache
+        id: cargo-cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
@@ -40,10 +42,7 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             src-tauri/target
-          key: ci-cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ github.sha }}
-          restore-keys: |
-            ci-cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}-
-            ci-cargo-${{ runner.os }}-
+          key: ci-cargo-deps-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('src-tauri/Cargo.lock') }}
 
       - run: npm ci
       - run: npm run fixtures
@@ -59,8 +58,22 @@ jobs:
       - run: npm run build
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --bins
 
-      - name: Save Cargo cache
-        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+      - name: Keep only compiled dependencies in the Cargo cache
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        shell: pwsh
+        run: |
+          $debug = 'src-tauri/target/debug'
+          Remove-Item -LiteralPath (Join-Path $debug 'incremental'), (Join-Path $debug 'examples'), (Join-Path $debug 'resources') -Recurse -Force -ErrorAction SilentlyContinue
+          Get-ChildItem -LiteralPath $debug -File -Filter 'pdf?workstation*' | Remove-Item -Force
+          Get-ChildItem -LiteralPath (Join-Path $debug 'deps') -File -Filter 'pdf?workstation*' | Remove-Item -Force
+          foreach ($dir in '.fingerprint', 'build') {
+            Get-ChildItem -LiteralPath (Join-Path $debug $dir) -Directory -Filter 'pdf-workstation-*' | Remove-Item -Recurse -Force
+          }
+          $bytes = (Get-ChildItem -LiteralPath 'src-tauri/target' -Recurse -File -Force | Measure-Object -Property Length -Sum).Sum
+          Write-Output ('CARGO_CACHE_TARGET_BYTES={0}' -f $bytes)
+
+      - name: Save Cargo dependency cache
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
@@ -68,7 +81,7 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             src-tauri/target
-          key: ci-cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ github.sha }}
+          key: ci-cargo-deps-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('src-tauri/Cargo.lock') }}
 
       - name: Recheck tracked source
         if: ${{ always() }}
