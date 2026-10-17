@@ -32,11 +32,14 @@ pub(crate) struct RemotePdfEngine {
     live: RefCell<(u64, HashSet<u32>)>,
     /// The app-owned section the helper renders bitmaps into, kept between renders up to `KEEP_RENDER_TARGET`.
     render_target: RefCell<Option<(Section, View)>>,
+    /// App-private copy of the last viewer render, reused so the copy out of the shared section (SM7 L-a)
+    /// lands in memory that is already faulted in. Released when it grows past `KEEP_RENDER_TARGET`.
+    viewer_pixels: RefCell<Vec<u8>>,
 }
 
 impl RemotePdfEngine {
     pub(crate) fn start(config: HelperConfig) -> Result<Self, String> {
-        Supervisor::start(config).map(|supervisor| Self { supervisor: RefCell::new(supervisor), live: RefCell::new((0, HashSet::new())), render_target: RefCell::new(None) }).map_err(|failure| failure.message())
+        Supervisor::start(config).map(|supervisor| Self { supervisor: RefCell::new(supervisor), live: RefCell::new((0, HashSet::new())), render_target: RefCell::new(None), viewer_pixels: RefCell::new(Vec::new()) }).map_err(|failure| failure.message())
     }
 
     /// The app's helper (see [`HelperConfig::production`]).
@@ -367,8 +370,9 @@ impl EngineDocument for RemoteDocument<'_> {
         let (pixels_wide, pixels_high) = viewer_size(page_width, page_height, width).ok_or("The page has no area to render.")?;
         // Copy out of the shared section before encoding (SM7 L-a): the helper keeps write access to the
         // section, so the encoder must read pixels it cannot change underneath it.
-        let mut rgba = Vec::new();
-        let copy_out = |pixels: &[u8]| rgba = pixels.to_vec();
+        let mut rgba = self.engine.viewer_pixels.borrow_mut();
+        rgba.clear();
+        let copy_out = |pixels: &[u8]| rgba.extend_from_slice(pixels);
         let request = |writer: &mut FrameWriter, shared: u64| {
             put_spec(writer, spec);
             writer.u32(pixels_wide);
@@ -381,7 +385,11 @@ impl EngineDocument for RemoteDocument<'_> {
         })?;
         use image::ImageEncoder;
         let mut png = Vec::new();
-        image::codecs::png::PngEncoder::new(&mut png).write_image(&rgba, pixels_wide, pixels_high, image::ExtendedColorType::Rgba8).map_err(|error| error.to_string())?;
+        let encoded = image::codecs::png::PngEncoder::new(&mut png).write_image(&rgba, pixels_wide, pixels_high, image::ExtendedColorType::Rgba8).map_err(|error| error.to_string());
+        if rgba.capacity() > KEEP_RENDER_TARGET {
+            *rgba = Vec::new();
+        }
+        encoded?;
         Ok(RenderedPng { png, width: pixels_wide, height: pixels_high })
     }
 
