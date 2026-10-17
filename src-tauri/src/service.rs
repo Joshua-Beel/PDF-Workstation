@@ -1165,6 +1165,7 @@ impl PdfService {
                             let document = engine.load_from_vec(bytes.clone(), None).map_err(|error| format!("Filled PDF could not be opened: {error}"))?;
                             let pages = document.page_sizes()?;
                             if pages.len() != expected { return Err("Filled PDF page count validation failed.".into()); }
+                            for (index, size) in pages.iter().enumerate() { let loaded = document.source_page_size(index).map_err(|error| format!("Filled PDF page {} could not be loaded: {error}", index + 1))?; if loaded != (size.width, size.height) { return Err("Filled PDF page size validation failed.".into()); } }
                             let engine_fields = document.form_values(&fields).ok_or("Filled PDF form could not be read consistently by the rendering engine.")?;
                             if !filled_values_agree(&fields, &engine_fields) { return Err("Filled PDF values disagree with the rendering engine.".into()); }
                             for index in 0..document.page_count() {

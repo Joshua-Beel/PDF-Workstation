@@ -155,7 +155,7 @@ impl InProcessDocument<'_> {
     fn with_target<T>(&self, target: PageTarget<'_>, action: impl FnOnce(&PdfPage<'_>) -> T) -> Result<T, String> {
         match target {
             PageTarget::Planned(spec) => with_planned_page(&self.inner, spec, |page| Ok(action(page))),
-            PageTarget::Source(index) => { let page = self.inner.pages().get(index as i32).map_err(|error| error.to_string())?; Ok(action(&page)) }
+            PageTarget::Source(index) => { let page = self.inner.pages().get(index as i32).map_err(|error| format!("Unable to read page {}: {error}", index + 1))?; Ok(action(&page)) }
         }
     }
 }

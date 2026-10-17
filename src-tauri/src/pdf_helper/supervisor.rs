@@ -275,9 +275,11 @@ impl Helper {
 
     /// Sends one request frame and returns the matching reply body (its kind or `ERROR`, same sequence).
     ///
-    /// Between requests the reply limit is 0, so a frame the helper writes while nothing is pending is
-    /// refused by the reader before anything is allocated, and at most one event waits in the bounded queue;
-    /// the next exchange finds it and ends the helper.
+    /// The reader takes the reply limit with `swap(0)` when a length prefix arrives, so each request admits
+    /// exactly one frame: any further frame (written while nothing is pending, or a second one for this
+    /// request) meets a limit of 0 and is refused before anything is allocated. At most one event waits in
+    /// the bounded queue; the next exchange finds it and ends the helper. A stray frame whose prefix arrives
+    /// only after the next request set its limit is taken as that reply and fails the sequence check.
     fn exchange(&mut self, frame: Vec<u8>, request: Header, reply_limit: usize, deadline: Instant) -> Result<(Header, Vec<u8>), HelperFailure> {
         match self.events.try_recv() {
             Ok(Event::Frame(_) | Event::BadLength(_) | Event::NoSync) => {
@@ -408,7 +410,7 @@ fn read_replies(io: &IoWorker, mut stdout: File, banner_allowance: usize, limit:
             io.mark_cancelled();
             return;
         }
-        match read_frame(&mut stdout, &|| limit.load(Ordering::Acquire)) {
+        match read_frame(&mut stdout, &|| limit.swap(0, Ordering::AcqRel)) {
             Ok(body) => {
                 if events.send(Event::Frame(body)).is_err() {
                     return;

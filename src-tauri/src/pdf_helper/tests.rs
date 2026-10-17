@@ -353,12 +353,8 @@ fn frames_written_while_no_request_is_pending_end_the_helper() {
     let pid = engine.stats().process_id.unwrap();
     assert_eq!(document.inject(Fault::Misreply(Misreply::FloodAfter), LONG), Ok(1));
     assert_eq!(document.page_sizes().unwrap().len(), WELCOME_PAGES, "the reply itself is correct");
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(document.page_sizes().is_err());
-    match engine.stats().last_failure {
-        Some(HelperFailure::Malformed(reason)) => assert!(reason.contains("no request was pending"), "{reason}"),
-        other => panic!("{other:?}"),
-    }
+    assert!(document.page_sizes().is_err(), "the next request ends the helper whichever way the stray frame arrives");
+    assert!(matches!(engine.stats().last_failure, Some(HelperFailure::Malformed(_))), "{:?}", engine.stats().last_failure);
     assert!(!process_is_alive(pid));
     let other = engine.load_from_vec(welcome(), None).unwrap();
     assert_eq!(other.page_sizes().unwrap().len(), WELCOME_PAGES);
@@ -450,6 +446,21 @@ fn decode<T>(payload: &[u8], get: impl FnOnce(&mut WireReader<'_>) -> Result<T, 
     let mut reader = WireReader::new(payload);
     let value = get(&mut reader)?;
     reader.finish().map(|()| value)
+}
+
+/// SM0 P2: the reader takes the limit with `swap(0)`, so one stored limit admits exactly one frame and the
+/// next frame is refused unallocated, with no window for a second frame at the old limit.
+#[test]
+fn one_request_limit_admits_exactly_one_frame() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut stream = frame(kind::PAGE_SIZES, 1, |writer| writer.u8(1));
+    stream.extend_from_slice(&frame(kind::PAGE_SIZES, 2, |writer| writer.u8(2)));
+    let mut input = std::io::Cursor::new(stream);
+    let limit = AtomicUsize::new(1024);
+    let take = || limit.swap(0, Ordering::AcqRel);
+    assert!(read_frame(&mut input, &take).is_ok());
+    assert!(matches!(read_frame(&mut input, &take), Err(FrameError::BadLength(_))));
+    assert_eq!(limit.load(Ordering::Acquire), 0);
 }
 
 #[test]
