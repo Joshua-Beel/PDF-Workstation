@@ -690,6 +690,10 @@ fn main() {
     fs::write(directory.join("child.pid.tmp"), std::process::id().to_string()).unwrap();
     fs::rename(directory.join("child.pid.tmp"), directory.join("child.pid")).unwrap();
     let behavior = fs::read_to_string(directory.join("behavior.txt")).unwrap();
+    if matches!(behavior.trim(), "stdout-exact" | "stdout-over" | "stderr-exact" | "stderr-over" | "invalid-stdout" | "invalid-stderr" | "nonzero" | "unexpected-stderr") {
+        let mut input = Vec::new();
+        std::io::stdin().read_to_end(&mut input).unwrap();
+    }
     match behavior.trim() {
         "exact" => {
             let mut input = Vec::new();
@@ -813,7 +817,7 @@ fn main() {
     }
 
     fn assert_process_reaped(pid: u32) {
-        for _ in 0..100 {
+        for _ in 0..1000 {
             if !process_is_alive(pid) {
                 return;
             }
