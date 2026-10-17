@@ -36,6 +36,10 @@ pub(crate) const MAX_DTO_REPLY: usize = 16 * 1024 * 1024;
 /// An engine error message.
 pub(crate) const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 /// The largest BGRA render the helper is asked for (page-image export is the largest caller, 128 MiB).
+/// Note for step 5: a viewer render wider than about 13,400 px (height capped at 5,000) or any render over
+/// 67 M pixels exceeds this and is refused ("larger than the PDF engine renders"), although
+/// `MAX_VIEWER_WIDTH` allows 16,384. Today's callers stay below it (the viewer asks for at most 3,000 px
+/// wide, print 16 M pixels, export 32 M pixels).
 pub(crate) const MAX_BGRA_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const MAX_VIEWER_WIDTH: i32 = 16_384;
 pub(crate) const MAX_VIEWER_HEIGHT: u32 = 5_000;
@@ -571,6 +575,18 @@ pub(crate) fn put_pair(writer: &mut FrameWriter, (width, height): (f32, f32)) {
     writer.f32(height);
 }
 
+/// A page size from the helper (planned or source page): both finite and positive, as every page PDFium
+/// can render has; anything else is a malformed reply.
+pub(crate) fn get_page_size(reader: &mut WireReader<'_>) -> Result<(f32, f32), Malformed> {
+    let (width, height) = (reader.finite_f32()?, reader.finite_f32()?);
+    if width > 0.0 && height > 0.0 { Ok((width, height)) } else { Err(Malformed::new("page size not positive")) }
+}
+
+/// A crop box from the helper: every coordinate finite.
+pub(crate) fn get_finite_crop(reader: &mut WireReader<'_>) -> Result<CropBox, Malformed> {
+    Ok(CropBox { left: reader.finite_f32()?, bottom: reader.finite_f32()?, right: reader.finite_f32()?, top: reader.finite_f32()? })
+}
+
 pub(crate) fn get_pair(reader: &mut WireReader<'_>) -> Result<(f32, f32), Malformed> {
     Ok((reader.f32()?, reader.f32()?))
 }
@@ -706,8 +722,9 @@ pub(crate) fn put_view(writer: &mut FrameWriter, view: DestinationView) {
     writer.u16(view.rotation);
 }
 
+/// A destination view from the helper: every coordinate finite.
 pub(crate) fn get_view(reader: &mut WireReader<'_>) -> Result<DestinationView, Malformed> {
-    Ok(DestinationView { left: reader.f32()?, bottom: reader.f32()?, width: reader.f32()?, height: reader.f32()?, rotation: reader.u16()? })
+    Ok(DestinationView { left: reader.finite_f32()?, bottom: reader.finite_f32()?, width: reader.finite_f32()?, height: reader.finite_f32()?, rotation: reader.u16()? })
 }
 
 pub(crate) fn put_bookmarks(writer: &mut FrameWriter, bookmarks: &[EngineBookmark]) {

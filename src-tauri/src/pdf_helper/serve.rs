@@ -148,6 +148,35 @@ struct State<'e> {
     misreply: Option<super::faults::Misreply>,
 }
 
+/// Maps the render target section the app passed with a render request. The passed handle is closed on
+/// every path: by the mapping, or here when the size is refused.
+pub(crate) fn map_render_target(section: u64, width: u32, height: u32) -> Result<View, String> {
+    match bgra_len(width, height).filter(|length| (1..=MAX_BGRA_BYTES).contains(length)) {
+        Some(length) => unsafe { View::map_passed(section, length, true) },
+        None => {
+            unsafe { View::close_passed(section) };
+            Err("The bitmap size is out of range.".into())
+        }
+    }
+}
+
+/// The section handle a render request carries (read past the request's other fields), so a request for a
+/// document this helper does not have can still close it. `None` for other requests.
+fn passed_render_target(request_kind: u16, reader: &mut WireReader<'_>) -> Result<Option<u64>, Malformed> {
+    match request_kind {
+        kind::RENDER_BGRA => {
+            get_target(reader)?;
+            get_mode(reader)?;
+        }
+        kind::RENDER_VIEWER_RGBA => {
+            get_spec(reader)?;
+        }
+        _ => return Ok(None),
+    }
+    let (_, _, section) = (reader.u32()?, reader.u32()?, reader.u64()?);
+    Ok(Some(section))
+}
+
 fn general(message: impl Into<String>) -> (u8, String) {
     (class::GENERAL, message.into())
 }
@@ -207,6 +236,10 @@ impl<'e> State<'e> {
             return Ok(Ok(out));
         }
         let Some(document) = self.documents.get(&handle).map(|loaded| &loaded.document) else {
+            if let Some(section) = passed_render_target(request_kind, &mut reader)? {
+                reader.finish()?;
+                unsafe { View::close_passed(section) };
+            }
             return Ok(Err(general("The PDF engine has no such document.")));
         };
         let result: Result<(), (u8, String)> = match request_kind {
@@ -299,9 +332,7 @@ impl<'e> State<'e> {
                 let mode = get_mode(&mut reader)?;
                 let (width, height, section) = (reader.u32()?, reader.u32()?, reader.u64()?);
                 reader.finish()?;
-                let length = bgra_len(width, height).filter(|length| (1..=MAX_BGRA_BYTES).contains(length));
-                let target_view = length.ok_or_else(|| "The bitmap size is out of range.".to_owned()).and_then(|length| unsafe { View::map_passed(section, length, true) });
-                match target_view {
+                match map_render_target(section, width, height) {
                     Ok(mut view) => document.render_bgra_into(target.as_target(), mode, width, height, view.as_mut_slice()).map_err(render_error),
                     Err(message) => Err((class::RENDER_RENDER, message)),
                 }
@@ -310,9 +341,7 @@ impl<'e> State<'e> {
                 let spec = get_spec(&mut reader)?;
                 let (width, height, section) = (reader.u32()?, reader.u32()?, reader.u64()?);
                 reader.finish()?;
-                let length = bgra_len(width, height).filter(|length| (1..=MAX_BGRA_BYTES).contains(length));
-                let target_view = length.ok_or_else(|| "The bitmap size is out of range.".to_owned()).and_then(|length| unsafe { View::map_passed(section, length, true) });
-                match target_view {
+                match map_render_target(section, width, height) {
                     Ok(mut view) => document.render_viewer_rgba_into(&spec, width, height, view.as_mut_slice()).map_err(render_error),
                     Err(message) => Err((class::RENDER_RENDER, message)),
                 }

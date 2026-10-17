@@ -108,6 +108,14 @@ impl View {
         view
     }
 
+    /// Closes a section handle the app passed to the helper for a request that will not map it.
+    ///
+    /// # Safety
+    /// As for [`View::map_passed`].
+    pub(crate) unsafe fn close_passed(raw: u64) {
+        let _ = unsafe { CloseHandle(HANDLE(raw as usize as *mut c_void)) };
+    }
+
     pub(crate) fn as_slice(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.base, self.len) }
     }

@@ -550,6 +550,48 @@ fn primitive_decoding_rejects_bad_tags_counts_and_strings() {
     assert!(decode(&huge, |reader| get_error(reader, class::ONLY_GENERAL)).is_err());
 }
 
+/// SM7 L-b: page sizes, crop boxes and destination views from the helper must be finite (page sizes also
+/// positive), otherwise the reply is malformed.
+#[test]
+fn helper_floats_must_be_finite() {
+    let pair = |width: f32, height: f32| payload_of(&frame(kind::PLANNED_PAGE_SIZE, 1, |writer| put_pair(writer, (width, height))));
+    assert_eq!(decode(&pair(612.0, 792.0), get_page_size), Ok((612.0, 792.0)));
+    for (width, height) in [(f32::NAN, 792.0), (612.0, f32::INFINITY), (0.0, 792.0), (612.0, -1.0)] {
+        assert!(decode(&pair(width, height), get_page_size).is_err(), "{width} x {height}");
+    }
+    let crop = |left: f32| payload_of(&frame(kind::DISPLAYED_CROP, 1, |writer| put_crop(writer, CropBox { left, bottom: 0.0, right: 10.0, top: 10.0 })));
+    assert!(decode(&crop(1.0), get_finite_crop).is_ok());
+    assert!(decode(&crop(f32::NEG_INFINITY), get_finite_crop).is_err());
+    let view = |left: f32| payload_of(&frame(kind::BOOKMARK_PAGE_VIEW, 1, |writer| put_view(writer, crate::bookmark_destinations::DestinationView { left, bottom: 0.0, width: 612.0, height: 792.0, rotation: 0 })));
+    assert!(decode(&view(0.0), get_view).is_ok());
+    assert!(decode(&view(f32::NAN), get_view).is_err());
+}
+
+/// A render request whose size is refused still closes the section handle the app passed with it.
+#[test]
+fn a_refused_render_size_closes_the_passed_section_handle() {
+    use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_HANDLE_OPTIONS, HANDLE};
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    let section = super::section::Section::create(4096).unwrap();
+    let mut passed = HANDLE::default();
+    unsafe { DuplicateHandle(GetCurrentProcess(), section.handle(), GetCurrentProcess(), &mut passed, super::section::FILE_MAP_READ | super::section::FILE_MAP_WRITE, false, DUPLICATE_HANDLE_OPTIONS(0)) }.unwrap();
+    // Count the section's open handles (not the handle value, which another test thread may reuse at once).
+    #[repr(C)]
+    struct BasicInformation { attributes: u32, granted_access: u32, handle_count: u32, pointer_count: u32, reserved: [u32; 10] }
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtQueryObject(handle: HANDLE, class: u32, information: *mut BasicInformation, length: u32, returned: *mut u32) -> i32;
+    }
+    let handles = || {
+        let mut information = BasicInformation { attributes: 0, granted_access: 0, handle_count: 0, pointer_count: 0, reserved: [0; 10] };
+        assert_eq!(unsafe { NtQueryObject(section.handle(), 0, &mut information, std::mem::size_of::<BasicInformation>() as u32, std::ptr::null_mut()) }, 0);
+        information.handle_count
+    };
+    assert_eq!(handles(), 2);
+    assert!(super::serve::map_render_target(passed.0 as usize as u64, 0, 0).is_err());
+    assert_eq!(handles(), 1, "the passed handle was closed");
+}
+
 #[test]
 fn reply_decoders_reject_inconsistent_content() {
     use crate::pdf_engine::PageSize;

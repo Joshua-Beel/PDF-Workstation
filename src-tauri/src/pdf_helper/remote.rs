@@ -347,7 +347,7 @@ impl EngineDocument for RemoteDocument<'_> {
     }
 
     fn planned_page_size(&self, spec: &PageSpec) -> Result<(f32, f32), String> {
-        self.read(kind::PLANNED_PAGE_SIZE, |writer| put_spec(writer, spec), get_pair)
+        self.read(kind::PLANNED_PAGE_SIZE, |writer| put_spec(writer, spec), get_page_size)
     }
 
     /// The app sizes the bitmap from the planned page size (as pdfium-render would), the helper renders it
@@ -359,23 +359,24 @@ impl EngineDocument for RemoteDocument<'_> {
         }
         let (page_width, page_height) = self.planned_page_size(spec)?;
         let (pixels_wide, pixels_high) = viewer_size(page_width, page_height, width).ok_or("The page has no area to render.")?;
-        let mut encoded = Err("The viewer render produced no image.".to_owned());
-        let encode = |rgba: &[u8]| {
-            use image::ImageEncoder;
-            let mut png = Vec::new();
-            encoded = image::codecs::png::PngEncoder::new(&mut png).write_image(rgba, pixels_wide, pixels_high, image::ExtendedColorType::Rgba8).map(|()| png).map_err(|error| error.to_string());
-        };
+        // Copy out of the shared section before encoding (SM7 L-a): the helper keeps write access to the
+        // section, so the encoder must read pixels it cannot change underneath it.
+        let mut rgba = Vec::new();
+        let copy_out = |pixels: &[u8]| rgba = pixels.to_vec();
         let request = |writer: &mut FrameWriter, shared: u64| {
             put_spec(writer, spec);
             writer.u32(pixels_wide);
             writer.u32(pixels_high);
             writer.u64(shared);
         };
-        self.render_into_target(kind::RENDER_VIEWER_RGBA, request, pixels_wide, pixels_high, encode).map_err(|error| match error {
+        self.render_into_target(kind::RENDER_VIEWER_RGBA, request, pixels_wide, pixels_high, copy_out).map_err(|error| match error {
             RenderError::Page(message) | RenderError::Render(message) | RenderError::Format(message) => message,
             RenderError::Layout => "Unexpected viewer bitmap layout.".to_owned(),
         })?;
-        Ok(RenderedPng { png: encoded?, width: pixels_wide, height: pixels_high })
+        use image::ImageEncoder;
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png).write_image(&rgba, pixels_wide, pixels_high, image::ExtendedColorType::Rgba8).map_err(|error| error.to_string())?;
+        Ok(RenderedPng { png, width: pixels_wide, height: pixels_high })
     }
 
     fn visible_text(&self, target: PageTarget<'_>) -> Result<String, TextError> {
@@ -447,7 +448,7 @@ impl EngineDocument for RemoteDocument<'_> {
                 put_spec(writer, spec);
                 put_crop_rect(writer, rect);
             },
-            get_crop,
+            get_finite_crop,
         )
     }
 
@@ -471,7 +472,7 @@ impl EngineDocument for RemoteDocument<'_> {
     }
 
     fn source_page_size(&self, index: usize) -> Result<(f32, f32), String> {
-        self.read(kind::SOURCE_PAGE_SIZE, |writer| writer.u64(index as u64), get_pair)
+        self.read(kind::SOURCE_PAGE_SIZE, |writer| writer.u64(index as u64), get_page_size)
     }
 
     fn thumbnail_check(&self, index: usize) -> Result<bool, ProbeError> {

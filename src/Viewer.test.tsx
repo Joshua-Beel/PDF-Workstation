@@ -33,6 +33,8 @@ it('offers Try again on a failed page render, which resets the engine for that d
   await act(async () => { vi.advanceTimersByTime(35); await Promise.resolve(); await Promise.resolve(); });
   const tryAgain = () => ui.root.findAll(node => node.type === 'button' && node.props.children === 'Try again');
   expect(tryAgain()).toHaveLength(1);
+  expect(tryAgain()[0].props['aria-label']).toBe('Try again to render page 1');
+  expect(ui.root.find(node => node.props.role === 'alert').props.children).toBe("This file couldn't be displayed. Try again to reload it.");
   expect(vi.mocked(renderPage)).toHaveBeenCalledTimes(1);
   await act(async () => { tryAgain()[0].props.onClick(); await Promise.resolve(); await Promise.resolve(); });
   expect(vi.mocked(retryPdfEngine)).toHaveBeenCalledWith(7);
