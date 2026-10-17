@@ -445,7 +445,7 @@ impl PdfService {
                             for (index, raster) in plan.pages.iter().enumerate() {
                                 if reply.is_closed() { return Err("Redaction was canceled.".into()); }
                                 let mut bgra = vec![0; crate::pdf_engine::bgra_len(raster.dimensions.width, raster.dimensions.height).ok_or("The redaction bitmap size is out of range.")?];
-                                document.render_bgra_into(PageTarget::Planned(&raster.spec), RenderMode::Print, raster.dimensions.width, raster.dimensions.height, &mut bgra).map_err(|error| match error {
+                                document.render_bgra_into(PageTarget::Planned(&raster.spec), RenderMode::Viewer, raster.dimensions.width, raster.dimensions.height, &mut bgra).map_err(|error| match error {
                                     RenderError::Page(error) => error,
                                     RenderError::Render(error) => format!("Could not render redaction page {}: {error}", index + 1),
                                     RenderError::Format(error) => format!("Could not inspect the redaction bitmap: {error}"),
@@ -5079,6 +5079,117 @@ mod tests {
         let existing = output_bytes.clone();
         assert!(call(&service, |reply| Request::RasterRedact(info.id, info.revision, 0, rectangles, output.clone(), reply)).is_err());
         assert_eq!(std::fs::read(&output).unwrap(), existing);
+        call(&service, |reply| Request::Close(saved.document.id, reply)).unwrap();
+        call(&service, |reply| Request::Close(info.id, reply)).unwrap();
+    }
+
+    fn print_and_screen_only_fixture(secret: &str) -> Vec<u8> {
+        let content = format!("BT /F1 12 Tf 20 60 Td ({secret}) Tj ET /OC /print BDC BT /F1 12 Tf 20 100 Td ({secret}) Tj ET EMC BT /F1 12 Tf 20 20 Td ({secret}) Tj ET /OC /cover BDC 0 g 10 10 180 30 re f EMC");
+        let cover_content = "0 g 0 0 180 30 re f";
+        let print_only_ap = format!("BT /F1 12 Tf 10 12 Td ({secret}) Tj ET");
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [9 0 R 10 0 R] /D << /Order [9 0 R 10 0 R] /OFF [9 0 R] /ON [10 0 R] /AS [<< /Event /Print /OCGs [9 0 R 10 0 R] /Category [/Print] >> << /Event /View /OCGs [9 0 R 10 0 R] /Category [/View] >>] >> >> >>".to_string(),
+            "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".into(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 3 0 R >> /Properties << /print 9 0 R /cover 10 0 R >> >> /Contents 5 0 R /Annots [6 0 R 7 0 R] >>".into(),
+            format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+            "<< /Type /Annot /Subtype /Square /Rect [10 50 190 80] /F 0 /P 4 0 R /IC [0 0 0] /C [0 0 0] /AP << /N 8 0 R >> >>".into(),
+            "<< /Type /Annot /Subtype /FreeText /Rect [10 120 160 155] /F 36 /P 4 0 R /DA (/Helv 12 Tf 0 g) /AP << /N 11 0 R >> >>".into(),
+            format!("<< /Type /XObject /Subtype /Form /BBox [0 0 180 30] /Length {} >>\nstream\n{cover_content}\nendstream", cover_content.len()),
+            "<< /Type /OCG /Name (Print only) /Usage << /Print << /PrintState /ON >> /View << /ViewState /OFF >> >> >>".into(),
+            "<< /Type /OCG /Name (Screen cover) /Usage << /Print << /PrintState /OFF >> /View << /ViewState /ON >> >> >>".into(),
+            format!("<< /Type /XObject /Subtype /Form /BBox [0 0 150 35] /Resources << /Font << /F1 3 0 R >> >> /Length {} >>\nstream\n{print_only_ap}\nendstream", print_only_ap.len()),
+        ];
+        assemble_test_pdf(&objects)
+    }
+
+    fn assemble_test_pdf(objects: &[String]) -> Vec<u8> {
+        let mut bytes = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, body) in objects.iter().enumerate() {
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes());
+        }
+        let startxref = bytes.len();
+        bytes.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+        for offset in offsets { bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes()); }
+        bytes.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{startxref}\n%%EOF\n", objects.len() + 1).as_bytes());
+        bytes
+    }
+
+    #[test]
+    fn raster_redaction_output_matches_the_viewer_not_print_mode() {
+        // SM7 R-1 and S-1: print-only content (a FreeText annotation flagged NoView+Print, an
+        // optional-content layer off on screen and on in print) must not appear in the copy, and
+        // screen-only covers (an opaque Square annotation without the Print flag, a layer on for
+        // View and off for Print) must keep covering. The secret sits outside the mark in all four.
+        let _print_guard = print_test_lock();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let folder = tempfile::tempdir().unwrap();
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let rectangles = vec![crate::raster_redaction::RasterRedactionRect { x: 150.0, y: 170.0, width: 40.0, height: 20.0 }];
+        let mut runs = Vec::new();
+        for (name, secret) in [("secret", "SM2SECRET42"), ("control", "           ")] {
+            let source = folder.path().join(format!("{name}.pdf"));
+            std::fs::write(&source, print_and_screen_only_fixture(secret)).unwrap();
+            let info = call(&service, |reply| Request::Open(source.clone(), reply)).unwrap();
+            let view = call(&service, |reply| Request::Render(info.id, 0, 417, reply)).unwrap();
+            let print_png = folder.path().join(format!("{name}-print.png"));
+            call(&service, |reply| Request::ExportPageImage(info.id, info.revision, 0, 150, PageImageFormat::Png, print_png.clone(), reply)).unwrap();
+            let output = folder.path().join(format!("{name}-redacted.pdf"));
+            let saved = call(&service, |reply| Request::RasterRedact(info.id, info.revision, 0, rectangles.clone(), output.clone(), reply)).unwrap();
+            let parsed = lopdf::Document::load_mem(&std::fs::read(&output).unwrap()).unwrap();
+            let page = parsed.get_dictionary(parsed.get_pages()[&1]).unwrap();
+            let image_id = page.get(b"Resources").unwrap().as_dict().unwrap().get(b"XObject").unwrap().as_dict().unwrap().get(b"Image").unwrap().as_reference().unwrap();
+            let rgb = parsed.get_object(image_id).unwrap().as_stream().unwrap().decompressed_content().unwrap();
+            runs.push((image::load_from_memory(&view).unwrap().to_rgb8().into_raw(), std::fs::read(print_png).unwrap(), rgb));
+            call(&service, |reply| Request::Close(saved.document.id, reply)).unwrap();
+            call(&service, |reply| Request::Close(info.id, reply)).unwrap();
+        }
+        assert_eq!(runs[0].0, runs[1].0, "fixture: the secret must be invisible in the viewer");
+        assert_ne!(runs[0].1, runs[1].1, "fixture: a print-mode render must show the secret, or this test proves nothing");
+        assert_eq!(runs[0].2, runs[1].2, "the redacted copy carries secret ink the viewer did not show");
+    }
+
+    #[test]
+    fn raster_redaction_with_session_comments_and_rotation_matches_the_viewer_pixels() {
+        // The app comment overlay (note_document) and the page plan go through the same viewer
+        // flags: outside the mark, the redacted page equals the viewer render at the same size.
+        let _print_guard = print_test_lock();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let folder = tempfile::tempdir().unwrap();
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        // A 216 pt square page: 450 px at 150 DPI on both axes, so the viewer's width-driven render
+        // and the redaction's fixed-size render use the same scale and can be compared pixel for pixel.
+        let content = "BT /F1 18 Tf 20 150 Td (Visible text) Tj ET 0 0 1 rg 30 30 80 40 re f";
+        let source = folder.path().join("square.pdf");
+        std::fs::write(&source, assemble_test_pdf(&[
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".into(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 216 216] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>".into(),
+            format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+        ])).unwrap();
+        let mut info = call(&service, |reply| Request::Open(source.clone(), reply)).unwrap();
+        info = call(&service, |reply| Request::Edit(info.id, PageEdit::Rotate { pages: vec![0], clockwise: true }, reply)).unwrap();
+        let (page_width, page_height) = (info.pages[0].width, info.pages[0].height);
+        let dimensions = crate::page_image::dimensions(page_width, page_height, 150, PageImageFormat::Png).unwrap();
+        let before = image::load_from_memory(&call(&service, |reply| Request::Render(info.id, 0, dimensions.width as i32, reply)).unwrap()).unwrap().to_rgb8();
+        info = call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::Create(0, CropRect { x: 0.1, y: 0.1, width: 0.3, height: 0.2 }, "Session note".into()), reply)).unwrap();
+        let view = image::load_from_memory(&call(&service, |reply| Request::Render(info.id, 0, dimensions.width as i32, reply)).unwrap()).unwrap().to_rgb8();
+        assert_eq!((view.width(), view.height()), (dimensions.width, dimensions.height), "viewer render at the 150 DPI size");
+        assert_ne!(before.as_raw(), view.as_raw(), "the session comment must draw in the viewer");
+        let mark = crate::raster_redaction::RasterRedactionRect { x: page_width - 20.0, y: page_height - 20.0, width: 20.0, height: 20.0 };
+        let output = folder.path().join("noted-redacted.pdf");
+        let saved = call(&service, |reply| Request::RasterRedact(info.id, info.revision, 0, vec![mark], output.clone(), reply)).unwrap();
+        let parsed = lopdf::Document::load_mem(&std::fs::read(&output).unwrap()).unwrap();
+        let page = parsed.get_dictionary(parsed.get_pages()[&1]).unwrap();
+        let image_id = page.get(b"Resources").unwrap().as_dict().unwrap().get(b"XObject").unwrap().as_dict().unwrap().get(b"Image").unwrap().as_reference().unwrap();
+        let rgb = parsed.get_object(image_id).unwrap().as_stream().unwrap().decompressed_content().unwrap();
+        let mark_top = ((page_height - 20.0) * dimensions.height as f32 / page_height).floor() as usize - 1;
+        let row = dimensions.width as usize * 3;
+        assert_eq!(&rgb[..mark_top * row], &view.as_raw()[..mark_top * row], "outside the mark the copy must equal the viewer render");
+        assert!(rgb.chunks_exact(3).rev().take(10).all(|pixel| pixel == [0, 0, 0]), "the mark is black");
         call(&service, |reply| Request::Close(saved.document.id, reply)).unwrap();
         call(&service, |reply| Request::Close(info.id, reply)).unwrap();
     }

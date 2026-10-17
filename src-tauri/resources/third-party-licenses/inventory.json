@@ -4,7 +4,7 @@
   "coverage": "Conservative resolved Cargo Windows graph, including build/auxiliary packages, plus non-development npm lock entries. Runtime-candidate is not proof of linked code. PDFium notices are packaged separately. Five exact MPL-2.0 crate source archives are packaged with verified locations and hashes; this collection does not determine the app license or complete release licensing review. The ocr-engine records cover the Tesseract engine, Leptonica and the English model packaged under resources/ocr/ by an installer built with an OCR setup root; their license texts are checked against scripts/ocr/pins.json.",
   "inputHashes": {
     "src-tauri/Cargo.lock": "cc62fdc127ea6a5d3bf7cd772485701c0d41f04fd1fbbb230f9536050f099fc6",
-    "src-tauri/Cargo.toml": "b97c1adeb6612b3231b317c1eb6edb5d43648dd6b4678a60b79fde555a3f639e",
+    "src-tauri/Cargo.toml": "42d3da25d2a7bf08dbf6273dcba0e123c351ec689efdc3812ebe8411f8e52c5b",
     "package-lock.json": "6f1441c57c13489547c54c3e845d12827b907b9cdb1d2f3d54c3321da7683801",
     "package.json": "e4ee9f328ec0dafc305cdee6e632dab65763ed1fd092cac204a3a13a3b314455",
     "scripts/notice-supplements/manifest.json": "f0700cbb9d20d43f42d709852e7961194d22937a41bf1fad5063e27f5fae2121",

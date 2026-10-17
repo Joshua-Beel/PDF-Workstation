@@ -642,20 +642,23 @@ try {
     Invoke-Scenario 'split' {
         Activate-Tab 'b.pdf'
         Open-Organizer
-        $folder = Join-Path $outDir 'split-out'
+        $parent = Join-Path $outDir 'split-parent'
+        New-Item -ItemType Directory -Path $parent | Out-Null
+        $folder = Join-Path $parent 'Split PDFs'
         $before = Get-AppState $outDir
         Click-Button -Name 'Split'; Wait-HtmlDialog 'Split PDF' | Out-Null
         Click-Button -Name 'Split PDF' -Last
         $dialog = Wait-NativeDialog
-        Test-NativeDialogShell 'split' $dialog 'Choose a new folder for split PDFs' 'Split PDFs' $null -NoFilter | Out-Null
-        Add-Result 'split' 'the folder chooser is a Save As (file name) dialog, not a folder picker' 'finding' 'src-tauri/src/main.rs:300 split_document uses rfd save_file() with set_file_name("Split PDFs"); the typed name becomes the new folder.'
+        Test-NativeDialogShell 'split' $dialog 'Choose a folder for split PDFs' $null $null -NoFilter | Out-Null
+        $select = Get-DialogDefaultButton $dialog
+        Assert-Check 'split' 'the chooser is a folder picker (default button selects a folder)' ($select -and $select.Current.Name -like '*Folder*') "button='$(if ($select) { $select.Current.Name })'" | Out-Null
         Stop-NativeDialog $dialog
         Assert-StateUnchanged 'split' $before (Get-AppState $outDir)
         Close-HtmlDialogs
         Click-Button -Name 'Split'; Wait-HtmlDialog 'Split PDF' | Out-Null
         Click-Button -Name 'Split PDF' -Last
         $dialog = Wait-NativeDialog
-        Complete-NativeDialog $dialog $folder
+        Complete-NativeDialog $dialog $parent
         Wait-HtmlDialog 'Split complete' | Out-Null
         $files = @(if (Test-Path -LiteralPath $folder) { @(Get-ChildItem -LiteralPath $folder -File | Sort-Object Name) })
         Assert-Check 'split' 'split folder created with one PDF per page' ($files.Count -eq 2) (($files | ForEach-Object Name) -join ', ') | Out-Null
@@ -680,8 +683,7 @@ try {
         $before = Get-AppState $outDir
         Click-Button -Name 'Save a copy' -Last
         $dialog = Wait-NativeDialog
-        Test-NativeDialogShell 'save-copy' $dialog 'Save As' 'organized-copy.pdf' 'PDF documents' | Out-Null
-        Add-Result 'save-copy' 'dialog title is the Windows default, not a descriptive one' 'finding' 'src-tauri/src/main.rs:197 save_copy sets no set_title, unlike the sibling routes.'
+        Test-NativeDialogShell 'save-copy' $dialog 'Save a copy as a new file' 'organized-copy.pdf' 'PDF documents' | Out-Null
         Stop-NativeDialog $dialog
         Assert-StateUnchanged 'save-copy' $before (Get-AppState $outDir)
         Click-Button -Name 'Save a copy' -Last
