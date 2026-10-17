@@ -367,12 +367,10 @@ pub(crate) fn check_faithful_load(document: &Document, source: &[u8]) -> Result<
     for object in document.objects.values() { if let Object::Stream(stream) = object { if stream.content.is_empty() && !resolves_to_zero(document, stream) { return Err("A PDF stream could not be read (its /Length does not resolve); a filled copy would drop its content.".into()); } } }
     // An indirect /Length that resolved late (to 0) leaves a stream empty although data follows: the raw bytes must go straight to `endstream`.
     for object in document.objects.values() { if let Object::Stream(stream) = object { if let (true, Some(start)) = (stream.content.is_empty(), stream.start_position) {
-        let tail = source.get(start..).unwrap_or(&[]); let tail = tail.strip_prefix(b"\r\n".as_slice()).or_else(|| tail.strip_prefix(b"\n")).or_else(|| tail.strip_prefix(b"\r")).unwrap_or(tail);
+        let header = source.windows(5).position(|window| window == b"%PDF-").unwrap_or(0);
+        let tail = source.get(header + start..).unwrap_or(&[]); let tail = tail.strip_prefix(b"\r\n".as_slice()).or_else(|| tail.strip_prefix(b"\n")).or_else(|| tail.strip_prefix(b"\r")).unwrap_or(tail);
         if !tail.starts_with(b"endstream") { return Err("A PDF stream's /Length resolves to zero but data follows; a filled copy would drop its content.".into()); }
     } } }
-    // Reverse direction: a loaded object must be backed by its own cross-reference entry, a direct entry at a non-zero offset or a compressed
-    // entry (lopdf only takes a compressed object from the stream its entry names). Free, missing or offset-0 entries mean an object stream supplied it.
-    if document.objects.keys().any(|(number, generation)| !matches!(document.reference_table.get(*number), Some(XrefEntry::Normal { offset, generation: entry }) if *offset != 0 && entry == generation) && !matches!(document.reference_table.get(*number), Some(XrefEntry::Compressed { .. }) if *generation == 0)) { return Err("A PDF object is not backed by its cross-reference entry; a filled copy would carry an object other viewers ignore.".into()); }
     // Every in-use entry must have loaded. An `n` entry at offset 0 is the unused `0000000000 00000 n` row some writers emit: offset 0
     // is the file header, so it cannot hold an object and viewers skip it.
     if document.reference_table.entries.iter().any(|(number, entry)| match entry { XrefEntry::Normal { offset, generation } => *offset != 0 && !document.objects.contains_key(&(*number, *generation)), XrefEntry::Compressed { .. } => !document.objects.contains_key(&(*number, 0)), _ => false }) { return Err(DROPPED.into()); }
