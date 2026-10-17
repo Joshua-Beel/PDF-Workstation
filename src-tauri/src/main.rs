@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod service;
 mod pdf_engine;
+mod pdf_helper;
 mod open_path;
 mod open_limits;
 mod pdf_load;
@@ -59,6 +60,11 @@ mod ocr_build;
 mod ocr_test_support;
 use service::{DocumentInfo, PdfService};
 use tauri::{Manager, State};
+
+/// The system allocator in the app; in the PDF-engine helper, armed to exit cleanly on a refused allocation.
+#[cfg(windows)]
+#[global_allocator]
+static ALLOCATOR: child_job::ModeSwitchAllocator = child_job::ModeSwitchAllocator;
 
 fn update_attempt_root(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     app.path().app_data_dir().map_err(|error| format!("The update recovery folder is unavailable: {error}"))
@@ -343,6 +349,10 @@ async fn fill_form_copy(app: tauri::AppHandle, service: State<'_, PdfService>, i
 }
 
 fn main() {
+    #[cfg(windows)]
+    if pdf_helper::is_helper_invocation(std::env::args_os()) {
+        pdf_helper::run_helper_mode();
+    }
     tauri::Builder::default().plugin(tauri_plugin_updater::Builder::new().build()).manage(update_commands::PendingUpdate::default()).setup(|app| {
         let library = app.path().resource_dir()?.join("resources/pdfium/bin/pdfium.dll");
         let recovery_root = app.path().app_data_dir()?.join("recovery");

@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, HashSet, VecDeque}, io::Write, path::PathBuf, sync::{Arc, Mutex, mpsc, OnceLock}};
 use crate::pdf_engine::{EngineDocument, PageSize, PageTarget, PdfEngine, ProbeError, RenderError, RenderMode, TextError};
-type Engine = crate::pdf_engine::InProcessEngine;
+type Engine = crate::pdf_helper::SelectedEngine;
 type EngineDoc<'a> = <Engine as PdfEngine>::Document<'a>;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

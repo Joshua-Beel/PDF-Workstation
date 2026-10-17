@@ -27,6 +27,8 @@ pub(crate) struct LoadError { password: bool, message: String }
 impl LoadError {
     /// The document is encrypted and the password (or no password) was not accepted.
     pub(crate) fn is_password(&self) -> bool { self.password }
+    /// A load error reported by another engine implementation (the helper process).
+    pub(crate) fn new(password: bool, message: String) -> Self { Self { password, message } }
 }
 impl std::fmt::Display for LoadError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { formatter.write_str(&self.message) }
