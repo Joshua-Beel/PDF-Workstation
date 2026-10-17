@@ -208,17 +208,35 @@ fn a_reply_sent_after_a_refused_allocation_is_discarded_with_its_helper() {
     assert_ne!(engine.stats().process_id, Some(pid));
 }
 
+/// Step 4: render targets are app-owned sections, which are not charged to the helper's job, so a bitmap
+/// larger than the whole cap renders (step 3 refused it, the pixels then lived in the helper).
 #[test]
-fn a_render_larger_than_the_cap_fails_instead_of_returning_a_bitmap() {
+fn a_bitmap_larger_than_the_cap_renders_into_an_app_section() {
     let engine = RemotePdfEngine::start(test_config(LOW_CAP)).unwrap();
     let document = engine.load_from_vec(welcome(), None).unwrap();
     let (width, height) = (6_000_u32, 6_000_u32);
     let mut pixels = vec![0x5a_u8; (width * height * 4) as usize];
-    let error = document.render_bgra_into(PageTarget::Source(0), RenderMode::Print, width, height, &mut pixels).unwrap_err();
-    let expected = HelperFailure::LimitViolation(LimitViolation::ProcessMemory).message();
-    assert!(matches!(&error, RenderError::Render(message) if *message == expected), "{error:?}");
-    assert!(pixels.iter().all(|byte| *byte == 0x5a), "nothing from the capped helper reaches the caller's buffer");
-    assert!(matches!(engine.stats().last_failure, Some(HelperFailure::LimitViolation(_))));
+    document.render_bgra_into(PageTarget::Source(0), RenderMode::Print, width, height, &mut pixels).unwrap();
+    assert!(pixels.chunks_exact(4).any(|pixel| pixel != [0x5a; 4]), "the render reached the caller's buffer");
+    assert!(engine.stats().last_failure.is_none(), "{:?}", engine.stats().last_failure);
+}
+
+/// Step 4: sources are app-owned read-only sections, also not charged to the helper's job, so a source
+/// larger than the whole cap loads and renders (step 3 copied it into the helper's heap).
+#[test]
+fn a_source_larger_than_the_cap_loads_from_an_app_section() {
+    use lopdf::{dictionary, Object, Stream};
+    let mut padded = lopdf::Document::load_mem(&welcome()).unwrap();
+    let ballast = padded.add_object(Stream::new(dictionary! {}, vec![b'0'; LOW_CAP + 64 * 1024 * 1024]));
+    padded.trailer.set("SM5Ballast", Object::Reference(ballast));
+    let mut bytes = Vec::new();
+    padded.save_to(&mut bytes).unwrap();
+    assert!(bytes.len() > LOW_CAP);
+    let engine = RemotePdfEngine::start(test_config(LOW_CAP)).unwrap();
+    let document = engine.load_from_vec(bytes, None).unwrap();
+    assert_eq!(document.page_sizes().unwrap().len(), WELCOME_PAGES);
+    assert!(render(&document).chunks_exact(4).any(|pixel| pixel != [255; 4]));
+    assert!(engine.stats().last_failure.is_none(), "{:?}", engine.stats().last_failure);
 }
 
 #[test]
@@ -302,6 +320,17 @@ fn t13_the_helper_inherits_only_its_pipes() {
     unsafe { CloseHandle(event) }.unwrap();
 }
 
+/// T13, read-only half: a source section reaches the helper through a handle that allows reading only, so
+/// a write mapping through it fails while a read mapping sees the app's bytes. A handle shared writable (as
+/// render targets are) does allow writing, which shows the probe can tell the difference.
+#[test]
+fn t13_source_sections_reach_the_helper_read_only() {
+    let engine = RemotePdfEngine::start(test_config(TEST_CAP)).unwrap();
+    let section = super::section::Section::from_bytes(&[0xa5; 8192]).unwrap();
+    assert_eq!(engine.probe_section(&section, super::section::FILE_MAP_READ), Ok(0b110), "read-only: no write mapping, reads the app's bytes");
+    assert_eq!(engine.probe_section(&section, super::section::FILE_MAP_READ | super::section::FILE_MAP_WRITE), Ok(0b111));
+}
+
 #[test]
 fn t14_malformed_replies_end_the_helper_and_fail_only_that_request() {
     type Probe = fn(&RemoteDocument<'_>) -> bool;
@@ -322,7 +351,7 @@ fn t14_malformed_replies_end_the_helper_and_fail_only_that_request() {
         (Misreply::DropLastPage, sizes),
         (Misreply::DropLastFourBytes, bitmap),
         (Misreply::CorruptLastByte, text),
-        (Misreply::BumpFirstPayloadU32, png),
+        (Misreply::BumpFirstPayloadU32, sizes),
     ];
     let engine = RemotePdfEngine::start(test_config(TEST_CAP)).unwrap();
     let bystander = engine.load_from_vec(welcome(), None).unwrap();
@@ -530,16 +559,10 @@ fn reply_decoders_reject_inconsistent_content() {
     let negative = payload_of(&frame(kind::PAGE_SIZES, 1, |writer| put_page_sizes(writer, &[PageSize { width: -1.0, height: 792.0 }])));
     assert!(decode(&negative, |reader| get_page_sizes(reader, 1)).is_err());
 
-    let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13];
-    png.extend_from_slice(b"IHDR");
-    png.extend_from_slice(&300_u32.to_be_bytes());
-    png.extend_from_slice(&400_u32.to_be_bytes());
-    let viewer = |width: u32, height: u32, bytes: &[u8]| payload_of(&frame(kind::VIEWER_PNG, 1, |writer| put_png(writer, width, height, bytes)));
-    assert!(decode(&viewer(300, 400, &png), |reader| get_png(reader, 300)).is_ok());
-    assert!(decode(&viewer(300, 400, &png), |reader| get_png(reader, 299)).is_err(), "wider than requested");
-    assert!(decode(&viewer(301, 400, &png), |reader| get_png(reader, 400)).is_err(), "differs from the PNG header");
-    assert!(decode(&viewer(300, 6000, &png), |reader| get_png(reader, 300)).is_err(), "taller than 5,000");
-    assert!(decode(&viewer(300, 400, &png[1..]), |reader| get_png(reader, 300)).is_err(), "not a PNG");
+    assert_eq!(viewer_size(612.0, 792.0, 800), Some((800, 1035)));
+    assert_eq!(viewer_size(612.0, 7920.0, 800), Some((386, 5000)), "clamped to 5,000 high, aspect kept");
+    assert_eq!(viewer_size(0.0, 792.0, 800), None);
+    assert_eq!(viewer_size(f32::NAN, 792.0, 800), None);
 
     let expected = GeometryRequest { id: 4, index: 2, revision: 9 };
     let geometry = |id: u64, text: &str, angle: u16| {

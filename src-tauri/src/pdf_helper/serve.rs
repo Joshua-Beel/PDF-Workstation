@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 
 use super::protocol::*;
+use super::section::View;
 use crate::pdf_engine::{bgra_len, EngineDocument, InProcessDocument, InProcessEngine, LoadError, PdfEngine, ProbeError, RenderError, TextError};
 
 /// Exit codes of the helper loop. The app treats any exit as a failure of the request in flight.
@@ -35,7 +36,6 @@ const DOCUMENT_KINDS: &[u16] = &[
     kind::CLOSE,
     kind::PAGE_SIZES,
     kind::PLANNED_PAGE_SIZE,
-    kind::VIEWER_PNG,
     kind::VISIBLE_TEXT,
     kind::TEXT_GEOMETRY,
     kind::TEXT_GEOMETRY_WITH_SOURCE,
@@ -132,9 +132,16 @@ fn send(output: &mut impl Write, reply: Reply, sequence: u32) -> bool {
     output.write_all(&reply_frame(reply, sequence)).and_then(|()| output.flush()).is_ok()
 }
 
+/// A loaded document and the read-only view of the app's section that holds its source. Field order
+/// matters: the document (which borrows the view's bytes) is dropped first.
+struct HelperDocument<'e> {
+    document: InProcessDocument<'e>,
+    _source: View,
+}
+
 struct State<'e> {
     engine: &'e InProcessEngine,
-    documents: HashMap<u32, InProcessDocument<'e>>,
+    documents: HashMap<u32, HelperDocument<'e>>,
     next_handle: u32,
     #[cfg(test)]
     misreply: Option<super::faults::Misreply>,
@@ -176,11 +183,12 @@ impl<'e> State<'e> {
     /// The reply to one request; `Err` only when the request itself is malformed.
     fn handle(&mut self, header: Header, body: Vec<u8>) -> Result<Reply, Malformed> {
         let Header { kind: request_kind, sequence } = header;
-        if request_kind == kind::LOAD {
-            let (password, bytes) = take_load(body)?;
-            return Ok(self.load(bytes, password.as_deref(), sequence));
-        }
         let (_, mut reader) = parse_body(&body)?;
+        if request_kind == kind::LOAD {
+            let (password, section, len) = get_load(&mut reader)?;
+            reader.finish()?;
+            return Ok(self.load(section, len, password.as_deref(), sequence));
+        }
         #[cfg(test)]
         if request_kind == kind::FAULT {
             let fault = super::faults::Fault::read(&mut reader)?;
@@ -197,7 +205,7 @@ impl<'e> State<'e> {
             self.documents.remove(&handle);
             return Ok(Ok(out));
         }
-        let Some(document) = self.documents.get(&handle) else {
+        let Some(document) = self.documents.get(&handle).map(|loaded| &loaded.document) else {
             return Ok(Err(general("The PDF engine has no such document.")));
         };
         let result: Result<(), (u8, String)> = match request_kind {
@@ -209,15 +217,6 @@ impl<'e> State<'e> {
                 let spec = get_spec(&mut reader)?;
                 reader.finish()?;
                 document.planned_page_size(&spec).map(|pair| put_pair(&mut out, pair)).map_err(general)
-            }
-            kind::VIEWER_PNG => {
-                let spec = get_spec(&mut reader)?;
-                let width = reader.i32()?;
-                reader.finish()?;
-                if !(1..=MAX_VIEWER_WIDTH).contains(&width) {
-                    return Err(Malformed::new("viewer width out of range"));
-                }
-                document.render_viewer_png(&spec, width).map(|png| put_png(&mut out, png.width, png.height, &png.png)).map_err(general)
             }
             kind::VISIBLE_TEXT => {
                 let target = get_target(&mut reader)?;
@@ -297,10 +296,14 @@ impl<'e> State<'e> {
             kind::RENDER_BGRA => {
                 let target = get_target(&mut reader)?;
                 let mode = get_mode(&mut reader)?;
-                let (width, height) = (reader.u32()?, reader.u32()?);
+                let (width, height, section) = (reader.u32()?, reader.u32()?, reader.u64()?);
                 reader.finish()?;
-                let length = bgra_len(width, height).filter(|length| *length <= MAX_BGRA_BYTES).ok_or_else(|| Malformed::new("bitmap size out of range"))?;
-                document.render_bgra_into(target.as_target(), mode, width, height, out.zeroed(length)).map_err(render_error)
+                let length = bgra_len(width, height).filter(|length| (1..=MAX_BGRA_BYTES).contains(length));
+                let target_view = length.ok_or_else(|| "The bitmap size is out of range.".to_owned()).and_then(|length| unsafe { View::map_passed(section, length, true) });
+                match target_view {
+                    Ok(mut view) => document.render_bgra_into(target.as_target(), mode, width, height, view.as_mut_slice()).map_err(render_error),
+                    Err(message) => Err((class::RENDER_RENDER, message)),
+                }
             }
             #[cfg(test)]
             kind::PAGE_LABELS => {
@@ -313,17 +316,21 @@ impl<'e> State<'e> {
         Ok(result.map(|()| out))
     }
 
-    fn load(&mut self, bytes: Vec<u8>, password: Option<&str>, sequence: u32) -> Reply {
+    /// Maps the app's read-only source section (closing the passed handle either way) and loads the
+    /// document over the mapping, without copying the source into this process.
+    fn load(&mut self, section: u64, len: usize, password: Option<&str>, sequence: u32) -> Reply {
+        let source = unsafe { View::map_passed(section, len, false) }.map_err(|message| (class::LOAD_OTHER, message))?;
         #[cfg(test)]
-        super::faults::exit_if_crash_on_load(&bytes);
+        super::faults::exit_if_crash_on_load(source.as_slice());
         if self.documents.len() >= MAX_HELPER_DOCUMENTS {
             return Err(general("The PDF engine has too many documents open."));
         }
-        let document = self.engine.load_from_vec(bytes, password).map_err(load_error)?;
+        let bytes: &'e [u8] = unsafe { source.detached_slice() };
+        let document = self.engine.load_from_slice(bytes, password).map_err(load_error)?;
         let handle = self.next_handle;
         self.next_handle = self.next_handle.checked_add(1).unwrap_or(1);
         let loaded = Loaded { handle, page_count: document.page_count(), unprotected: document.is_unprotected() };
-        self.documents.insert(handle, document);
+        self.documents.insert(handle, HelperDocument { document, _source: source });
         let mut out = FrameWriter::new(kind::LOAD, sequence);
         put_loaded(&mut out, &loaded);
         Ok(out)

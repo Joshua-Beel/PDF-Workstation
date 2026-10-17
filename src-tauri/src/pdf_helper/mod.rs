@@ -20,6 +20,8 @@ mod protocol;
 #[cfg(windows)]
 mod remote;
 #[cfg(windows)]
+mod section;
+#[cfg(windows)]
 mod serve;
 #[cfg(windows)]
 mod supervisor;

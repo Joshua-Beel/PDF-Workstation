@@ -636,6 +636,30 @@ impl Supervisor {
         self.spawn_now()
     }
 
+    /// As `call`, after duplicating `handle` with exactly `access` into the helper that will receive the
+    /// request; `payload` gets the handle's value in the helper, which the helper closes after use. If the
+    /// helper dies first, the handle dies with it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn call_sharing<T>(
+        &mut self,
+        handle: windows::Win32::Foundation::HANDLE,
+        access: u32,
+        request_kind: u16,
+        capacity: usize,
+        payload: impl FnOnce(&mut FrameWriter, u64),
+        reply_limit: usize,
+        deadline: Duration,
+        allowed: &[u8],
+        decode: impl FnOnce(&mut WireReader<'_>) -> Result<T, Malformed>,
+    ) -> Result<T, CallError> {
+        self.ensure_running().map_err(CallError::Failure)?;
+        let shared = match &self.helper {
+            Some(helper) => helper.child.share_handle(handle, access).map_err(|error| CallError::Engine(class::GENERAL, error.0))?,
+            None => return Err(CallError::Failure(HelperFailure::Stopped)),
+        };
+        self.call_running(request_kind, capacity, |writer| payload(writer, shared), reply_limit, deadline, allowed, decode)
+    }
+
     /// Sends one request and decodes its reply. `payload` writes the request after the header;
     /// `reply_limit` bounds the reply frame; `allowed` lists the error classes this request may return;
     /// `decode` must consume the reply payload exactly. Any helper failure, or a reply that fails to decode,

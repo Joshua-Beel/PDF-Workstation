@@ -1,17 +1,17 @@
 //! [`RemotePdfEngine`]: the [`PdfEngine`] implementation that forwards every call to the helper process.
 //!
-//! Each document keeps its source bytes and password in the app, so it can be loaded again into a new
-//! helper after a restart. That reload is lazy (on the document's next call) and is skipped for a
+//! Each document keeps its source in an app-owned shared section (shared with the helper read-only) and
+//! its password in the app, so it can be loaded again into a new helper after a restart. That reload is lazy (on the document's next call) and is skipped for a
 //! *suspect* document: one whose request was in flight when a helper died. A suspect document answers
 //! every call with an error until [`RemoteDocument::retry`]; a second death on the same document closes
 //! its engine side for good (its edits live in the app and are unaffected).
 
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 
 use super::protocol::*;
+use super::section::{Section, View, FILE_MAP_READ, FILE_MAP_WRITE};
 use super::supervisor::{CallError, HelperConfig, HelperFailure, Supervisor};
 use crate::editor::{CropBox, PageSpec};
 use crate::pdf_engine::{bgra_len, EngineBookmark, EngineDocument, LoadError, PageSize, PageTarget, PdfEngine, ProbeError, RenderError, RenderMode, RenderedPng, TextError};
@@ -21,16 +21,20 @@ pub(crate) const CLOSED_MESSAGE: &str = "This file couldn't be displayed: the PD
 const RELOAD_CHANGED_MESSAGE: &str = "This file couldn't be displayed: it reloaded with a different page count.";
 /// Helper deaths after which a document's engine side is closed for good.
 const MAX_DEATHS: u8 = 2;
+/// A render target section larger than this is released after use; smaller ones are kept for the next render.
+const KEEP_RENDER_TARGET: usize = 32 * 1024 * 1024;
 
 pub(crate) struct RemotePdfEngine {
     supervisor: RefCell<Supervisor>,
     /// Handles loaded in the running helper generation: a handle the helper gives out twice is refused.
     live: RefCell<(u64, HashSet<u32>)>,
+    /// The app-owned section the helper renders bitmaps into, kept between renders up to `KEEP_RENDER_TARGET`.
+    render_target: RefCell<Option<(Section, View)>>,
 }
 
 impl RemotePdfEngine {
     pub(crate) fn start(config: HelperConfig) -> Result<Self, String> {
-        Supervisor::start(config).map(|supervisor| Self { supervisor: RefCell::new(supervisor), live: RefCell::new((0, HashSet::new())) }).map_err(|failure| failure.message())
+        Supervisor::start(config).map(|supervisor| Self { supervisor: RefCell::new(supervisor), live: RefCell::new((0, HashSet::new())), render_target: RefCell::new(None) }).map_err(|failure| failure.message())
     }
 
     /// The app's helper (see [`HelperConfig::production`]).
@@ -49,18 +53,28 @@ impl RemotePdfEngine {
         self.supervisor.borrow().stats()
     }
 
+    /// Shares `section` with `access` into the helper and asks it to probe the mapping (test only).
+    #[cfg(test)]
+    pub(crate) fn probe_section(&self, section: &Section, access: u32) -> Result<u8, CallError> {
+        let len = section.len() as u64;
+        let deadline = self.supervisor.borrow().deadlines().read;
+        self.supervisor.borrow_mut().call_sharing(section.handle(), access, kind::FAULT, 32, |writer, shared| super::faults::Fault::ProbeSection(shared, len).write(writer), MAX_CONTROL_REPLY, deadline, class::ONLY_GENERAL, |reader| reader.u8())
+    }
+
     /// Sends a test-only fault request (not tied to a document).
     #[cfg(test)]
     pub(crate) fn fault(&self, fault: super::faults::Fault, deadline: std::time::Duration) -> Result<u8, CallError> {
         self.supervisor.borrow_mut().call(kind::FAULT, 16, |writer| fault.write(writer), MAX_CONTROL_REPLY, deadline, class::ONLY_GENERAL, |reader| reader.u8())
     }
 
-    /// Loads `source` into the running helper (starting one if needed); returns the helper generation too.
-    fn load_handle(&self, source: &[u8], password: Option<&str>) -> Result<(u64, Loaded), CallError> {
+    /// Loads the document in `source` into the running helper (starting one if needed), sharing the section
+    /// read-only; returns the helper generation too.
+    fn load_handle(&self, source: &Section, password: Option<&str>) -> Result<(u64, Loaded), CallError> {
         let mut supervisor = self.supervisor.borrow_mut();
         let deadline = supervisor.deadlines().load;
-        let capacity = source.len().saturating_add(password.map_or(0, str::len) + 16);
-        let loaded = supervisor.call(kind::LOAD, capacity, |writer| put_load(writer, password, source), MAX_CONTROL_REPLY, deadline, class::LOAD, get_loaded)?;
+        let capacity = password.map_or(0, str::len) + 32;
+        let len = source.len();
+        let loaded = supervisor.call_sharing(source.handle(), FILE_MAP_READ, kind::LOAD, capacity, |writer, shared| put_load(writer, password, shared, len), MAX_CONTROL_REPLY, deadline, class::LOAD, get_loaded)?;
         let generation = supervisor.running_generation().ok_or(CallError::Failure(HelperFailure::Stopped))?;
         let mut live = self.live.borrow_mut();
         if live.0 != generation {
@@ -72,7 +86,25 @@ impl RemotePdfEngine {
         Ok((generation, loaded))
     }
 
-    fn load<'a>(&'a self, source: Cow<'a, [u8]>, password: Option<&str>) -> Result<RemoteDocument<'a>, LoadError> {
+    /// Runs `render` with a target section of at least `length` bytes and the app's view of it.
+    fn with_render_target<T>(&self, length: usize, render: impl FnOnce(&Section, &View) -> T) -> Result<T, String> {
+        let mut slot = self.render_target.borrow_mut();
+        if slot.as_ref().is_none_or(|(section, _)| section.len() < length) {
+            *slot = None;
+            let section = Section::create(length)?;
+            let view = section.map(false)?;
+            *slot = Some((section, view));
+        }
+        let (section, view) = slot.as_ref().expect("render target");
+        let result = render(section, view);
+        if length > KEEP_RENDER_TARGET {
+            *slot = None;
+        }
+        Ok(result)
+    }
+
+    fn load<'a>(&'a self, bytes: &[u8], password: Option<&str>) -> Result<RemoteDocument<'a>, LoadError> {
+        let source = Section::from_bytes(bytes).map_err(|message| LoadError::new(false, message))?;
         let (generation, loaded) = self.load_handle(&source, password).map_err(|error| match error {
             CallError::Engine(class::LOAD_PASSWORD, message) => LoadError::new(true, message),
             other => LoadError::new(false, other.message()),
@@ -91,10 +123,10 @@ impl RemotePdfEngine {
 impl PdfEngine for RemotePdfEngine {
     type Document<'a> = RemoteDocument<'a>;
     fn load_from_vec(&self, bytes: Vec<u8>, password: Option<&str>) -> Result<RemoteDocument<'_>, LoadError> {
-        self.load(Cow::Owned(bytes), password)
+        self.load(&bytes, password)
     }
     fn load_from_slice<'a>(&'a self, bytes: &'a [u8], password: Option<&str>) -> Result<RemoteDocument<'a>, LoadError> {
-        self.load(Cow::Borrowed(bytes), password)
+        self.load(bytes, password)
     }
 }
 
@@ -108,7 +140,7 @@ struct DocState {
 /// A document loaded in the helper. Page count and protection are read once at load.
 pub(crate) struct RemoteDocument<'a> {
     engine: &'a RemotePdfEngine,
-    source: Cow<'a, [u8]>,
+    source: Section,
     password: Option<String>,
     page_count: usize,
     unprotected: bool,
@@ -230,6 +262,47 @@ impl RemoteDocument<'_> {
         result
     }
 
+    /// As `request`, sharing `handle` with `access` into the helper for this request.
+    #[allow(clippy::too_many_arguments)]
+    fn request_sharing<T>(
+        &self,
+        handle: windows::Win32::Foundation::HANDLE,
+        access: u32,
+        request_kind: u16,
+        payload: impl FnOnce(&mut FrameWriter, u64),
+        deadline: Deadline,
+        allowed: &[u8],
+        decode: impl FnOnce(&mut WireReader<'_>) -> Result<T, Malformed>,
+    ) -> Result<T, CallError> {
+        let document = self.current_handle()?;
+        let result = {
+            let mut supervisor = self.engine.supervisor.borrow_mut();
+            let deadlines = supervisor.deadlines();
+            let deadline = match deadline {
+                Deadline::Render => deadlines.render,
+                Deadline::Read => deadlines.read,
+            };
+            supervisor.call_sharing(
+                handle,
+                access,
+                request_kind,
+                96,
+                |writer, shared| {
+                    writer.u32(document);
+                    payload(writer, shared);
+                },
+                MAX_CONTROL_REPLY,
+                deadline,
+                allowed,
+                decode,
+            )
+        };
+        if let Err(CallError::Failure(failure)) = &result {
+            self.blame(failure);
+        }
+        result
+    }
+
     fn read<T>(&self, request_kind: u16, payload: impl FnOnce(&mut FrameWriter), decode: impl FnOnce(&mut WireReader<'_>) -> Result<T, Malformed>) -> Result<T, String> {
         self.request(request_kind, 64, payload, MAX_DTO_REPLY, Deadline::Read, class::ONLY_GENERAL, decode).map_err(CallError::message)
     }
@@ -278,18 +351,27 @@ impl EngineDocument for RemoteDocument<'_> {
         self.read(kind::PLANNED_PAGE_SIZE, |writer| put_spec(writer, spec), get_pair)
     }
 
+    /// The app sizes the bitmap from the planned page size (as pdfium-render would), the helper renders it
+    /// with the viewer's flags into an app-owned section, and the app encodes the PNG: no helper-made image
+    /// reaches the webview.
     fn render_viewer_png(&self, spec: &PageSpec, width: i32) -> Result<RenderedPng, String> {
         if !(1..=MAX_VIEWER_WIDTH).contains(&width) {
             return Err(format!("The viewer width {width} is outside the supported range."));
         }
-        let payload = |writer: &mut FrameWriter| {
-            put_spec(writer, spec);
-            writer.i32(width);
-        };
-        let (width, height, png) = self
-            .request(kind::VIEWER_PNG, 64, payload, viewer_reply_limit(width), Deadline::Render, class::ONLY_GENERAL, |reader| get_png(reader, width))
-            .map_err(CallError::message)?;
-        Ok(RenderedPng { png, width, height })
+        let (page_width, page_height) = self.planned_page_size(spec)?;
+        let (pixels_wide, pixels_high) = viewer_size(page_width, page_height, width).ok_or("The page has no area to render.")?;
+        let mut pixels = vec![0; bgra_len(pixels_wide, pixels_high).ok_or("The page is too large to render.")?];
+        self.render_bgra_into(PageTarget::Planned(spec), RenderMode::Viewer, pixels_wide, pixels_high, &mut pixels).map_err(|error| match error {
+            RenderError::Page(message) | RenderError::Render(message) | RenderError::Format(message) => message,
+            RenderError::Layout => "Unexpected viewer bitmap layout.".to_owned(),
+        })?;
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        let image = image::RgbaImage::from_raw(pixels_wide, pixels_high, pixels).ok_or("Unexpected viewer bitmap layout.")?;
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image).write_to(&mut png, image::ImageFormat::Png).map_err(|error| error.to_string())?;
+        Ok(RenderedPng { png: png.into_inner(), width: pixels_wide, height: pixels_high })
     }
 
     fn visible_text(&self, target: PageTarget<'_>) -> Result<String, TextError> {
@@ -397,21 +479,21 @@ impl EngineDocument for RemoteDocument<'_> {
         if length > MAX_BGRA_BYTES {
             return Err(RenderError::Render("The bitmap is larger than the PDF engine renders.".into()));
         }
-        let payload = |writer: &mut FrameWriter| {
-            put_target(writer, target);
-            put_mode(writer, mode);
-            writer.u32(width);
-            writer.u32(height);
-        };
-        let decode = |reader: &mut WireReader<'_>| {
-            let pixels = reader.rest();
-            if pixels.len() != length {
-                return Err(Malformed::new(format!("a {width}x{height} bitmap of {} bytes", pixels.len())));
+        let rendered = self.engine.with_render_target(length, |section, view| {
+            let payload = |writer: &mut FrameWriter, shared: u64| {
+                put_target(writer, target);
+                put_mode(writer, mode);
+                writer.u32(width);
+                writer.u32(height);
+                writer.u64(shared);
+            };
+            let result = self.request_sharing(section.handle(), FILE_MAP_READ | FILE_MAP_WRITE, kind::RENDER_BGRA, payload, Deadline::Render, class::RENDER, |_| Ok(()));
+            if result.is_ok() {
+                out.copy_from_slice(&view.as_slice()[..length]);
             }
-            out.copy_from_slice(pixels);
-            Ok(())
-        };
-        self.request(kind::RENDER_BGRA, 64, payload, HEADER_LEN + length, Deadline::Render, class::RENDER, decode).map_err(render_error)
+            result
+        });
+        rendered.map_err(RenderError::Render)?.map_err(render_error)
     }
 }
 
