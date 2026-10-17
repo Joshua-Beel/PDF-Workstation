@@ -14,15 +14,17 @@
 //! are identical to the control run, so the secret contributed no ink.
 //!
 //! The on-screen viewer renders with `render_annotations(true)` and no
-//! `FPDF_PRINTING`; redaction renders with `use_print_quality(true)`, which sets
-//! `FPDF_PRINTING`. Tests named `documents_leak_*` assert the current leaking
-//! behaviour so the evidence reruns wherever the full native suite runs: there
-//! is no per-push CI, but `scripts/run-native-recovery-gates.ps1` runs every
-//! test target (`cargo test --locked`) in the manual Windows validation, the
-//! tag-triggered release and the manual signed-OCR workflows. When SM2 fixes the
-//! leak these tests fail and must be flipped to `assert_clean`.
-//! `worker_render_path_matches_this_replica` fails if `service.rs` drifts from
-//! the flags, DPI or conversion copied here.
+//! `FPDF_PRINTING`. Redaction used to render with `use_print_quality(true)`
+//! (`FPDF_PRINTING`), which leaked print-only content (R-1) and dropped
+//! screen-only covers (S-1); since SM2's fix it renders with `RenderMode::Viewer`,
+//! exactly the viewer's flags, so the replica below uses one render for both the
+//! view and the output. The five former `documents_leak_*` tests now assert
+//! clean, and the `screen_*` tests pin the consequences of the viewer flags.
+//! There is no per-push CI, but `scripts/run-native-recovery-gates.ps1` runs
+//! every test target (`cargo test --locked`) in the manual Windows validation,
+//! the tag-triggered release and the manual signed-OCR workflows.
+//! `worker_render_path_matches_this_replica` fails if `service.rs` or
+//! `pdf_engine.rs` drifts from the flags, DPI or conversion copied here.
 
 #[allow(dead_code)]
 #[path = "../src/page_image.rs"]
@@ -163,18 +165,16 @@ fn text_ap(secret: &str, width: u32, height: u32) -> Vec<u8> {
     )
 }
 
-fn render(page: &PdfPage, redaction_flags: bool) -> Vec<u8> {
+/// The viewer's flags, which are also the redaction render's flags (`RenderMode::Viewer`).
+fn render(page: &PdfPage) -> Vec<u8> {
     let dimensions = page_image::dimensions(page.width().value, page.height().value, 150, PageImageFormat::Png).unwrap();
-    let mut config = PdfRenderConfig::new()
+    let config = PdfRenderConfig::new()
         .set_fixed_size(dimensions.width as i32, dimensions.height as i32)
         .set_format(PdfBitmapFormat::BGRA)
         .set_reverse_byte_order(false)
         .clear_before_rendering(true)
         .set_clear_color(PdfColor::WHITE)
         .render_annotations(true);
-    if redaction_flags {
-        config = config.render_form_data(true).use_print_quality(true);
-    }
     let bitmap = page.render_with_config(&config).unwrap();
     page_image::bgra_to_rgb(dimensions, &bitmap.as_raw_bytes(), PageImageFormat::Png).unwrap()
 }
@@ -191,13 +191,13 @@ fn redact(source: &[u8], rectangles: &[RasterRedactionRect]) -> Redacted {
     for (index, page) in document.pages().iter().enumerate() {
         let (page_width, page_height) = (page.width().value, page.height().value);
         let dimensions = page_image::dimensions(page_width, page_height, 150, PageImageFormat::Png).unwrap();
-        view.push(render(&page, false));
+        view.push(render(&page));
         pages.push(RasterRedactionPage {
             page_width,
             page_height,
             image_width: dimensions.width,
             image_height: dimensions.height,
-            rgb: render(&page, true),
+            rgb: render(&page),
             rectangles: if index == 0 { rectangles.to_vec() } else { Vec::new() },
         });
     }
@@ -257,7 +257,7 @@ fn rerender(bytes: &[u8]) -> Vec<Vec<u8>> {
     document
         .pages()
         .iter()
-        .map(|page| render(&page, false))
+        .map(|page| render(&page))
         .collect()
 }
 
@@ -446,24 +446,46 @@ fn noview_print_form_field_outside_the_box_is_not_rendered() {
     assert_clean(&report);
 }
 
+fn freetext_outside_box(s: &str, flags: u32) -> Vec<u8> {
+    let a = first_extra(2);
+    let mut first = page("");
+    first.extra = format!("/Annots [{a} 0 R]");
+    let annot = obj(format!(
+        "<< /Type /Annot /Subtype /FreeText /Rect [10 40 160 75] /F {flags} /P 4 0 R /Contents ({s}) /DA (/Helv 12 Tf 0 g) /AP << /N {} 0 R >> >>",
+        a + 1
+    ));
+    two_pages(first, "", vec![annot, text_ap(s, 150, 35)], "")
+}
+
 #[test]
-fn documents_leak_noview_print_annotation_hidden_on_screen_is_printed_into_output() {
-    let build = |s: &str| {
-        let a = first_extra(2);
-        let mut first = page("");
-        first.extra = format!("/Annots [{a} 0 R]");
-        let annot = obj(format!(
-            "<< /Type /Annot /Subtype /FreeText /Rect [10 40 160 75] /F 36 /P 4 0 R /Contents ({s}) /DA (/Helv 12 Tf 0 g) /AP << /N {} 0 R >> >>",
-            a + 1
-        ));
-        two_pages(first, "", vec![annot, text_ap(s, 150, 35)], "")
-    };
-    let report = evaluate("annot_noview_print", build, &[BOX]);
+fn noview_print_annotation_hidden_on_screen_stays_out_of_output() {
+    let report = evaluate("annot_noview_print", |s| freetext_outside_box(s, 36), &[BOX]);
     assert_eq!(report.view_ink, vec![0, 0], "the annotation is invisible in the viewer");
-    // LEAK (SM7 2026-10-14, R-1): redaction renders with FPDF_PRINTING, so PDFium draws
-    // annotations by the Print flag and ignores NoView; the viewer does the reverse.
-    // Flip to assert_clean once fixed.
-    assert!(report.output_ink[0] > 0 && report.rerender_ink[0] > 0, "{report:?}");
+    // Was a leak (SM7 2026-10-14, R-1) while redaction rendered with FPDF_PRINTING, which draws
+    // annotations by the Print flag and ignores NoView. Fixed by SM2: the viewer's flags.
+    assert_clean(&report);
+}
+
+#[test]
+fn screen_hidden_and_noview_annotations_stay_out_of_output() {
+    // New-risk check for the viewer flags: annotations the viewer hides (Hidden, NoView without
+    // Print) must not reach the copy either.
+    for (name, flags) in [("annot_hidden", 2), ("annot_noview", 32), ("annot_hidden_print", 6)] {
+        let report = evaluate(name, |s| freetext_outside_box(s, flags), &[BOX]);
+        assert_eq!(report.view_ink, vec![0, 0], "{name}: invisible in the viewer");
+        assert_clean(&report);
+    }
+}
+
+#[test]
+fn screen_only_annotation_appears_in_output_exactly_as_on_screen_and_is_removed_when_marked() {
+    // An annotation without the Print flag is visible on screen. With the viewer's flags the copy
+    // shows it exactly as the user saw it (so it can be marked), and a mark over it removes it.
+    let unmarked = evaluate("annot_screen_only_unmarked", |s| freetext_outside_box(s, 0), &[BOX]);
+    assert!(unmarked.view_ink[0] > 0, "{unmarked:?}");
+    assert_eq!(unmarked.output_ink, unmarked.view_ink, "the copy must show what the viewer showed");
+    let mark = RasterRedactionRect { x: 5.0, y: 120.0, width: 160.0, height: 45.0 };
+    assert_clean(&evaluate("annot_screen_only_marked", |s| freetext_outside_box(s, 0), &[mark]));
 }
 
 #[test]
@@ -562,33 +584,32 @@ fn covered_by_screen_only_annotation(s: &str, subtype: &str, ap_content: &str, a
 }
 
 #[test]
-fn documents_leak_opaque_square_annotation_without_print_flag_uncovers_text_in_output() {
+fn opaque_square_annotation_without_print_flag_keeps_covering_text_in_output() {
     let report = evaluate(
         "cover_square_no_print",
         |s| covered_by_screen_only_annotation(s, "Square", "0 g 0 0 180 30 re f", "/IC [0 0 0] /C [0 0 0]"),
         &[BOX],
     );
     assert_eq!(report.view_ink, vec![0, 0], "the secret is covered in the viewer");
-    // LEAK (SM7 2026-10-14, S-1, reverse of R-1): the cover has no Print flag, so the
-    // FPDF_PRINTING redaction render drops it and the text it covered on screen is
-    // rasterised, unmarked because it looked covered. Flip to assert_clean once fixed.
-    assert!(report.output_ink[0] > 0 && report.rerender_ink[0] > 0, "{report:?}");
+    // Was a leak (SM7 2026-10-14, S-1, reverse of R-1): the FPDF_PRINTING render dropped the
+    // cover, which has no Print flag. Fixed by SM2: the viewer's flags keep it.
+    assert_clean(&report);
 }
 
 #[test]
-fn documents_leak_opaque_freetext_annotation_without_print_flag_uncovers_text_in_output() {
+fn opaque_freetext_annotation_without_print_flag_keeps_covering_text_in_output() {
     let report = evaluate(
         "cover_freetext_no_print",
         |s| covered_by_screen_only_annotation(s, "FreeText", "1 g 0 0 180 30 re f BT 0 g /F1 12 Tf 10 10 Td (approved) Tj ET", "/Contents (approved) /DA (/Helv 12 Tf 0 g)"),
         &[BOX],
     );
     assert_eq!(report.view_ink, vec![0, 0], "the secret is covered in the viewer");
-    // LEAK (SM7 2026-10-14, S-1): same cause as the Square cover. Flip to assert_clean once fixed.
-    assert!(report.output_ink[0] > 0 && report.rerender_ink[0] > 0, "{report:?}");
+    // Was a leak (SM7 2026-10-14, S-1): same cause as the Square cover.
+    assert_clean(&report);
 }
 
 #[test]
-fn documents_leak_view_only_optional_content_cover_uncovers_text_in_output() {
+fn view_only_optional_content_cover_keeps_covering_text_in_output() {
     let build = |s: &str| {
         let o = first_extra(2);
         let mut first = page(format!("{OUTSIDE_BOX} ({s}) Tj ET /OC /cover BDC 0 g 10 50 180 30 re f EMC"));
@@ -602,9 +623,29 @@ fn documents_leak_view_only_optional_content_cover_uncovers_text_in_output() {
     };
     let report = evaluate("cover_ocg_view_only", build, &[BOX]);
     assert_eq!(report.view_ink, vec![0, 0], "the secret is covered in the viewer");
-    // LEAK (SM7 2026-10-14, S-1): FPDF_PRINTING evaluates the cover layer's Print usage
-    // (/PrintState /OFF), so the cover vanishes and the text is rasterised. Flip to assert_clean once fixed.
-    assert!(report.output_ink[0] > 0 && report.rerender_ink[0] > 0, "{report:?}");
+    // Was a leak (SM7 2026-10-14, S-1): FPDF_PRINTING evaluated the cover layer's Print usage
+    // (/PrintState /OFF), so the cover vanished. Fixed by SM2: the viewer's flags use View usage.
+    assert_clean(&report);
+}
+
+#[test]
+fn screen_only_optional_content_secret_appears_as_on_screen_and_is_removed_when_marked() {
+    // New-risk check: a layer on for View and off for Print now reaches the copy, exactly as shown.
+    let build = |s: &str| {
+        let o = first_extra(2);
+        let mut first = page(format!("/OC /oc1 BDC {UNDER_BOX} ({s}) Tj ET EMC"));
+        first.resources = format!("/Properties << /oc1 {o} 0 R >>");
+        two_pages(
+            first,
+            &format!("/OCProperties << /OCGs [{o} 0 R] /D << /Order [{o} 0 R] /ON [{o} 0 R] /AS [<< /Event /Print /OCGs [{o} 0 R] /Category [/Print] >> << /Event /View /OCGs [{o} 0 R] /Category [/View] >>] >> >>"),
+            vec![obj("<< /Type /OCG /Name (Screen) /Usage << /Print << /PrintState /OFF >> /View << /ViewState /ON >> >> >>")],
+            "",
+        )
+    };
+    let unmarked = evaluate("ocg_screen_only_unmarked", build, &[RasterRedactionRect { x: 150.0, y: 170.0, width: 40.0, height: 20.0 }]);
+    assert!(unmarked.view_ink[0] > 0, "{unmarked:?}");
+    assert_eq!(unmarked.output_ink, unmarked.view_ink, "the copy must show what the viewer showed");
+    assert_clean(&evaluate("ocg_screen_only_marked", build, &[BOX]));
 }
 
 #[test]
@@ -616,7 +657,7 @@ fn worker_render_path_matches_this_replica() {
     let worker = &source[start..end];
     for expected in [
         "let document = note_document(engine, original, session, &mut redaction_note_documents, id)?;",
-        "document.render_bgra_into(PageTarget::Planned(&raster.spec), RenderMode::Print, raster.dimensions.width, raster.dimensions.height, &mut bgra)",
+        "document.render_bgra_into(PageTarget::Planned(&raster.spec), RenderMode::Viewer, raster.dimensions.width, raster.dimensions.height, &mut bgra)",
         "crate::page_image::bgra_to_rgb(raster.dimensions, &bgra, PageImageFormat::Png)?",
         "rectangles: if index == usize::from(page) { rectangles.clone() } else { Vec::new() },",
     ] {
@@ -636,11 +677,12 @@ fn worker_render_path_matches_this_replica() {
         &body[..end]
     };
     let bgra = method("fn render_bgra_into(&self");
-    assert!(bgra.contains("RenderMode::Print") && bgra.contains("render_into_bitmap_with_config"), "render_bgra_into slice is not the real method: {bgra}");
+    assert!(bgra.contains("RenderMode::Viewer") && bgra.contains("render_into_bitmap_with_config"), "render_bgra_into slice is not the real method: {bgra}");
+    // The trailing comma pins the whole arm: nothing (such as use_print_quality) may be chained on.
     assert!(
         bgra.contains(".set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(false).clear_before_rendering(true).set_clear_color(PdfColor::WHITE);")
-            && bgra.contains("RenderMode::Print => config.render_annotations(true).render_form_data(true).use_print_quality(true)"),
-        "the engine's print render flags drifted from the replica"
+            && bgra.contains("RenderMode::Viewer => config.render_annotations(true),"),
+        "the engine's redaction (viewer) render flags drifted from the replica"
     );
     let viewer = method("fn render_viewer_png(&self");
     assert!(viewer.contains("image::ImageFormat::Png"), "render_viewer_png slice is not the real method: {viewer}");
@@ -658,7 +700,7 @@ fn hidden_optional_content_layer_is_not_rendered() {
 }
 
 #[test]
-fn documents_leak_print_only_optional_content_hidden_on_screen_is_printed_into_output() {
+fn print_only_optional_content_hidden_on_screen_stays_out_of_output() {
     let build = |s: &str| {
         let o = first_extra(2);
         optional_content(
@@ -669,9 +711,9 @@ fn documents_leak_print_only_optional_content_hidden_on_screen_is_printed_into_o
     };
     let report = evaluate("ocg_print_only", build, &[BOX]);
     assert_eq!(report.view_ink, vec![0, 0], "the layer is off in the viewer");
-    // LEAK (SM7 2026-10-14): FPDF_PRINTING switches PDFium's optional-content usage to Print,
-    // so a layer that is off on screen but /PrintState /ON is rasterised outside every mark.
-    assert!(report.output_ink[0] > 0 && report.rerender_ink[0] > 0, "{report:?}");
+    // Was a leak (SM7 2026-10-14, R-1): FPDF_PRINTING switched PDFium's optional-content usage to
+    // Print, so a layer off on screen but /PrintState /ON was rasterised. Fixed by SM2.
+    assert_clean(&report);
 }
 
 #[test]

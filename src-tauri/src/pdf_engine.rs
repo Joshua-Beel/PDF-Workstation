@@ -52,8 +52,12 @@ impl From<TextError> for String {
 /// Render flags for [`EngineDocument::render_bgra_into`]. Both clear to white first.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RenderMode {
-    /// Annotations, form data and print quality (print, page-image export, redaction, OCR input).
+    /// Annotations, form data and print quality (print, page-image export, OCR input).
     Print,
+    /// Exactly the viewer's flags ([`EngineDocument::render_viewer_png`]): annotations and form data
+    /// as displayed, no `FPDF_PRINTING`, so optional content and annotation flags resolve as on
+    /// screen. Raster redaction uses it so the copy shows what the user saw and marked.
+    Viewer,
     /// Page content only (output validation, pixel comparisons).
     Plain,
 }
@@ -281,7 +285,7 @@ impl EngineDocument for InProcessDocument<'_> {
         if bgra_len(width, height) != Some(out.len()) { return Err(RenderError::Layout); }
         self.with_target(target, |page| {
             let config = PdfRenderConfig::new().set_fixed_size(width as i32, height as i32).set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(false).clear_before_rendering(true).set_clear_color(PdfColor::WHITE);
-            let config = match mode { RenderMode::Print => config.render_annotations(true).render_form_data(true).use_print_quality(true), RenderMode::Plain => config };
+            let config = match mode { RenderMode::Print => config.render_annotations(true).render_form_data(true).use_print_quality(true), RenderMode::Viewer => config.render_annotations(true), RenderMode::Plain => config };
             let mut bitmap = PdfBitmap::from_bytes(width as i32, height as i32, PdfBitmapFormat::BGRA, out).map_err(|error| RenderError::Render(error.to_string()))?;
             page.render_into_bitmap_with_config(&mut bitmap, &config).map_err(|error| RenderError::Render(error.to_string()))?;
             if bitmap.width() != width as i32 || bitmap.height() != height as i32 { return Err(RenderError::Layout); }
@@ -381,10 +385,15 @@ mod tests {
                 for turns in 0..4 {
                     for crop in [None, Some(crop)] {
                         let spec = PageSpec { source, turns, crop, notes: Vec::new() };
-                        for mode in [RenderMode::Print, RenderMode::Plain] {
+                        let viewer = document.render_viewer_png(&spec, 613).unwrap();
+                        let viewer_rgba = image::load_from_memory(&viewer.png).unwrap().to_rgba8();
+                        let mut redaction = vec![0; bgra_len(viewer.width, viewer.height).unwrap()];
+                        document.render_bgra_into(PageTarget::Planned(&spec), RenderMode::Viewer, viewer.width, viewer.height, &mut redaction).unwrap();
+                        assert!(redaction.chunks_exact(4).zip(viewer_rgba.as_raw().chunks_exact(4)).all(|(bgra, rgba)| bgra[0] == rgba[2] && bgra[1] == rgba[1] && bgra[2] == rgba[0]), "{} page {source} turns {turns} crop {} viewer mode differs from the viewer render", path.display(), crop.is_some());
+                        for mode in [RenderMode::Print, RenderMode::Viewer, RenderMode::Plain] {
                             let (pixel_width, pixel_height) = (613_u32, 457_u32);
                             let config = PdfRenderConfig::new().set_fixed_size(pixel_width as i32, pixel_height as i32).set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(false).clear_before_rendering(true).set_clear_color(PdfColor::WHITE);
-                            let config = match mode { RenderMode::Print => config.render_annotations(true).render_form_data(true).use_print_quality(true), RenderMode::Plain => config };
+                            let config = match mode { RenderMode::Print => config.render_annotations(true).render_form_data(true).use_print_quality(true), RenderMode::Viewer => config.render_annotations(true), RenderMode::Plain => config };
                             let before = with_planned_page(&document.inner, &spec, |page| Ok(page.render_with_config(&config).unwrap().as_raw_bytes())).unwrap();
                             let mut after = vec![0; bgra_len(pixel_width, pixel_height).unwrap()];
                             document.render_bgra_into(PageTarget::Planned(&spec), mode, pixel_width, pixel_height, &mut after).unwrap();
