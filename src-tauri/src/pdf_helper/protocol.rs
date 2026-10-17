@@ -408,13 +408,16 @@ pub(crate) fn put_mode(writer: &mut FrameWriter, mode: RenderMode) {
     writer.u8(match mode {
         RenderMode::Print => 0,
         RenderMode::Plain => 1,
+        RenderMode::Viewer => 2,
     });
 }
 
+/// Wire values are fixed once assigned: 0 Print, 1 Plain, 2 Viewer. Anything else is refused.
 pub(crate) fn get_mode(reader: &mut WireReader<'_>) -> Result<RenderMode, Malformed> {
     match reader.u8()? {
         0 => Ok(RenderMode::Print),
         1 => Ok(RenderMode::Plain),
+        2 => Ok(RenderMode::Viewer),
         other => Err(Malformed::new(format!("invalid render mode {other}"))),
     }
 }

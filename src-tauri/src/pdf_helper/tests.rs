@@ -463,6 +463,19 @@ fn one_request_limit_admits_exactly_one_frame() {
     assert_eq!(limit.load(Ordering::Acquire), 0);
 }
 
+/// Render modes keep fixed wire values (0 Print, 1 Plain, 2 Viewer, the redaction path); others are refused.
+#[test]
+fn render_modes_have_fixed_wire_values() {
+    for (mode, value) in [(RenderMode::Print, 0_u8), (RenderMode::Plain, 1), (RenderMode::Viewer, 2)] {
+        let encoded = payload_of(&frame(kind::RENDER_BGRA, 1, |writer| put_mode(writer, mode)));
+        assert_eq!(encoded, [value]);
+        assert_eq!(decode(&encoded, get_mode), Ok(mode));
+    }
+    for value in [3_u8, 255] {
+        assert!(decode(&[value], get_mode).is_err());
+    }
+}
+
 #[test]
 fn frames_are_length_checked_before_anything_is_allocated() {
     let read = |bytes: &[u8], limit: usize| read_frame(&mut std::io::Cursor::new(bytes.to_vec()), &move || limit);
@@ -695,7 +708,7 @@ fn remote_engine_matches_in_process_engine_on_the_fixtures() {
                     same(format!("{case} displayed crop"), format!("{:?}", left.displayed_crop(&spec, rect)), format!("{:?}", right.displayed_crop(&spec, rect)));
                     let notes = [crop.unwrap_or(CropBox { left: 10.0, bottom: 10.0, right: 200.0, top: 300.0 }), CropBox { left: -50.0, bottom: -50.0, right: -10.0, top: -10.0 }];
                     same(format!("{case} note rects"), format!("{:?}", left.displayed_note_rects(&spec, &notes)), format!("{:?}", right.displayed_note_rects(&spec, &notes)));
-                    for mode in [RenderMode::Print, RenderMode::Plain] {
+                    for mode in [RenderMode::Print, RenderMode::Viewer, RenderMode::Plain] {
                         let (pixel_width, pixel_height) = (613_u32, 457_u32);
                         let mut expected = vec![0; (pixel_width * pixel_height * 4) as usize];
                         let mut actual = vec![1; expected.len()];
