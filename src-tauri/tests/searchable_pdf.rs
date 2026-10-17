@@ -188,7 +188,7 @@ fn oracle_binds_expected_words_and_pixels() {
 
 #[test]
 fn refuses_format_characters_the_extractor_would_hide() {
-    for text in ["ar\u{600}x", "ar\u{605}x", "ar\u{6dd}x", "sy\u{70f}x", "br\u{110bd}x", "eg\u{13430}x", "eg\u{1343f}x"] {
+    for text in ["ar\u{600}x", "ar\u{605}x", "ar\u{6dd}x", "sy\u{70f}x", "br\u{110bd}x", "eg\u{13430}x", "eg\u{1343f}x", "ar\u{890}x", "ar\u{891}x", "ar\u{8e2}x", "ku\u{110cd}x"] {
         assert!(write_searchable_pdf(&[page(vec![word(text)])]).is_err(), "{text:?}");
     }
     assert!(write_searchable_pdf(&[page(vec![word("ar\u{606}x")])]).is_ok());

@@ -297,7 +297,13 @@ impl Bounds {
     }
 }
 
-const CONTAINMENT_SLACK_PIXELS: u32 = 8;
+/// Raster resolution the OCR page images are rendered at (matches `ocr.rs`).
+const RASTER_DPI: u32 = 150;
+/// Rounding slack for parent/child TSV boxes: 3.84 pt at the raster DPI,
+/// 8 px at 150 DPI. It applies at three levels (paragraph in block, line in
+/// paragraph, word in line), so a word can sit up to three times this far
+/// outside its block while staying exactly inside the page.
+const CONTAINMENT_SLACK_PIXELS: u32 = (RASTER_DPI * 384).div_ceil(7200);
 
 #[derive(Default)]
 struct Hierarchy {
