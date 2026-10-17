@@ -32,6 +32,9 @@ pub(crate) struct RemotePdfEngine {
     live: RefCell<(u64, HashSet<u32>)>,
     /// The app-owned section the helper renders bitmaps into, kept between renders up to `KEEP_RENDER_TARGET`.
     render_target: RefCell<Option<(Section, View)>>,
+    /// Test only: kill the helper right after a document's next handle lookup, the window this guards.
+    #[cfg(test)]
+    kill_after_lookup: std::cell::Cell<bool>,
     /// App-private copy of the last viewer render, reused so the copy out of the shared section (SM7 L-a)
     /// lands in memory that is already faulted in. Released when it grows past `KEEP_RENDER_TARGET`.
     viewer_pixels: RefCell<Vec<u8>>,
@@ -39,7 +42,9 @@ pub(crate) struct RemotePdfEngine {
 
 impl RemotePdfEngine {
     pub(crate) fn start(config: HelperConfig) -> Result<Self, String> {
-        Supervisor::start(config).map(|supervisor| Self { supervisor: RefCell::new(supervisor), live: RefCell::new((0, HashSet::new())), render_target: RefCell::new(None), viewer_pixels: RefCell::new(Vec::new()) }).map_err(|failure| failure.message())
+        Supervisor::start(config).map(|supervisor| Self { supervisor: RefCell::new(supervisor), live: RefCell::new((0, HashSet::new())), render_target: RefCell::new(None),
+            #[cfg(test)]
+            kill_after_lookup: std::cell::Cell::new(false), viewer_pixels: RefCell::new(Vec::new()) }).map_err(|failure| failure.message())
     }
 
     /// The app's helper (see [`HelperConfig::production`]).
@@ -50,6 +55,12 @@ impl RemotePdfEngine {
     #[cfg(test)]
     pub(crate) fn stats(&self) -> super::supervisor::SupervisorStats {
         self.supervisor.borrow().stats()
+    }
+
+    /// Kills the helper right after a document's next handle lookup (test only).
+    #[cfg(test)]
+    pub(crate) fn kill_after_next_lookup(&self) {
+        self.kill_after_lookup.set(true);
     }
 
     /// Ends the running helper as a crash would, while no request is in flight (test only).
@@ -70,13 +81,13 @@ impl RemotePdfEngine {
     pub(crate) fn probe_section(&self, section: &Section, access: u32) -> Result<u8, CallError> {
         let len = section.len() as u64;
         let deadline = self.supervisor.borrow().deadlines().read;
-        self.supervisor.borrow_mut().call_sharing(section.handle(), access, kind::FAULT, 32, |writer, shared| super::faults::Fault::ProbeSection(shared, len).write(writer), MAX_CONTROL_REPLY, deadline, class::ONLY_GENERAL, |reader| reader.u8())
+        self.supervisor.borrow_mut().call_sharing(None, section.handle(), access, kind::FAULT, 32, |writer, shared| super::faults::Fault::ProbeSection(shared, len).write(writer), MAX_CONTROL_REPLY, deadline, class::ONLY_GENERAL, |reader| reader.u8())
     }
 
     /// Sends a test-only fault request (not tied to a document).
     #[cfg(test)]
     pub(crate) fn fault(&self, fault: super::faults::Fault, deadline: std::time::Duration) -> Result<u8, CallError> {
-        self.supervisor.borrow_mut().call(kind::FAULT, 16, |writer| fault.write(writer), MAX_CONTROL_REPLY, deadline, class::ONLY_GENERAL, |reader| reader.u8())
+        self.supervisor.borrow_mut().call(None, kind::FAULT, 16, |writer| fault.write(writer), MAX_CONTROL_REPLY, deadline, class::ONLY_GENERAL, |reader| reader.u8())
     }
 
     /// Loads the document in `source` into the running helper (starting one if needed), sharing the section
@@ -86,7 +97,7 @@ impl RemotePdfEngine {
         let deadline = supervisor.deadlines().load;
         let capacity = password.map_or(0, str::len) + 32;
         let len = source.len();
-        let loaded = supervisor.call_sharing(source.handle(), FILE_MAP_READ, kind::LOAD, capacity, |writer, shared| put_load(writer, password, shared, len), MAX_CONTROL_REPLY, deadline, class::LOAD, get_loaded)?;
+        let loaded = supervisor.call_sharing(None, source.handle(), FILE_MAP_READ, kind::LOAD, capacity, |writer, shared| put_load(writer, password, shared, len), MAX_CONTROL_REPLY, deadline, class::LOAD, get_loaded)?;
         let generation = supervisor.running_generation().ok_or(CallError::Failure(HelperFailure::Stopped))?;
         let mut live = self.live.borrow_mut();
         if live.0 != generation {
@@ -195,8 +206,25 @@ impl RemoteDocument<'_> {
         }
     }
 
-    /// This document's handle in the running helper, loading it again after a restart unless it is suspect.
-    fn current_handle(&self) -> Result<u32, CallError> {
+    /// This document's handle in a helper that is still the running one when the request is sent: if the
+    /// helper was replaced after the lookup (it died in between), the document is loaded into the new
+    /// helper and looked up again, once. The generation goes into the call, which refuses a mismatch.
+    fn fresh_handle(&self) -> Result<(u64, u32), CallError> {
+        for _ in 0..2 {
+            let (generation, handle) = self.current_handle()?;
+            #[cfg(test)]
+            if self.engine.kill_after_lookup.replace(false) {
+                self.engine.kill_helper();
+            }
+            if self.engine.supervisor.borrow_mut().ensure_running().map_err(CallError::Failure)? == generation {
+                return Ok((generation, handle));
+            }
+        }
+        Err(CallError::StaleGeneration)
+    }
+
+    /// This document's helper generation and handle, loading it again after a restart unless it is suspect.
+    fn current_handle(&self) -> Result<(u64, u32), CallError> {
         self.engine.supervisor.borrow_mut().drop_if_exited();
         {
             let state = self.state.borrow();
@@ -205,7 +233,7 @@ impl RemoteDocument<'_> {
             }
             if let Some((generation, handle)) = state.handle {
                 if self.engine.supervisor.borrow().running_generation() == Some(generation) {
-                    return Ok(handle);
+                    return Ok((generation, handle));
                 }
             }
             if state.suspect {
@@ -221,7 +249,7 @@ impl RemoteDocument<'_> {
                     return Err(CallError::Unavailable(RELOAD_CHANGED_MESSAGE));
                 }
                 state.handle = Some((generation, loaded.handle));
-                Ok(loaded.handle)
+                Ok((generation, loaded.handle))
             }
             Err(CallError::Failure(failure)) => {
                 self.blame(&failure);
@@ -242,7 +270,7 @@ impl RemoteDocument<'_> {
         allowed: &[u8],
         decode: impl FnOnce(&mut WireReader<'_>) -> Result<T, Malformed>,
     ) -> Result<T, CallError> {
-        let handle = self.current_handle()?;
+        let (generation, handle) = self.fresh_handle()?;
         let result = {
             let mut supervisor = self.engine.supervisor.borrow_mut();
             let deadlines = supervisor.deadlines();
@@ -251,6 +279,7 @@ impl RemoteDocument<'_> {
                 Deadline::Read => deadlines.read,
             };
             supervisor.call(
+                Some(generation),
                 request_kind,
                 capacity.saturating_add(4),
                 |writer| {
@@ -281,7 +310,7 @@ impl RemoteDocument<'_> {
         allowed: &[u8],
         decode: impl FnOnce(&mut WireReader<'_>) -> Result<T, Malformed>,
     ) -> Result<T, CallError> {
-        let document = self.current_handle()?;
+        let (generation, document) = self.fresh_handle()?;
         let result = {
             let mut supervisor = self.engine.supervisor.borrow_mut();
             let deadlines = supervisor.deadlines();
@@ -290,6 +319,7 @@ impl RemoteDocument<'_> {
                 Deadline::Read => deadlines.read,
             };
             supervisor.call_sharing(
+                Some(generation),
                 handle,
                 access,
                 request_kind,

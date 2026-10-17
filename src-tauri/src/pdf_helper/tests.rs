@@ -171,6 +171,24 @@ fn an_idle_helper_crash_is_replaced_before_the_next_request() {
     assert_eq!(other.page_sizes().unwrap().len(), WELCOME_PAGES, "a load-path request (section sharing) also recovers");
 }
 
+/// Code review P3: a helper that dies after a document looked up its handle but before the request is sent
+/// must not receive that stale handle (a spurious "no such document"); the document reloads into the new
+/// helper and the request succeeds. Deterministic: the test hook kills the helper exactly in that window.
+#[test]
+fn a_helper_death_between_lookup_and_send_reloads_instead_of_sending_a_stale_handle() {
+    let engine = RemotePdfEngine::start(test_config(TEST_CAP)).unwrap();
+    let document = engine.load_from_vec(welcome(), None).unwrap();
+    let before = render(&document);
+    engine.kill_after_next_lookup();
+    assert_eq!(document.page_sizes().unwrap().len(), WELCOME_PAGES, "plain request");
+    engine.kill_after_next_lookup();
+    assert_eq!(render(&document), before, "request that shares a render section");
+    let stats = engine.stats();
+    assert_eq!(stats.spawns, 3, "each death replaced once");
+    assert_eq!(stats.last_failure, Some(HelperFailure::Exited(Some(ExitKind::Code(0xdead)))));
+    assert!(!document.is_suspect(), "no request was in flight, so the document is not set aside");
+}
+
 #[test]
 fn t3_an_access_violation_ends_the_helper_with_its_exception_code() {
     let engine = RemotePdfEngine::start(test_config(TEST_CAP)).unwrap();

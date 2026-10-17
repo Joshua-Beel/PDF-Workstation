@@ -196,6 +196,8 @@ pub(crate) enum CallError {
     Failure(HelperFailure),
     Engine(u8, String),
     Unavailable(&'static str),
+    /// The helper was replaced after the document's handle was looked up; nothing was sent.
+    StaleGeneration,
 }
 
 impl CallError {
@@ -204,6 +206,7 @@ impl CallError {
             Self::Failure(failure) => failure.message(),
             Self::Engine(_, message) => message,
             Self::Unavailable(message) => message.into(),
+            Self::StaleGeneration => "The PDF engine restarted while this request was being prepared. Try again.".into(),
         }
     }
 }
@@ -635,7 +638,7 @@ impl Supervisor {
         }
     }
 
-    fn ensure_running(&mut self) -> Result<u64, HelperFailure> {
+    pub(crate) fn ensure_running(&mut self) -> Result<u64, HelperFailure> {
         // A helper that died while idle is replaced below; the restart counts toward the crash-loop cap.
         self.drop_if_exited();
         if self.helper.is_some() {
@@ -671,6 +674,7 @@ impl Supervisor {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn call_sharing<T>(
         &mut self,
+        expected_generation: Option<u64>,
         handle: windows::Win32::Foundation::HANDLE,
         access: u32,
         request_kind: u16,
@@ -682,6 +686,9 @@ impl Supervisor {
         decode: impl FnOnce(&mut WireReader<'_>) -> Result<T, Malformed>,
     ) -> Result<T, CallError> {
         self.ensure_running().map_err(CallError::Failure)?;
+        if expected_generation.is_some_and(|generation| generation != self.generation) {
+            return Err(CallError::StaleGeneration);
+        }
         let shared = match &self.helper {
             Some(helper) => match helper.child.share_handle(handle, access) {
                 Ok(shared) => shared,
@@ -704,6 +711,7 @@ impl Supervisor {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn call<T>(
         &mut self,
+        expected_generation: Option<u64>,
         request_kind: u16,
         capacity: usize,
         payload: impl FnOnce(&mut FrameWriter),
@@ -713,6 +721,9 @@ impl Supervisor {
         decode: impl FnOnce(&mut WireReader<'_>) -> Result<T, Malformed>,
     ) -> Result<T, CallError> {
         self.ensure_running().map_err(CallError::Failure)?;
+        if expected_generation.is_some_and(|generation| generation != self.generation) {
+            return Err(CallError::StaleGeneration);
+        }
         self.call_running(request_kind, capacity, payload, reply_limit, deadline, allowed, decode)
     }
 
