@@ -4,6 +4,7 @@ import Viewer from './Viewer';
 import { pageTextGeometry, renderPage, retryPdfEngine, type PageTextGeometry } from './bridge';
 import type { DocumentInfo } from './model';
 
+const report = (line: string) => (globalThis as unknown as { process: { stderr: { write(text: string): void } } }).process.stderr.write(line);
 vi.mock('./bridge', () => ({ renderPage: vi.fn(), retryPdfEngine: vi.fn(), pageTextGeometry: vi.fn() }));
 vi.mock('./CommentLayer', () => ({ default: () => null }));
 
@@ -59,7 +60,7 @@ it('keeps scrolling off the glyph layer: no layout reads and no glyph re-render 
     samples.push(performance.now() - start);
   }
   const scrollReads = reads;
-  process.stderr.write(`SCROLL-PROXY pages=${mountedPages} glyphs/page=${GLYPHS} mount+layout=${mountMs.toFixed(0)}ms mountLayoutReads=${mountReads} scroll p50=${median(samples).toFixed(1)}ms max=${Math.max(...samples).toFixed(1)}ms scrollLayoutReads=${scrollReads}
+  report(`SCROLL-PROXY pages=${mountedPages} glyphs/page=${GLYPHS} mount+layout=${mountMs.toFixed(0)}ms mountLayoutReads=${mountReads} scroll p50=${median(samples).toFixed(1)}ms max=${Math.max(...samples).toFixed(1)}ms scrollLayoutReads=${scrollReads}
 `);
   expect(scrollReads).toBe(0);
   act(() => ui.unmount());

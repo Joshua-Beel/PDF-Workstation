@@ -5,6 +5,7 @@ import { pageText } from './bridge';
 import SearchPanel from './SearchPanel';
 import type { DocumentInfo } from './model';
 
+const report = (line: string) => (globalThis as unknown as { process: { stderr: { write(text: string): void } } }).process.stderr.write(line);
 vi.mock('./bridge', () => ({ pageText: vi.fn() }));
 
 const PAGES = 400, ROUND_TRIP_MS = 2;
@@ -25,7 +26,7 @@ it('proxy: whole-document search over a simulated 2 ms IPC round trip, commits a
   const start = performance.now();
   await act(async () => { ui.root.findByType('form').props.onSubmit({ preventDefault: vi.fn() }); await vi.waitFor(() => expect(JSON.stringify(ui.toJSON())).toContain('1 matching page.'), { timeout: 20_000, interval: 5 }); });
   const elapsed = performance.now() - start;
-  process.stderr.write(`SEARCH-PROXY pages=${PAGES} roundTrip=${ROUND_TRIP_MS}ms calls=${vi.mocked(pageText).mock.calls.length} peakInFlight=${peak} commits=${commits} wall=${elapsed.toFixed(0)}ms\n`);
+  report(`SEARCH-PROXY pages=${PAGES} roundTrip=${ROUND_TRIP_MS}ms calls=${vi.mocked(pageText).mock.calls.length} peakInFlight=${peak} commits=${commits} wall=${elapsed.toFixed(0)}ms\n`);
   expect(peak).toBeGreaterThan(1); expect(peak).toBeLessThanOrEqual(8);
   expect(ui.root.findAllByType('mark').map(mark => mark.children.join(''))).toEqual(['needle']);
   act(() => ui.unmount());

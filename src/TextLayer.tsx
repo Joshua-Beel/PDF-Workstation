@@ -73,7 +73,7 @@ function layoutGlyphs(layer: HTMLElement, characters: PageTextGeometry['characte
   }
 }
 
-const GlyphLayer = memo(function GlyphLayer({ layerRef, request, geometry, pageWidth, pageHeight }: { layerRef: RefObject<HTMLDivElement | null>; request: string; geometry: PageTextGeometry; pageWidth: number; pageHeight: number }) {
+const GlyphLayer = memo(function GlyphLayer({ layerRef, request, geometry, pageWidth, pageHeight }: { layerRef: RefObject<HTMLDivElement>; request: string; geometry: PageTextGeometry; pageWidth: number; pageHeight: number }) {
   useLayoutEffect(() => {
     const layer = layerRef.current;
     if (layer) layoutGlyphs(layer, geometry.characters, pageWidth, pageHeight);
