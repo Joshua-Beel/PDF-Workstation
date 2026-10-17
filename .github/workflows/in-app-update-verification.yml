@@ -55,7 +55,7 @@ jobs:
           TARGET_TAG: ${{ inputs.target_tag }}
           TARGET_SOURCE_REVISION: ${{ inputs.target_source_revision }}
         run: |
-          if ($env:GITHUB_REPOSITORY -cne 'Joshua-Beel/Smacrobat' -or
+          if ($env:GITHUB_REPOSITORY -cne 'Joshua-Beel/PDF-Workstation' -or
               $env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or
               $env:GITHUB_REF -cne 'refs/heads/master') {
             throw 'Dispatch this published in-app update verification only from master.'

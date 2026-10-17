@@ -28,7 +28,7 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'ocr/installer-package.ps1')
 . (Join-Path $PSScriptRoot 'ocr/windows-signing.ps1')
 
-$script:Repository='Joshua-Beel/Smacrobat'
+$script:Repository='Joshua-Beel/PDF-Workstation'
 $script:MaximumAssetBytes=[uint64](256MB)
 
 function ConvertTo-ExactUInt64 {

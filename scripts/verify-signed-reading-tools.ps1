@@ -12,7 +12,7 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'installed-reading-tools.ps1')
 
 $script:ReadingVerificationPins = [ordered]@{
-    Repository = 'Joshua-Beel/Smacrobat'
+    Repository = 'Joshua-Beel/PDF-Workstation'
     SignedArtifactId = [uint64]11005152678
     SignedRunId = [uint64]36499724415
     SignedSourceRevision = '67d238218f4796ba7b8505d072868da0f397174a'

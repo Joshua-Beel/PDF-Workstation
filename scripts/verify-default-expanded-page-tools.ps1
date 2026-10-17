@@ -51,9 +51,9 @@ function Assert-Step1ArtifactMetadata {
  param([string]$Token)
  $runId=ConvertTo-ExactUInt64 $DraftProofRunId 'Step 1 run id';$workflowId=ConvertTo-ExactUInt64 $DraftProofWorkflowId 'Step 1 workflow id';$artifactId=ConvertTo-ExactUInt64 $DraftProofArtifactId 'Step 1 artifact id';$artifactBytes=ConvertTo-ExactUInt64 $DraftProofArtifactBytes 'Step 1 artifact bytes'
  if($DraftProofWorkflowRevision-cnotmatch'^[a-f0-9]{40}$'-or$DraftProofArtifactName-cne"default-draft-verification-$TargetSourceRevision"-or$DraftProofArtifactDigest-cnotmatch'^sha256:[a-f0-9]{64}$'){throw 'Step 1 artifact identity input is malformed.'}
- $artifact=Invoke-GitHubJson "https://api.github.com/repos/Joshua-Beel/Smacrobat/actions/artifacts/$artifactId" $Token
+ $artifact=Invoke-GitHubJson "https://api.github.com/repos/Joshua-Beel/PDF-Workstation/actions/artifacts/$artifactId" $Token
  if([uint64]$artifact.id-ne$artifactId-or[string]$artifact.name-cne$DraftProofArtifactName-or[uint64]$artifact.size_in_bytes-ne$artifactBytes-or[string]$artifact.digest-cne$DraftProofArtifactDigest-or[uint64]$artifact.workflow_run.id-ne$runId-or[string]$artifact.workflow_run.head_sha-cne$DraftProofWorkflowRevision-or[bool]$artifact.expired){throw 'Step 1 artifact metadata mismatch.'}
- $run=Invoke-GitHubJson "https://api.github.com/repos/Joshua-Beel/Smacrobat/actions/runs/$runId" $Token
+ $run=Invoke-GitHubJson "https://api.github.com/repos/Joshua-Beel/PDF-Workstation/actions/runs/$runId" $Token
  if([uint64]$run.id-ne$runId-or[uint64]$run.workflow_id-ne$workflowId-or[string]$run.name-cne'Manual default draft verification'-or[string]$run.event-cne'workflow_dispatch'-or[string]$run.status-cne'completed'-or[string]$run.conclusion-cne'success'-or[string]$run.head_branch-cne'master'-or[string]$run.head_sha-cne$DraftProofWorkflowRevision-or[string]$run.path-cne'.github/workflows/default-draft-verification.yml'){throw 'Step 1 workflow run identity mismatch.'}
 }
 

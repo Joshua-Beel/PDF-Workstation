@@ -24,13 +24,13 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $script:UpdatePins = [ordered]@{
-    Repository = 'Joshua-Beel/Smacrobat'
+    Repository = 'Joshua-Beel/PDF-Workstation'
     BaselineVersion = '0.2.0'
     BaselineName = 'PDF.Workstation_0.2.0_x64-setup.exe'
     BaselineBytes = [uint64]6418229
     BaselineSha256 = '17788CB82BB42DEAC35EA197A385A9BAFC8CD331422446A2B834E115A90C4D2E'
-    BaselineUrl = 'https://github.com/Joshua-Beel/Smacrobat/releases/download/v0.2.0/PDF.Workstation_0.2.0_x64-setup.exe'
-    LatestManifestUrl = 'https://github.com/Joshua-Beel/Smacrobat/releases/latest/download/latest.json'
+    BaselineUrl = 'https://github.com/Joshua-Beel/PDF-Workstation/releases/download/v0.2.0/PDF.Workstation_0.2.0_x64-setup.exe'
+    LatestManifestUrl = 'https://github.com/Joshua-Beel/PDF-Workstation/releases/latest/download/latest.json'
     WebDriverPort = 4444
     NativeDriverPort = 9515
     NetworkBytesMaximum = [uint64](128MB)

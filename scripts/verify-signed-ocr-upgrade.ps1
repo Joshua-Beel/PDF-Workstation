@@ -17,7 +17,7 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'installed-publisher-ui.ps1')
 
 $script:Pins = [ordered]@{
-    Repository = 'Joshua-Beel/Smacrobat'
+    Repository = 'Joshua-Beel/PDF-Workstation'
     BaselineAssetId = [uint64]569181842
     BaselineName = 'PDF.Workstation_0.2.0_x64-setup.exe'
     BaselineBytes = [uint64]6418229

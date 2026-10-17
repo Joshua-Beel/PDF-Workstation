@@ -19,7 +19,7 @@ jobs:
       - name: Require a manual master dispatch
         shell: pwsh
         run: |
-          if ($env:GITHUB_REPOSITORY -cne 'Joshua-Beel/Smacrobat' -or
+          if ($env:GITHUB_REPOSITORY -cne 'Joshua-Beel/PDF-Workstation' -or
               $env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or
               $env:GITHUB_REF -cne 'refs/heads/master') {
             throw 'Dispatch this print verification only from the master branch.'
@@ -116,7 +116,7 @@ jobs:
             Accept = 'application/vnd.github+json'
             'X-GitHub-Api-Version' = '2022-11-28'
           }
-          $artifact = Invoke-RestMethod -Uri 'https://api.github.com/repos/Joshua-Beel/Smacrobat/actions/artifacts/11005152678' -Headers $headers
+          $artifact = Invoke-RestMethod -Uri 'https://api.github.com/repos/Joshua-Beel/PDF-Workstation/actions/artifacts/11005152678' -Headers $headers
           if ([uint64]$artifact.id -ne 11005152678 -or
               [string]$artifact.name -cne 'signed-ocr-installer-67d238218f4796ba7b8505d072868da0f397174a' -or
               [uint64]$artifact.size_in_bytes -ne 10437483 -or
@@ -132,7 +132,7 @@ jobs:
         with:
           artifact-ids: '11005152678'
           github-token: ${{ github.token }}
-          repository: Joshua-Beel/Smacrobat
+          repository: Joshua-Beel/PDF-Workstation
           run-id: '36499724415'
           merge-multiple: true
           path: ${{ env.SIGNED_ARTIFACT_ROOT }}

@@ -7,7 +7,7 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'ocr/windows-signing.ps1')
 
 $script:DriverPins = [ordered]@{
-    Repository = 'Joshua-Beel/Smacrobat'
+    Repository = 'Joshua-Beel/PDF-Workstation'
     TauriDriverVersion = '2.0.6'
     TauriDriverPackageSha256 = '24DC39BD26A65361C1C8E067636BBFF1D9DD7E2FC58FF874EDFBA33ACAB0E6D0'
     TauriDriverPackageUrl = 'https://static.crates.io/crates/tauri-driver/tauri-driver-2.0.6.crate'

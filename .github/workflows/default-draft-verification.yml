@@ -36,7 +36,7 @@ jobs:
       - name: Require a manual master dispatch
         shell: pwsh
         run: |
-          if ($env:GITHUB_REPOSITORY -cne 'Joshua-Beel/Smacrobat' -or $env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or $env:GITHUB_REF -cne 'refs/heads/master') {
+          if ($env:GITHUB_REPOSITORY -cne 'Joshua-Beel/PDF-Workstation' -or $env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or $env:GITHUB_REF -cne 'refs/heads/master') {
             throw 'Dispatch default draft verification only from master.'
           }
 
@@ -48,7 +48,7 @@ jobs:
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          repository: Joshua-Beel/Smacrobat
+          repository: Joshua-Beel/PDF-Workstation
           ref: ${{ inputs.target_source_revision }}
           fetch-depth: 0
           persist-credentials: false
