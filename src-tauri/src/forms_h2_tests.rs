@@ -86,5 +86,5 @@ fn a_stream_start_is_found_in_the_source_when_junk_precedes_the_header() {
     let (empty, full) = (build(""), build("abc"));
     let document = load(&empty); assert!(document.get_object((5, 0)).unwrap().as_stream().unwrap().start_position.is_some());
     assert!(check_faithful_load(&document, &empty).is_ok(), "a genuinely empty stream is found at the right place despite the junk");
-    assert!(check_faithful_load(&load(&full), &full).is_err());
+    assert!(check_faithful_load(&load(&full), &full).unwrap_err().contains("resolves to zero"));
 }

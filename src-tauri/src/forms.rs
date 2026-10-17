@@ -366,8 +366,8 @@ pub(crate) fn check_faithful_load(document: &Document, source: &[u8]) -> Result<
     const DROPPED: &str = "Some PDF objects could not be loaded within the form-loading limits; a filled copy would drop them.";
     for object in document.objects.values() { if let Object::Stream(stream) = object { if stream.content.is_empty() && !resolves_to_zero(document, stream) { return Err("A PDF stream could not be read (its /Length does not resolve); a filled copy would drop its content.".into()); } } }
     // An indirect /Length that resolved late (to 0) leaves a stream empty although data follows: the raw bytes must go straight to `endstream`.
+    let header = source.windows(5).position(|window| window == b"%PDF-").unwrap_or(0);
     for object in document.objects.values() { if let Object::Stream(stream) = object { if let (true, Some(start)) = (stream.content.is_empty(), stream.start_position) {
-        let header = source.windows(5).position(|window| window == b"%PDF-").unwrap_or(0);
         let tail = source.get(header + start..).unwrap_or(&[]); let tail = tail.strip_prefix(b"\r\n".as_slice()).or_else(|| tail.strip_prefix(b"\n")).or_else(|| tail.strip_prefix(b"\r")).unwrap_or(tail);
         if !tail.starts_with(b"endstream") { return Err("A PDF stream's /Length resolves to zero but data follows; a filled copy would drop its content.".into()); }
     } } }
