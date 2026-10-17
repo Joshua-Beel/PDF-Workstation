@@ -29,11 +29,15 @@ describe('document search', () => {
   it('discards pending results when the query changes', async () => {
     let resolve!: (text: string) => void;
     vi.mocked(pageText).mockImplementationOnce(() => new Promise(done => { resolve = done; })).mockResolvedValue('needle');
-    const { ui } = await mount();
+    const long = { ...document, pages: Array.from({ length: 12 }, () => document.pages[0]) };
+    let ui!: ReactTestRenderer;
+    await act(async () => { ui = create(<SearchPanel document={long} go={vi.fn()} close={vi.fn()} />); });
+    act(() => ui.root.findByProps({ maxLength: 500 }).props.onChange({ target: { value: 'needle' } }));
     act(() => submit(ui));
     act(() => ui.root.findByProps({ maxLength: 500 }).props.onChange({ target: { value: 'different' } }));
     await act(async () => resolve('needle'));
-    expect(pageText).toHaveBeenCalledTimes(document.pages.length);
+    expect(pageText).toHaveBeenCalledTimes(8);
+    expect(vi.mocked(pageText).mock.calls.length).toBeLessThan(long.pages.length);
     expect(JSON.stringify(ui.toJSON())).not.toContain('Go to page');
     act(() => ui.unmount());
   });

@@ -79,3 +79,20 @@ it('drops the old image and shows the error with Try again when the new render f
   expect(revoke).toHaveBeenCalledWith('blob:100');
   act(() => ui.unmount());
 });
+
+it('clears the image on a revision change instead of showing the stale page, then releases it when the new render arrives', async () => {
+  let finish!: (url: string) => void;
+  vi.mocked(renderPage).mockResolvedValueOnce('blob:r1').mockImplementationOnce(() => new Promise<string>(resolve => { finish = resolve; }));
+  let ui!: ReactTestRenderer;
+  act(() => { ui = create(view(100), { createNodeMock: () => viewport }); });
+  await act(async () => { vi.advanceTimersByTime(35); await Promise.resolve(); await Promise.resolve(); });
+  expect(ui.root.findAllByType('img').map(image => image.props.src)).toEqual(['blob:r1']);
+  act(() => ui.update(<Viewer document={{ ...info, revision: 2 }} zoom={100} fit="none" target={{ page: 0, token: 0 }} onPage={() => {}} hand={false} />));
+  expect(ui.root.findAllByType('img')).toHaveLength(0);
+  expect(JSON.stringify(ui.toJSON())).toContain('Rendering page');
+  await act(async () => { vi.advanceTimersByTime(35); await Promise.resolve(); });
+  await act(async () => { finish('blob:r2'); await Promise.resolve(); });
+  expect(ui.root.findAllByType('img').map(image => image.props.src)).toEqual(['blob:r2']);
+  expect(revoke).toHaveBeenCalledWith('blob:r1');
+  act(() => ui.unmount());
+});
