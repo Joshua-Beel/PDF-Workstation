@@ -183,7 +183,11 @@ mod tests {
         {
             let item = |path: &str| -> IShellItem { unsafe { SHCreateItemFromParsingName(&HSTRING::from(path), None) }.unwrap() };
             let folder = tempfile::tempdir().unwrap();
-            assert_eq!(folder_path_of(&item(folder.path().to_str().unwrap())).unwrap(), folder.path());
+            // The shell may spell the same folder differently from TEMP (a runner's TEMP uses the 8.3
+            // name RUNNER~1, the shell returns runneradmin), so compare the canonical folders.
+            let chosen = folder_path_of(&item(folder.path().to_str().unwrap())).unwrap();
+            assert!(chosen.is_dir(), "{chosen:?}");
+            assert_eq!(std::fs::canonicalize(&chosen).unwrap(), std::fs::canonicalize(folder.path()).unwrap());
             // The Libraries root and This PC: shell items with no file-system path.
             for virtual_location in ["::{031E4825-7B94-4dc3-B131-E946B44C8DD5}", "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"] {
                 assert_eq!(folder_path_of(&item(virtual_location)).unwrap_err(), NOT_A_FOLDER_ON_DISK, "{virtual_location}");
