@@ -115,10 +115,24 @@ Publish publisher signing as a new version; do not replace the already published
 
 Releases are built, signed and drafted only by the tag-triggered `.github/workflows/release.yml`. There is no local release path.
 
-1. Set the same new stable version in all six version sources: `package.json`, `package-lock.json` (top-level `version` and `packages[""].version`), `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, and the `pdf-workstation` entry in `src-tauri/Cargo.lock`. Then run `node scripts/dependency-notices.mjs` so the inventory records the final input hashes. Update `docs/release-notes.md` and README recent changes.
-2. Run `npm test` and `cargo test --manifest-path src-tauri/Cargo.toml` as a local pre-flight. These local runs do not build or sign release assets.
-3. Merge the reviewed release commit to `master`, push it, then tag that exact commit `vMAJOR.MINOR.PATCH` and push the tag. The workflow refuses a tagged commit that is not on `origin/master`, refuses tag/version mismatches, waits for the required reviewer in the `release` environment, then tests, builds, signs and creates a draft release. It does not overwrite releases.
-4. Install and exercise the draft installer. Publish the release when verified. Mark it as the latest stable release so installed apps see the new `latest.json`. Never publish an incomplete manifest or replace an existing version's files.
+A tag whose workflow run fails uses up that version number: the run never overwrites a release and tags are never moved, so the next attempt needs a new number.
+
+1. **Release commit.** On one branch:
+   - Set the same stable `MAJOR.MINOR.PATCH` in all six version sources: `package.json`, `package-lock.json` (top-level `version` and `packages[""].version`, via `npm install --package-lock-only --ignore-scripts`), `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, and the `pdf-workstation` entry in `src-tauri/Cargo.lock` (via `cargo update -p pdf-workstation --offline`). Confirm that nothing else in either lockfile moved. `scripts/assert-release-version.ps1 -Version <ver>` checks all six.
+   - Replace `docs/release-notes.md` with a single section for the new version. The whole file becomes the `notes` of `latest.json`, which installed apps show when they offer the update, and it is fixed at build time. It may claim only what is proven before the tag, in source-build language. Move the previous section into [Earlier release notes](#earlier-release-notes).
+   - Run `cargo fetch --locked --target x86_64-pc-windows-msvc --manifest-path src-tauri/Cargo.toml`, then `node scripts/dependency-notices.mjs` and `node scripts/dependency-notices.mjs --check`.
+   - Log the change in the README and `docs/changelog.md`.
+   - From PowerShell 7, run the full suite: `npm test -- --pool=threads --maxWorkers=1 --no-file-parallelism`, `npm run build`, `cargo test --locked --manifest-path src-tauri/Cargo.toml --bins` and `./scripts/run-native-recovery-gates.ps1`. These local runs build and sign nothing.
+2. **Reviews.** An independent code review and a security review of the release range, recorded with the commit, then the merge to `master`.
+3. **Hosted pre-flight.** Dispatch `windows-validation.yml` on `master` and wait for green. `release.yml` runs the same tests, so a red result here costs nothing, while a red result after tagging costs the version number.
+4. **Push `master`.** From here until the installed checks pass, no commit to `master` may change the version sources or the source paths the default installed-app verifiers compare against the draft (`src/App.tsx`, `src/bridge.ts`, `src-tauri/src/service.rs`, `src-tauri/src/main.rs`, `src-tauri/tauri.conf.json` and the files listed in `scripts/verify-default-expanded-page-tools.ps1` and `scripts/verify-default-comments-forms.ps1`). Workflow-only commits are safe.
+5. **Signing secrets.** `TAURI_SIGNING_PRIVATE_KEY` and the six `AZURE_*` secrets are in the `release` environment, the repository-level updater key is deleted, and the offline updater-key backup is confirmed.
+6. **Tag.** Tag the pushed release commit `vMAJOR.MINOR.PATCH` (annotated) and push the tag. `release.yml` refuses a tag that is not on `origin/master`, a non-stable tag, a version mismatch or a dirty tree. It then waits for the required reviewer in the `release` environment, runs the tests, builds and signs, checks for exactly the installer, its `.sig` and `latest.json`, and a separate publish job creates the draft.
+7. **Record the draft.** Note the release id, the tag commit, and the id, name, size and SHA-256 of the three assets. Every later check takes these as inputs.
+8. **Installed checks on the draft.** Run `default-draft-verification.yml`, then the default installed-app checks (`default-expanded-page-tools-verification.yml`, `default-comments-forms-verification.yml`, `default-recovery-verification.yml`) with its proof. Any red check stops the release; a source fix means a new commit and a new number.
+9. **Publish.** Write the GitHub release body from the installed-check evidence (the body stays editable; `latest.json` does not), then publish the draft as the latest stable release. Installed apps are offered the update from then on.
+10. **In-app update check, immediately.** Run `in-app-update-verification.yml`. It installs published 0.2.0 and lets its updater install the new release. `master` must still carry the released version, so do not bump the version on `master` before it passes.
+11. **Rollback.** If step 10 fails, return the release to draft (`gh release edit v<ver> --draft=true`). `releases/latest` falls back to the previous release and the offer stops; anyone who already updated keeps the new version. Never delete the tag.
 
 Not for releases: a local `npm run installer` is a development build only. Do not upload locally built assets with `gh release create` or `gh release edit`; that would bypass the `release` environment approval, the `master`-ancestor guard, Azure publisher signing and the publish job's asset rechecks, and it would require the updater signing key on a local machine, which must stay in the `release` environment.
 
@@ -131,3 +145,63 @@ The pre-rewrite `v0.2.5` tag started [GitHub Actions run 35250005735](https://gi
 The 0.2.4 draft passed GitHub Actions run 35184652612. Its downloaded installer and extracted application both passed a local timestamped publisher-signature check. Installer SHA-256: `cf97903897c10f0f02c31bc61f9ac9d929a9c5abdc116dc200cce01a4cd68c7a`, matching the GitHub asset digest. All three release assets are present. Installation, search UI behavior, and the end-to-end upgrade remain pending because desktop capture/input is unreliable; do not treat the draft as a verified published release.
 
 v0.2.0 was installed successfully, and its bundled sample rendered in the installed application. The live GitHub manifest was fetched and its installer downloaded; SHA-256 matched the locally tested build (`17788cb82bb42deac35ea197a385a9bafc8cd331422446a2b834e115a90c4d2e`). The installed updater checked the public endpoint and correctly reported no newer version. Eleven frontend/release tests and seven native tests pass, including unsaved-edit blocking and mocked network/signature failures. Those tests also pass after the 0.2.1 version change. A full newer-version replacement/relaunch and the GitHub-hosted signing workflow still need verification.
+
+## Earlier release notes
+
+Until 0.3.0, `docs/release-notes.md` kept every earlier section, so the whole history became the update text in `latest.json`. From 0.3.0 it holds only the version being released. The earlier sections are kept here unchanged except for heading level. Only 0.2.0 was published; the other versions were drafts, tags without a draft, or unreleased.
+
+### 0.2.12 (draft candidate)
+
+- Adds the current reading and workspace work: embedded-text selection, visible match geometry, bounded Page text and bookmarks, document properties, password retry/cancel flows, native printing, and saved theme, view, recent-file, and starred-file preferences. Controlled signed-installed-app checks cover the packaged sample, real clipboard, search geometry, password lifecycle, three launches of persistence, print-dialog cancel/reopen, and one-page Microsoft Print to PDF output. They do not establish arbitrary-PDF compatibility, physical pointer selection, physical paper output, non-Microsoft printer behavior, or native-window visual fidelity.
+- Adds the current page tools: crop and reset crop, fixed-size split, Combine Files, Insert Pages, Replace Pages, one-image PDF creation, and current-page PNG/JPEG export. These create new outputs and retain the documented source tabs and metadata; crop hides content rather than redacting it. Source, mocked-browser, and structural checks pass. The latest installed expanded-page-tools rerun still needs to complete after the native-picker deferral fix, so the 0.2.12 installer and its real Windows save/folder dialogs are not yet verified.
+- Adds app-owned sticky notes, area highlights, selected-text highlights, and a strict form-filling subset for flat single-line text, checkboxes, same-page radio groups, and single-select choices. Unsupported forms are refused as a whole. Replies, author identity, foreign-annotation interchange, editable combos, multi-select lists, form preparation, Fill & Sign, handwritten or certificate signatures, and broader cross-viewer behavior are not provided.
+- Hardens update recovery. Download and installer handoff use separate signed-updater phases with an exact bounded native marker that is atomically written, flushed, replaced, and read back before proceeding. Failed downloads must release their updater resource before a fresh retry; a reopened installer-handoff marker blocks a second concurrent installer and directs recovery through waiting or the latest signed installer. Focused frontend, native, workflow, publisher, production-build, and adversarial gates pass. The public 0.2.0-to-0.2.12 in-app update, restart/relaunch, and controlled missing-executable repair still require the signed stable 0.2.12 release and the read-only hosted verifier.
+- Keeps the canonical updater endpoint and existing updater public key so installed 0.2.0 clients can verify the new update. Release automation remains fail-closed for missing Azure or updater signing credentials, binds one stable tag to the exact npm, Cargo, lockfile, Tauri, checkout, and release source version, and can create only a draft containing the installer, its detached updater signature, and `latest.json`.
+
+The default release does not bundle OCR. The separately verified opt-in current-page English OCR artifact is not this release and does not establish general accuracy; PDF Workstation still does not create searchable/document OCR. This release also makes no redaction, PDF-signing, certificate-signing, or signature-validation claim. Text or image editing, original-file overwrite, and save-back to the source remain unavailable. The 0.2.12 installer must still be built, publisher-signed, checked, installed, and exercised before the draft can be published. The immutable `v0.2.7` and `v0.2.8` workflows both failed during version validation before tests, signing, build, upload, or draft creation. The immutable `v0.2.9` workflow passed setup and reported 395 passing and six failing frontend/workflow tests before native tests, signing, build, upload, or draft creation. The immutable `v0.2.10` workflow passed setup and reported 402 passing and one failing frontend/workflow test before native tests, signing, build, upload, or draft creation. The immutable `v0.2.11` workflow passed frontend and native tests, then rejected a stale generated dependency inventory before installer compilation, signing, upload, or draft creation. None of those tags produced an installer or release artifact.
+
+### 0.2.6 (draft candidate)
+
+- Adds on-page embedded-text selection and literal match highlights where supported geometry is available, plus Page text fallbacks for unsupported or capped pages.
+- Adds fixed-size splitting, current-page crop, Combine Files, Insert Pages, and Replace Pages. Structural copy operations use current edits, preserve the stated source metadata, and create a new output without changing either source tab.
+- Adds source-availability archives for five exact MPL-2.0 crates and current dependency notices to the bundled resources.
+
+Native desktop verification of selection/clipboard behavior, split and structural-copy save dialogs, crop interaction, printing, installation, and upgrade/relaunch remains open.
+
+### 0.2.5 (tagged; no draft artifacts)
+
+- The release workflow stopped during npm tests because the clean runner had not fetched the locked Cargo registry required by the offline dependency-notice checks.
+- No native test, signing, installer, asset upload, or GitHub draft-release step ran for this tag.
+
+### 0.2.4
+
+- Verifies the actual application extracted from the signed installer, rather than Tauri's restored unsigned build file.
+- Includes embedded-text search, case matching, selectable excerpts, and links to matching pages.
+
+### 0.2.3 (unreleased)
+
+- Runs installer signature verification directly in PowerShell 7 on GitHub Actions.
+- Includes embedded-text search and the Windows signing argument fix described below.
+
+### 0.2.2 (unreleased)
+
+- Find embedded PDF text with Ctrl+F, optional case matching, selectable excerpts, and links to matching pages.
+- Stop a search while reading; results follow the current page order after edits.
+- Fixed Windows signing command arguments containing spaces.
+
+Search shows one excerpt per matching page, up to 500 pages. On-page selection, match highlighting, and OCR remain in development.
+
+### 0.2.1 (unreleased)
+
+- Windows publisher signing through Joshua Beel's Azure signing profile.
+- Release builds verify timestamped signatures on the application and installer.
+- Keeps the existing updater key so version 0.2.0 can accept this update.
+
+### 0.2.0
+
+- Windows installer with the PDF engine included.
+- Menu > Check for updates downloads verified updates from GitHub releases.
+- Update installation waits until every edited PDF has been saved or its edits discarded.
+- PDF viewer and Organize Pages: rotate, move, delete, extract, undo/redo, and save a new copy.
+
+Text editing, OCR, search, printing, and signatures remain in development.

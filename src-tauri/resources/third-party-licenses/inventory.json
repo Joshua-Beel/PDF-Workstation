@@ -1,12 +1,12 @@
 {
   "schema": 1,
   "target": "x86_64-pc-windows-msvc",
-  "coverage": "Conservative resolved Cargo Windows graph, including build/auxiliary packages, plus non-development npm lock entries. Runtime-candidate is not proof of linked code. PDFium notices are packaged separately. Five exact MPL-2.0 crate source archives are packaged with verified locations and hashes; this collection does not determine the app license or complete release licensing review. The ocr-engine records cover the Tesseract engine, Leptonica and the English model packaged under resources/ocr/ by an installer built with an OCR setup root; their license texts are checked against scripts/ocr/pins.json.",
+  "coverage": "Conservative resolved Cargo Windows graph, including build/auxiliary packages, plus non-development npm lock entries. Runtime-candidate is not proof of linked code. PDFium notices are packaged separately. Five exact MPL-2.0 crate source archives are packaged with verified locations and hashes. PDF Workstation itself is MIT-licensed; this collection records third-party notices and is not a legal licensing review. The ocr-engine records cover the Tesseract engine, Leptonica and the English model packaged under resources/ocr/ by an installer built with an OCR setup root; their license texts are checked against scripts/ocr/pins.json.",
   "inputHashes": {
-    "src-tauri/Cargo.lock": "cc62fdc127ea6a5d3bf7cd772485701c0d41f04fd1fbbb230f9536050f099fc6",
-    "src-tauri/Cargo.toml": "42d3da25d2a7bf08dbf6273dcba0e123c351ec689efdc3812ebe8411f8e52c5b",
-    "package-lock.json": "6f1441c57c13489547c54c3e845d12827b907b9cdb1d2f3d54c3321da7683801",
-    "package.json": "e4ee9f328ec0dafc305cdee6e632dab65763ed1fd092cac204a3a13a3b314455",
+    "src-tauri/Cargo.lock": "b950d0d83ae6e201d2cecfb6274c265ebfd14cfee2077d1d8d68253838eabe06",
+    "src-tauri/Cargo.toml": "fc3226984e19aeea079a65c6083fe54370f59114a6877ba2f28b387896e2bef9",
+    "package-lock.json": "c7d6ef1588d1326d5a87f7bdda3fc7067566ed707bf655fc679be149d1784ab9",
+    "package.json": "905046d88482d0a8d4b5f8b398862e0d0666849852be77b11a39d69eaac72287",
     "scripts/notice-supplements/manifest.json": "f0700cbb9d20d43f42d709852e7961194d22937a41bf1fad5063e27f5fae2121",
     "scripts/mpl-source-archives.manifest.json": "d5575a6facde7afb4f4faae54009bb776da8b0d1410c68de1915c7a46a73e915",
     "scripts/ocr/pins.json": "4612743a7adf0c49ef6c7c6da839a6a4f38312e962cfee2c5caadd10e18cd50a"

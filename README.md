@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- Version 0.3.0 prepared: six version sources bumped, 0.3.0-only release notes, notices regenerated, release steps rewritten (SM6). Not tagged or built; unverified in an installed build.
 - Split folder-picker unit test compares canonical folders, so an 8.3 short TEMP path on CI no longer fails it (SM2; test only).
 - CI fix after its first hosted run failed: full-history checkout for the tests that read pinned commits, and a 15 s timeout on one slow PowerShell workflow test (SM6). Unverified until the next hosted run.
 - Repo renamed to `Joshua-Beel/PDF-Workstation`: workflow guards, release URLs, the updater endpoint for new builds and verifier pins use the new name; older installs keep updating through GitHub's redirects (SM6).

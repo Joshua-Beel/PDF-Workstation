@@ -178,11 +178,14 @@ describe('release workflow contract', () => {
       endpoints: ['https://github.com/Joshua-Beel/PDF-Workstation/releases/latest/download/latest.json'],
       windows: { installMode: 'passive' },
     });
-    const notes = readFileSync('docs/release-notes.md', 'utf8');
-    expect(notes.startsWith(`## ${currentVersion} (draft candidate)`)).toBe(true);
-    expect(notes).toContain('Hardens update recovery.');
-    expect(notes).toContain('does not bundle OCR');
-    expect(notes).toContain('does not create searchable/document OCR');
-    expect(notes).toContain('makes no redaction, PDF-signing, certificate-signing, or signature-validation claim');
+    const notes = readFileSync('docs/release-notes.md', 'utf8').replace(/\r\n?/g, '\n');
+    expect(notes.startsWith(`## ${currentVersion}\n`)).toBe(true);
+    expect(notes.match(/^#{1,2} /gm), 'latest.json carries the whole file, so it holds only the released version').toHaveLength(1);
+    expect(notes).toContain('tested in source builds');
+    expect(notes).toContain(`unverified in an installed ${currentVersion} build`);
+    expect(notes).toContain('Accuracy on real scans is unmeasured.');
+    expect(notes).toContain('PDF signing, certificate signatures or signature validation');
+    expect(notes).toContain('every save writes a new copy');
+    expect(notes.length).toBeLessThan(4096);
   });
 });

@@ -1,6 +1,6 @@
 THIRD-PARTY DEPENDENCY NOTICES
 
-Conservative resolved Cargo Windows graph, including build/auxiliary packages, plus non-development npm lock entries. Runtime-candidate is not proof of linked code. PDFium notices are packaged separately. Five exact MPL-2.0 crate source archives are packaged with verified locations and hashes; this collection does not determine the app license or complete release licensing review. The ocr-engine records cover the Tesseract engine, Leptonica and the English model packaged under resources/ocr/ by an installer built with an OCR setup root; their license texts are checked against scripts/ocr/pins.json.
+Conservative resolved Cargo Windows graph, including build/auxiliary packages, plus non-development npm lock entries. Runtime-candidate is not proof of linked code. PDFium notices are packaged separately. Five exact MPL-2.0 crate source archives are packaged with verified locations and hashes. PDF Workstation itself is MIT-licensed; this collection records third-party notices and is not a legal licensing review. The ocr-engine records cover the Tesseract engine, Leptonica and the English model packaged under resources/ocr/ by an installer built with an OCR setup root; their license texts are checked against scripts/ocr/pins.json.
 
 Unresolved collection/review items:
 - None recorded by this notice collection.
