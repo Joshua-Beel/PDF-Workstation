@@ -59,7 +59,7 @@ describe('default draft verification workflow', () => {
   });
 
   it('binds a bounded three-asset draft to exact source resources and separates signature text from crypto proof', () => {
-    expect(verifier).toContain("$base.Count -ne 26");
+    expect(verifier).toContain("$base.Count -ne 28");
     expect(verifier).toContain('Assert-SignedPdfiumEquivalent');
     expect(verifier).toContain('Assert-ReleaseSourceVersion -WorkflowRoot $ProjectRoot -SourceRoot $TargetSourceRoot -Version $TargetVersion');
     expect(verifier).toContain('Assert-PackagedApplicationIdentity -Path $application.FullName -Version $TargetVersion');
@@ -140,6 +140,7 @@ describe('default draft verification workflow', () => {
       Reject {Invoke-BoundedSevenZipEntry $extractor.FullName $streamZip 'input.bin' (Join-Path $root 'stream-hash.bin') 1 ('0'*64)} 'stream hash mismatch'
       $base=@([pscustomobject]@{Target='resources/welcome.pdf'})
       $paths=@('pdf-workstation.exe','resources/welcome.pdf','$PLUGINSDIR/modern-wizard.bmp','$PLUGINSDIR/nsDialogs.dll','$PLUGINSDIR/nsis_tauri_utils.dll','$PLUGINSDIR/NSISdl.dll','$PLUGINSDIR/StartMenu.dll','$PLUGINSDIR/System.dll')
+      $live=Get-BaseBundleResourceMap -ProjectRoot (Get-Location).Path;if([uint64]$live.Count -ne 28){throw ('the verifier pins 28 base resources but this source bundles '+$live.Count)}
       $identity='a'*64;$ocrPaths=@('bin/tesseract.exe','tessdata/eng.traineddata','licenses/Tesseract-Apache-2.0.txt','licenses/Leptonica-BSD-2-Clause.txt','licenses/eng-fast-Apache-2.0.txt')|ForEach-Object{"resources/ocr/$identity/$_"}
       $files=@(@($paths)+@($ocrPaths)|ForEach-Object{Put $_});$facts=Assert-DefaultInventory $files $root $base;if($facts.required-ne13-or$facts.actual-ne13-or$facts.ocrIdentity-cne$identity){throw 'valid inventory failed'}
       $extra=@($files)+(Put 'extra.dll');Reject {Assert-DefaultInventory $extra $root $base} 'extra file'

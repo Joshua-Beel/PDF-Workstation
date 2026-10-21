@@ -33,7 +33,7 @@ function Assert-DefaultDraftReceipt {
  $expected=@{installer=@($InstallerAssetId,$InstallerName,$InstallerBytes,$InstallerSha256);detachedUpdaterSignature=@($SignatureAssetId,"$InstallerName.sig",$SignatureBytes,$SignatureSha256);updaterManifest=@($ManifestAssetId,'latest.json',$ManifestBytes,$ManifestSha256)}
  foreach($asset in $assets){Assert-ExactProperties $asset @('role','id','name','bytes','sha256') 'Draft asset receipt';$pin=$expected[[string]$asset.role];if($null-eq$pin-or[string]$asset.id-cne$pin[0]-or[string]$asset.name-cne$pin[1]-or[string]$asset.bytes-cne$pin[2]-or[string]$asset.sha256-cne$pin[3]){throw 'Draft asset receipt mismatch.'}}
  Assert-ReceiptValue $Receipt.packagedApplication 'Packaged application'
- $base=@($Receipt.baseResources);if($base.Count-ne26){throw 'Default receipt must contain 26 base resources.'}
+ $base=@($Receipt.baseResources);if($base.Count-ne28){throw 'Default receipt must contain 28 base resources.'}
  $targets=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
  foreach($entry in $base){if(-not$targets.Add([string]$entry.target)-or[string]$entry.target-cnotmatch'^resources/[A-Za-z0-9._/-]+$'-or[string]$entry.target-match'(^|/)ocr(/|$)'){throw 'Default base resource is unsafe, duplicated, or OCR.'};Assert-ReceiptValue $entry 'Base resource'}
  $pdfium=@($base|Where-Object target -CEQ 'resources/pdfium/bin/pdfium.dll');if($pdfium.Count-ne1-or[uint64]$pdfium[0].unsignedBytes-eq0-or[string]$pdfium[0].unsignedSha256-cnotmatch'^[A-F0-9]{64}$'){throw 'Default receipt has no unique signed PDFium source binding.'}

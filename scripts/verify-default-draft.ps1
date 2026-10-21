@@ -357,7 +357,7 @@ $expectedUrl="https://github.com/$script:Repository/releases/download/$TargetTag
 if([string]$manifest.version -cne $TargetVersion-or [string]$platform.url -cne $expectedUrl-or [string]$platform.signature -cne $signatureText-or [string]$manifest.notes -cne $notes){throw 'Updater manifest is not exactly bound to version, URL, signature text, and tagged notes.'}
 $null=Assert-TrustedWindowsSignature -Path $installerPath -ExpectedPublisher $ExpectedPublisher
 $base=Get-BaseBundleResourceMap -ProjectRoot $TargetSourceRoot
-if([uint64]$base.Count -ne 26){throw 'Default tagged-source resource inventory is not exactly 26 files.'}
+if([uint64]$base.Count -ne 28){throw 'Default tagged-source resource inventory is not exactly 28 files.'}
 $extractionRoot=Join-Path $workRoot 'extracted-installer';$files=Expand-DefaultInstaller $installerPath $extractionRoot $base.Entries
 $inventory=Assert-DefaultInventory $files $extractionRoot $base.Entries
 $application=Get-UniqueExtractedFile $files 'pdf-workstation.exe' 'Packaged application';Assert-PackagedApplicationIdentity -Path $application.FullName -Version $TargetVersion;$null=Assert-TrustedWindowsSignature -Path $application.FullName -ExpectedPublisher $ExpectedPublisher
