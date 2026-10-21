@@ -39,3 +39,50 @@ fn latin1_width_table_matches_the_published_helvetica_metrics() {
     assert_eq!(LATIN1_WIDTHS.len(), 96);
     for (character, width) in [('é', 556.0), ('É', 667.0), ('ß', 611.0), ('Æ', 1000.0), ('æ', 889.0), ('©', 737.0), ('ÿ', 500.0), ('\u{a0}', 278.0), ('A', 667.0)] { assert_eq!(advance(character), width, "{character}"); }
 }
+
+const CHOICE: &[u8] = include_bytes!("../tests/fixtures/reportlab-choice-fields.pdf");
+fn scrolling_list(top: usize) -> (Vec<u8>, ObjectId) {
+    let mut doc = Document::load_mem(CHOICE).unwrap();
+    let id = *doc.objects.iter().find(|(_, object)| object.as_dict().ok().is_some_and(|d| d.has(b"Opt") && matches!(d.get(b"Ff").ok().and_then(|f| f.as_i64().ok()).unwrap_or(0), 0 | 2))).unwrap().0;
+    let form = doc.catalog().unwrap().get(b"AcroForm").unwrap().as_reference().unwrap(); let form = doc.get_dictionary(form).unwrap().clone();
+    let rect = doc.get_dictionary(id).unwrap().get(b"Rect").unwrap().as_array().unwrap().iter().map(|v| v.as_float().unwrap()).collect::<Vec<_>>();
+    let labels: Vec<String> = (0..10).map(|n| format!("Option {n}")).collect();
+    let field = doc.get_dictionary_mut(id).unwrap();
+    field.set("Opt", labels.iter().map(|label| Object::string_literal(label.as_bytes().to_vec())).collect::<Vec<_>>()); field.remove(b"V"); field.remove(b"I"); field.remove(b"DV");
+    if top > 0 { field.set("TI", top as i64); } else { field.remove(b"TI"); }
+    field.set("Rect", vec![Object::Real(rect[0]), Object::Real(rect[1]), Object::Real(rect[0] + 200.0), Object::Real(rect[1] + 100.0)]);
+    let trial = style(&doc, &form, doc.get_dictionary(id).unwrap()).unwrap(); let height = 4.0 * trial.border + 5.4 * trial.size;
+    doc.get_dictionary_mut(id).unwrap().set("Rect", vec![Object::Real(rect[0]), Object::Real(rect[1]), Object::Real(rect[0] + 200.0), Object::Real(rect[1] + height)]);
+    let mut st = style(&doc, &form, doc.get_dictionary(id).unwrap()).unwrap(); st.top = top; assert_eq!(list_slots(&st), 4);
+    let info = ChoiceInfo { presentation: "list", options: labels.iter().enumerate().map(|(n, label)| ChoiceOption { option_id: format!("o{n}"), label: label.clone(), export: label.clone() }).collect(), selected_option_id: None };
+    let content = choice_appearance(&st, &info).unwrap().encode().unwrap();
+    let normal = doc.get_dictionary(id).unwrap().get(b"AP").unwrap().as_dict().unwrap().get(b"N").unwrap().as_reference().unwrap();
+    let stream = doc.get_object_mut(normal).unwrap().as_stream_mut().unwrap(); stream.dict.remove(b"Filter"); stream.set_content(content);
+    stream.dict.set("BBox", vec![Object::Real(0.0), Object::Real(0.0), Object::Real(st.width), Object::Real(st.height)]);
+    let mut bytes = Vec::new(); doc.save_to(&mut bytes).unwrap(); (bytes, id)
+}
+fn list_field(parsed: &FormDocument) -> &ParsedField { parsed.fields.iter().find(|field| field.dto.choice.as_ref().is_some_and(|choice| choice.presentation == "list")).unwrap() }
+
+#[test]
+fn a_list_box_with_more_options_than_rows_scrolls_to_the_selected_option() {
+    let (bytes, id) = scrolling_list(0); let source = session(bytes);
+    let parsed = FormDocument::parse(&source).unwrap(); let field = list_field(&parsed); let choice = field.dto.choice.as_ref().unwrap(); assert_eq!(choice.options.len(), 10);
+    let (field_id, near, far) = (field.dto.field_id.clone(), choice.options[1].option_id.clone(), choice.options[7].option_id.clone());
+    let fill = |option: &str| FormDocument::parse(&source).unwrap().prepare(&[FieldValue::Choice { field_id: field_id.clone(), option_id: Some(option.to_string()) }]).unwrap().0;
+    let top_of = |bytes: &[u8]| Document::load_mem(bytes).unwrap().get_dictionary(id).unwrap().get(b"TI").ok().and_then(|v| v.as_i64().ok());
+    let visible = fill(&near); assert_eq!(top_of(&visible), Some(0), "an option already in view does not scroll");
+    let scrolled = fill(&far); assert_eq!(top_of(&scrolled), Some(6), "an option out of view scrolls just far enough to be the last pages' top");
+    let reparsed = FormDocument::parse(&session(scrolled)).unwrap(); let choice = list_field(&reparsed).dto.choice.as_ref().unwrap();
+    assert_eq!(choice.options.iter().find(|o| Some(&o.option_id) == choice.selected_option_id.as_ref()).unwrap().label, "Option 7");
+    let cleared = FormDocument::parse(&session(fill(&far))).unwrap().prepare(&[FieldValue::Choice { field_id: field_id.clone(), option_id: None }]).unwrap().0;
+    assert!(FormDocument::parse(&session(cleared)).unwrap().fields.iter().all(|f| f.dto.choice.as_ref().is_none_or(|c| c.presentation != "list" || c.selected_option_id.is_none())));
+}
+
+#[test]
+fn a_source_scroll_position_is_validated_against_its_appearance() {
+    let (bytes, _) = scrolling_list(3); let parsed = FormDocument::parse(&session(bytes)).unwrap(); assert_eq!(list_field(&parsed).style.as_ref().unwrap().top, 3);
+    let (bytes, id) = scrolling_list(0); let mut doc = Document::load_mem(&bytes).unwrap(); doc.get_dictionary_mut(id).unwrap().set("TI", 9); let mut bad = Vec::new(); doc.save_to(&mut bad).unwrap();
+    assert_eq!(FormDocument::query(&session(bad), 1).status, "unsupported", "a top index past the last full page is refused");
+    let (bytes, id) = scrolling_list(0); let mut doc = Document::load_mem(&bytes).unwrap(); doc.get_dictionary_mut(id).unwrap().set("TI", 2); let mut mismatch = Vec::new(); doc.save_to(&mut mismatch).unwrap();
+    assert_eq!(FormDocument::query(&session(mismatch), 1).status, "unsupported", "a scroll position that disagrees with the drawn rows is refused");
+}
