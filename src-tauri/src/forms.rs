@@ -250,7 +250,7 @@ mod tests {
     #[test]
     fn forms_patch_validation_is_atomic_and_enforces_ascii_length_and_fit() {
         let source = fixture(); let id = FormDocument::parse(&source).unwrap().fields[0].dto.field_id.clone();
-        for values in [vec![], vec![FieldValue::Text { field_id: "unknown".into(), value: "new".into() }], vec![FieldValue::Text { field_id:id.clone(),value:"Original".into() }], vec![FieldValue::Text { field_id:id.clone(),value:"é".into() }], vec![FieldValue::Text { field_id:id.clone(),value:"line\nline".into() }], vec![FieldValue::Text { field_id:id.clone(),value:"W".repeat(40) }], vec![FieldValue::Text { field_id:id.clone(),value:"a".repeat(41) }], vec![FieldValue::Text { field_id:id.clone(),value:"a".repeat(4097) }], vec![FieldValue::Text { field_id:id.clone(),value:"a".into() },FieldValue::Text { field_id:id.clone(),value:"b".into() }]] {
+        for values in [vec![], vec![FieldValue::Text { field_id: "unknown".into(), value: "new".into() }], vec![FieldValue::Text { field_id:id.clone(),value:"Original".into() }], vec![FieldValue::Text { field_id:id.clone(),value:"世".into() }], vec![FieldValue::Text { field_id:id.clone(),value:"line\nline".into() }], vec![FieldValue::Text { field_id:id.clone(),value:"W".repeat(40) }], vec![FieldValue::Text { field_id:id.clone(),value:"a".repeat(41) }], vec![FieldValue::Text { field_id:id.clone(),value:"a".repeat(4097) }], vec![FieldValue::Text { field_id:id.clone(),value:"a".into() },FieldValue::Text { field_id:id.clone(),value:"b".into() }]] {
             assert!(FormDocument::parse(&source).unwrap().prepare(&values).is_err()); assert_eq!(source.source, FIXTURE); assert_eq!(source.revision, 0);
         }
         let mut edited = fixture(); edited.plan[0].turns = 1; assert!(FormDocument::parse(&edited).is_err());
@@ -326,7 +326,7 @@ fn present_option<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<O
 impl FieldValue { fn field_id(&self) -> &str { match self { Self::Text { field_id, .. } | Self::Checkbox { field_id, .. } | Self::Radio {field_id,..} | Self::Choice {field_id,..} => field_id } } }
 
 #[derive(Clone)]
-struct Style { width: f32, height: f32, border: f32, background: Option<Vec<f32>>, border_color: Option<Vec<f32>>, text_color: Vec<f32>, font: String, size: f32, font_object: Object }
+struct Style { width: f32, height: f32, border: f32, background: Option<Vec<f32>>, border_color: Option<Vec<f32>>, text_color: Vec<f32>, font: String, size: f32, font_object: Object, winansi: bool, top: usize }
 struct ParsedField { dto: FormField, object: ObjectId, style: Option<Style>, on_state: Option<Vec<u8>> }
 pub struct FormDocument { document: Document, fields: Vec<ParsedField>, pub pages: usize }
 
@@ -337,6 +337,27 @@ fn number(value: &Object) -> Result<f32, String> { let value = value.as_float().
 fn numbers(value: &Object) -> Result<Vec<f32>, String> { let values = value.as_array().map_err(|_| "The form contains an invalid numeric array.")?; if values.len() > 6 { return Err("The form numeric array is too large.".into()); } values.iter().map(number).collect() }
 fn text(value: &Object) -> Result<String, String> { lopdf::decode_text_string(value).map_err(|_| "The form contains an unsupported text encoding.".into()) }
 fn ascii(value: &str) -> Result<(), String> { if value.len() > MAX_VALUE { return Err("Each form value is limited to 4 KiB.".into()); } if !value.bytes().all(|byte| (0x20..=0x7e).contains(&byte)) { return Err("This form tool accepts printable ASCII text only, without tabs or newlines.".into()); } Ok(()) }
+fn latin_char(character: char) -> bool { matches!(character as u32, 0x20..=0x7e | 0xa1..=0xff) && character != '\u{ad}' }
+// Text values: printable ASCII plus the Latin-1 Supplement from U+00A1 (the same code points in WinAnsi; U+00A0 is refused because a font may remap code 160 to the euro sign), at most 4 KiB, no tabs or newlines.
+fn latin(value: &str) -> Result<(), String> { if value.len() > MAX_VALUE { return Err("Each form value is limited to 4 KiB.".into()); } if !value.chars().all(latin_char) { return Err("This form tool accepts printable ASCII and Latin-1 characters only (no tabs, newlines, or other scripts).".into()); } Ok(()) }
+fn win_bytes(value: &str) -> Vec<u8> { value.chars().map(|character| character as u32 as u8).collect() }
+fn pdf_text(value: &str) -> Object { if value.is_ascii() { Object::string_literal(value.as_bytes().to_vec()) } else { let mut bytes = vec![0xfe, 0xff]; for unit in value.encode_utf16() { bytes.extend(unit.to_be_bytes()); } Object::string_literal(bytes) } }
+// Helvetica advance widths (1/1000 em) for 0xA0..=0xFF, Adobe's Helvetica metrics for the WinAnsi Latin-1 Supplement.
+const LATIN1_WIDTHS: [u16; 96] = [278,333,556,556,556,556,260,556,333,737,370,556,584,333,737,333, 400,584,333,333,333,556,537,278,333,333,365,556,834,834,834,611, 667,667,667,667,667,667,1000,722,667,667,667,667,278,278,278,278, 722,722,778,778,778,778,778,584,778,722,722,722,722,667,667,611, 556,556,556,556,556,556,889,500,556,556,556,556,278,278,278,278, 556,556,556,556,556,556,556,584,611,556,556,556,556,500,556,500];
+fn advance(character: char) -> f32 { let code = character as u32; if code >= 0xa0 { LATIN1_WIDTHS[(code - 0xa0) as usize] as f32 } else { WIDTHS[(code - 32) as usize] as f32 } }
+fn full_winansi(doc: &Document, value: &Object) -> bool {
+    let Ok(font) = dict(doc, value) else { return false };
+    let Some(encoding) = font.get(b"Encoding").ok().and_then(|value| object(doc, value).ok()) else { return false };
+    if encoding.as_name().ok() == Some(b"WinAnsiEncoding") { return true; }
+    let Ok(encoding) = encoding.as_dict() else { return false };
+    let winansi_base = match encoding.get(b"BaseEncoding").and_then(Object::as_name).ok() { Some(b"WinAnsiEncoding") => true, None | Some(b"StandardEncoding") => false, _ => return false };
+    let mut assigned = HashMap::new(); let mut code = 0i64;
+    for value in encoding.get(b"Differences").and_then(Object::as_array).map(Vec::as_slice).unwrap_or(&[]) { if let Ok(index) = value.as_i64() { code = index; } else { if let Ok(name) = value.as_name() { assigned.insert(code, name.to_vec()); } let Some(next) = code.checked_add(1) else { return false }; code = next; } }
+    // Every Latin-1 code we emit (0xA1..=0xFF except the soft hyphen) must show its Latin-1 glyph: assigned by name, or inherited from WinAnsi,
+    // or inherited from StandardEncoding where that coincides.
+    (161..=255i64).filter(|code| *code != 173).all(|code| match assigned.get(&code) { Some(name) => name.as_slice() == LATIN1_NAMES[(code - 161) as usize].as_bytes(), None => winansi_base || [161, 162, 163, 165, 167, 171, 182, 187, 191].contains(&code) })
+}
+const LATIN1_NAMES: [&str; 95] = ["exclamdown","cent","sterling","currency","yen","brokenbar","section","dieresis","copyright","ordfeminine","guillemotleft","logicalnot","hyphen","registered","macron","degree","plusminus","twosuperior","threesuperior","acute","mu","paragraph","periodcentered","cedilla","onesuperior","ordmasculine","guillemotright","onequarter","onehalf","threequarters","questiondown","Agrave","Aacute","Acircumflex","Atilde","Adieresis","Aring","AE","Ccedilla","Egrave","Eacute","Ecircumflex","Edieresis","Igrave","Iacute","Icircumflex","Idieresis","Eth","Ntilde","Ograve","Oacute","Ocircumflex","Otilde","Odieresis","multiply","Oslash","Ugrave","Uacute","Ucircumflex","Udieresis","Yacute","Thorn","germandbls","agrave","aacute","acircumflex","atilde","adieresis","aring","ae","ccedilla","egrave","eacute","ecircumflex","edieresis","igrave","iacute","icircumflex","idieresis","eth","ntilde","ograve","oacute","ocircumflex","otilde","odieresis","divide","oslash","ugrave","uacute","ucircumflex","udieresis","yacute","thorn","ydieresis"];
 fn color(value: &Object) -> Result<Vec<f32>, String> { let value = numbers(value)?; if !matches!(value.len(), 1 | 3) || value.iter().any(|x| !(0.0..=1.0).contains(x)) { return Err("Only gray or RGB form colors are supported.".into()); } Ok(value) }
 fn real(values: &[f32]) -> Vec<Object> { values.iter().copied().map(Object::Real).collect() }
 fn op(name: &str, values: &[f32]) -> Operation { Operation::new(name, real(values)) }
@@ -348,7 +369,7 @@ fn appearance(style: &Style, value: &str) -> Content<Vec<Operation>> {
     if let Some(border) = &style.border_color { if style.border > 0.0 { operations.extend([paint(border, true), op("w", &[style.border]), op("re", &[style.border / 2.0, style.border / 2.0, style.width - style.border, style.height - style.border]), op("s", &[])]); } }
     let inset = style.border * 2.0;
     operations.extend([Operation::new("BMC", vec![Object::Name(b"Tx".to_vec())]), op("q", &[]), op("re", &[inset, inset, style.width - 2.0 * inset, style.height - 2.0 * inset]), op("W", &[]), op("n", &[]), op("g", &[0.0]), op("G", &[0.0])]);
-    if !value.is_empty() { operations.extend([op("BT", &[]), Operation::new("Tf", vec![Object::Name(style.font.as_bytes().to_vec()), Object::Real(style.size)]), paint(&style.text_color, false), op("Tm", &[1.0, 0.0, 0.0, 1.0, style.border * 4.0, style.height - style.size - inset]), Operation::new("Tj", vec![Object::string_literal(value.as_bytes().to_vec())]), op("ET", &[])]); }
+    if !value.is_empty() { operations.extend([op("BT", &[]), Operation::new("Tf", vec![Object::Name(style.font.as_bytes().to_vec()), Object::Real(style.size)]), paint(&style.text_color, false), op("Tm", &[1.0, 0.0, 0.0, 1.0, style.border * 4.0, style.height - style.size - inset]), Operation::new("Tj", vec![Object::string_literal(win_bytes(value))]), op("ET", &[])]); }
     operations.extend([op("Q", &[]), op("EMC", &[])]);
     Content { operations }
 }
@@ -548,7 +569,7 @@ fn style(doc: &Document, form: &Dictionary, field: &Dictionary) -> Result<Style,
     let (background, border_color) = if let Ok(value) = field.get(b"MK") { let value = dict(doc, value)?; keys(value, &[b"BG", b"BC"])?; (value.get(b"BG").ok().map(color).transpose()?, value.get(b"BC").ok().map(color).transpose()?) } else { (None, None) };
     if border > 0.0 && border_color.is_none() { return Err("The form border color is missing.".into()); }
     if width <= 8.0 * border || height < 1.225 * size + 4.0 * border { return Err("The form layout cannot fit its fixed text size without clipping descenders.".into()); }
-    Ok(Style { width, height, border, background, border_color, text_color, font: String::from_utf8(name.to_vec()).map_err(|_| "Invalid form font name.")?, size, font_object })
+    Ok(Style { width, height, border, background, border_color, text_color, font: String::from_utf8(name.to_vec()).map_err(|_| "Invalid form font name.")?, size, winansi: full_winansi(doc, &font_object), top: 0, font_object })
 }
 
 // Standard Helvetica ASCII advance widths, matching ReportLab's standard-font metrics (1/1000 em).
@@ -559,29 +580,34 @@ fn fits(field: &ParsedField, value: &str) -> Result<(), String> {
     fits_style(style,value,field.dto.max_length)
 }
 fn fits_style(style:&Style,value:&str,max_length:Option<usize>)->Result<(),String> {
-    ascii(value)?;
-    if max_length.is_some_and(|max| value.len() > max) { return Err("The form value exceeds the field's MaxLength.".into()); }
-    let advance = value.bytes().map(|byte| WIDTHS[(byte - 32) as usize] as f32).sum::<f32>() * style.size / 1000.0;
+    latin(value)?;
+    if !value.is_ascii() && !style.winansi { return Err("This field's font encoding cannot show characters beyond ASCII.".into()); }
+    if max_length.is_some_and(|max| value.chars().count() > max) { return Err("The form value exceeds the field's MaxLength.".into()); }
+    let advance = value.chars().map(advance).sum::<f32>() * style.size / 1000.0;
     if advance > style.width - 8.0 * style.border - 1.0 || advance + 0.04 * style.size > style.width - 6.0 * style.border || value.starts_with(['j','/']) && style.border * 2.0 < 0.03 * style.size { return Err("The text does not fit this field at its existing font size without clipping. Use a shorter value.".into()); } Ok(())
 }
 
+fn list_slots(style:&Style)->usize{((style.height-4.0*style.border)/(1.2*style.size)).floor() as usize}
 fn choice_appearance(style:&Style,choice:&ChoiceInfo)->Result<Content<Vec<Operation>>,String> {
     let selected=choice.options.iter().position(|option|Some(&option.option_id)==choice.selected_option_id.as_ref());
     if choice.presentation=="dropdown"{return Ok(appearance(style,selected.map(|index|choice.options[index].label.as_str()).unwrap_or("")));}
-    let inner=style.height-4.0*style.border;let slots=(inner/(1.2*style.size)).floor() as usize;
-    if slots<choice.options.len(){return Err("This list box cannot display every option without scrolling or clipping.".into());}
-    let leading=inner/slots as f32;let last=style.height-2.0*style.border-style.size-(choice.options.len()-1) as f32*leading;
-    if last-0.225*style.size<2.0*style.border{return Err("The list box cannot display every option without clipping descenders.".into());}
+    let inner=style.height-4.0*style.border;let slots=list_slots(style);
+    if slots==0{return Err("This list box is too short to display any option.".into());}
+    let top=style.top;if top>0&&top+slots>choice.options.len().max(slots){return Err("The list box scroll position is out of range.".into());}
+    let visible=&choice.options[top.min(choice.options.len())..(top+slots).min(choice.options.len())];
+    let leading=inner/slots as f32;let last=style.height-2.0*style.border-style.size-(visible.len()-1) as f32*leading;
+    if last-0.225*style.size<2.0*style.border{return Err("The list box cannot display its options without clipping descenders.".into());}
     let mut content=appearance(style,"");content.operations.truncate(content.operations.len()-4);
-    if let Some(index)=selected{content.operations.extend([op("rg",&[0.600006,0.756866,0.854904]),op("re",&[2.0*style.border,style.height-2.0*style.border-(index+1) as f32*leading,style.width-4.0*style.border,leading]),op("f",&[])]);}
+    if let Some(index)=selected.filter(|index|(top..top+slots).contains(index)){content.operations.extend([op("rg",&[0.600006,0.756866,0.854904]),op("re",&[2.0*style.border,style.height-2.0*style.border-(index-top+1) as f32*leading,style.width-4.0*style.border,leading]),op("f",&[])]);}
     content.operations.extend([op("g",&[0.0]),op("G",&[0.0])]);
-    for(index,option)in choice.options.iter().enumerate(){content.operations.push(op("BT",&[]));if index==0{content.operations.push(Operation::new("Tf",vec![Object::Name(style.font.as_bytes().to_vec()),Object::Real(style.size)]));}content.operations.extend([if Some(index)==selected{op("g",&[0.0])}else{paint(&style.text_color,false)},op("Td",&[4.0*style.border,style.height-2.0*style.border-style.size-index as f32*leading]),Operation::new("Tj",vec![Object::string_literal(option.label.as_bytes().to_vec())]),op("ET",&[])]);}
+    for(row,option)in visible.iter().enumerate(){let index=top+row;content.operations.push(op("BT",&[]));if row==0{content.operations.push(Operation::new("Tf",vec![Object::Name(style.font.as_bytes().to_vec()),Object::Real(style.size)]));}content.operations.extend([if Some(index)==selected{op("g",&[0.0])}else{paint(&style.text_color,false)},op("Td",&[4.0*style.border,style.height-2.0*style.border-style.size-row as f32*leading]),Operation::new("Tj",vec![Object::string_literal(win_bytes(&option.label))]),op("ET",&[])]);}
     content.operations.extend([op("Q",&[]),op("EMC",&[])]);Ok(content)
 }
 fn choice_field(document:&Document,form:&Dictionary,field:&Dictionary,id:ObjectId,ap_bytes:&mut usize)->Result<(ChoiceInfo,Style,String),String> {
     let flags=field.get(b"Ff").ok().map(|value|value.as_i64().map_err(|_|"The choice field flags are invalid.")).transpose()?.unwrap_or(0);
     let presentation=match flags{0|2=>"list",131072|131074=>"dropdown",_=>return Err("Only noneditable single-select dropdowns and list boxes are supported.".into())};
-    if field.get(b"TI").ok().is_some_and(|value|value.as_i64().ok()!=Some(0)){return Err("Choice fields with a scrolled top index are unsupported.".into());}
+    let top_index=match field.get(b"TI").ok(){None=>0,Some(value)=>usize::try_from(value.as_i64().map_err(|_|"The choice top index is invalid.")?).map_err(|_|"The choice top index is invalid.")?};
+    if presentation=="dropdown"&&top_index!=0{return Err("Dropdowns with a scrolled top index are unsupported.".into());}
     let opts=object(document,field.get(b"Opt").map_err(|_|"The choice options are missing.")?)?.as_array().map_err(|_|"The choice options are invalid.")?;
     if !(1..=32).contains(&opts.len()){return Err("Each choice field requires between one and 32 options.".into());}
     let mut options=Vec::new();let mut exports=HashSet::new();let mut labels=HashSet::new();
@@ -589,7 +615,7 @@ fn choice_field(document:&Document,form:&Dictionary,field:&Dictionary,id:ObjectI
     let value=field.get(b"V").ok().map(text).transpose()?.unwrap_or_default();ascii(&value)?;let selected=if value.is_empty(){None}else{Some(options.iter().position(|option|option.export==value).ok_or("The choice value does not match a source export option.")?)};
     if let Ok(indices)=field.get(b"I"){let indices=object(document,indices)?.as_array().map_err(|_|"The choice selected indices are invalid.")?;match selected{None if indices.is_empty()=>{},Some(index) if indices.len()==1&&indices[0].as_i64().ok()==Some(index as i64)=>{},_=>return Err("The choice value and selected index disagree.".into())}}
     if let Ok(default)=field.get(b"DV"){let default=text(default)?;ascii(&default)?;if !default.is_empty()&&!options.iter().any(|option|option.export==default){return Err("The choice default does not match a source export option.".into());}}
-    let choice=ChoiceInfo {presentation,selected_option_id:selected.map(|index|options[index].option_id.clone()),options};let style=style(document,form,field)?;for option in &choice.options{fits_style(&style,&option.label,None)?;}let expected=choice_appearance(&style,&choice)?;validate_text_appearance(document,field,&style,&expected,presentation=="list"||selected.is_some(),ap_bytes)?;Ok((choice,style,value))
+    let choice=ChoiceInfo {presentation,selected_option_id:selected.map(|index|options[index].option_id.clone()),options};let mut style=style(document,form,field)?;style.top=top_index;for option in &choice.options{fits_style(&style,&option.label,None)?;}let expected=choice_appearance(&style,&choice)?;validate_text_appearance(document,field,&style,&expected,presentation=="list"||selected.is_some(),ap_bytes)?;Ok((choice,style,value))
 }
 
 impl FormDocument {
@@ -664,8 +690,8 @@ impl FormDocument {
                 continue;
             }
             if is_choice{let(choice,style,value)=choice_field(&document,form,field,id,&mut ap_bytes)?;option_count+=choice.options.len();if option_count>256{return Err("Form filling is limited to 256 radio and choice options in total.".into());}text_bytes+=name.len()+value.len()+choice.options.iter().map(|option|option.label.len()+option.export.len()).sum::<usize>();if text_bytes>MAX_TEXT{return Err("The form names, options and values exceed 1 MiB.".into());}fields.push(ParsedField {dto:FormField {field_id:format!("field-{}-{}",id.0,id.1),name,page,value,max_length:None,checked:None,on_state:None,radio:None,choice:Some(choice)},object:id,style:Some(style),on_state:None});continue;}
-            let value = field.get(b"V").ok().map(text).transpose()?.unwrap_or_default(); ascii(&value)?;
-            if let Ok(default) = field.get(b"DV") { ascii(&text(default)?)?; }
+            let value = field.get(b"V").ok().map(text).transpose()?.unwrap_or_default(); latin(&value)?;
+            if let Ok(default) = field.get(b"DV") { latin(&text(default)?)?; }
             text_bytes += name.len() + value.len(); if text_bytes > MAX_TEXT { return Err("The form text exceeds 1 MiB.".into()); }
             let max_length = field.get(b"MaxLen").ok().map(|value| value.as_i64().map_err(|_| "The form MaxLength is invalid.").and_then(|value| usize::try_from(value).map_err(|_| "The form MaxLength is invalid."))).transpose()?;
             if max_length.is_some_and(|value| value == 0 || value > i32::MAX as usize) { return Err("The form MaxLength is unsupported.".into()); }
@@ -678,7 +704,7 @@ impl FormDocument {
     }
     pub fn query(session: &EditSession, id: u64) -> FormFields {
         let (fields, reason) = match Self::parse(session) { Ok(form) => (form.fields.into_iter().map(|field| field.dto).collect(), None), Err(reason) => (Vec::new(), Some(reason)) };
-        FormFields { document_id: id, revision: session.revision, status: if reason.is_none() { "supported" } else { "unsupported" }, reason, input: "printable-ascii", value_byte_limit: MAX_VALUE, fields }
+        FormFields { document_id: id, revision: session.revision, status: if reason.is_none() { "supported" } else { "unsupported" }, reason, input: "printable-latin1", value_byte_limit: MAX_VALUE, fields }
     }
     pub fn prepare(mut self, values: &[FieldValue]) -> Result<(Vec<u8>, Vec<FormField>), String> {
         if values.is_empty() || values.len() > MAX_FIELDS { return Err("Change between one and 256 form fields before saving a copy.".into()); }
@@ -691,7 +717,7 @@ impl FormDocument {
                 FieldValue::Checkbox {checked,..}=>{let current=field.dto.checked.ok_or("The submitted form patch has the wrong field kind.")?;field.dto.checked=Some(*checked);field.dto.value=checked.to_string();current!=*checked},
                 FieldValue::Radio {option_id,..}=>{let radio=field.dto.radio.as_mut().ok_or("The submitted form patch has the wrong field kind.")?;let option_id=option_id.as_ref().ok_or("A radio group selection cannot be cleared: the form author requires one option to stay selected.")?;let option=radio.options.iter().find(|option|&option.option_id==option_id).ok_or("The radio option no longer exists. Refresh the field list.")?;let different=radio.selected_option_id.as_ref()!=Some(option_id);radio.selected_option_id=Some(option_id.clone());field.dto.value=option.label.clone();different},
                 FieldValue::Choice {option_id:None,..}=>{let choice=field.dto.choice.as_mut().ok_or("The submitted form patch has the wrong field kind.")?;let different=choice.selected_option_id.is_some();choice.selected_option_id=None;field.dto.value=String::new();different},
-                FieldValue::Choice {option_id:Some(option_id),..}=>{let choice=field.dto.choice.as_mut().ok_or("The submitted form patch has the wrong field kind.")?;let option=choice.options.iter().find(|option|&option.option_id==option_id).ok_or("The choice option no longer exists. Refresh the field list.")?;let different=choice.selected_option_id.as_ref()!=Some(option_id);choice.selected_option_id=Some(option_id.clone());field.dto.value=option.export.clone();different},
+                FieldValue::Choice {option_id:Some(option_id),..}=>{let choice=field.dto.choice.as_mut().ok_or("The submitted form patch has the wrong field kind.")?;let option=choice.options.iter().find(|option|&option.option_id==option_id).ok_or("The choice option no longer exists. Refresh the field list.")?;let different=choice.selected_option_id.as_ref()!=Some(option_id);choice.selected_option_id=Some(option_id.clone());field.dto.value=option.export.clone();if choice.presentation=="list"{if let Some(style)=field.style.as_mut(){let slots=list_slots(style);let index=choice.options.iter().position(|option|&option.option_id==option_id).unwrap_or(0);if slots>0&&choice.options.len()>slots&&(index<style.top||index>=style.top+slots){style.top=index.min(choice.options.len()-slots);}}}different},
             };
             if different{changed.insert(field.dto.field_id.clone());}
         }
@@ -713,8 +739,8 @@ impl FormDocument {
             let content = if let Some(choice)=&field.dto.choice{choice_appearance(style,choice)?}else{appearance(style,&field.dto.value)}.encode().map_err(|_| "Could not encode the form appearance.")?;
             let resources = dictionary! { "Font" => dictionary! { style.font.as_bytes() => style.font_object.clone() }, "ProcSet" => vec![Object::Name(b"PDF".to_vec()), Object::Name(b"Text".to_vec())] };
             let ap = self.document.add_object(Stream::new(dictionary! { "Type" => "XObject", "Subtype" => "Form", "FormType" => 1, "BBox" => real(&[0.0,0.0,style.width,style.height]), "Matrix" => real(&[1.0,0.0,0.0,1.0,0.0,0.0]), "Resources" => resources }, content));
-            let widget = self.document.get_dictionary_mut(field.object).map_err(|_| "The form field disappeared during preparation.")?; widget.set("V", Object::string_literal(field.dto.value.as_bytes().to_vec())); widget.set("AP", dictionary! { "N" => ap });
-            if let Some(choice)=&field.dto.choice{if choice.selected_option_id.is_none(){widget.remove(b"V");widget.remove(b"I");continue;}let index=choice.options.iter().position(|option|Some(&option.option_id)==choice.selected_option_id.as_ref()).ok_or("A choice patch must select one source option.")?;widget.set("I",vec![Object::Integer(index as i64)]);}
+            let widget = self.document.get_dictionary_mut(field.object).map_err(|_| "The form field disappeared during preparation.")?; widget.set("V", pdf_text(&field.dto.value)); widget.set("AP", dictionary! { "N" => ap });
+            if let Some(choice)=&field.dto.choice{if choice.selected_option_id.is_none(){widget.remove(b"V");widget.remove(b"I");continue;}let index=choice.options.iter().position(|option|Some(&option.option_id)==choice.selected_option_id.as_ref()).ok_or("A choice patch must select one source option.")?;widget.set("I",vec![Object::Integer(index as i64)]);if choice.presentation=="list"&&choice.options.len()>list_slots(style){widget.set("TI",Object::Integer(style.top as i64));}}
         }
         let live = reachable(&self.document); self.document.objects.retain(|id, _| live.contains(id));
         let mut bytes = Vec::new(); self.document.save_to(&mut bytes).map_err(|_| "Could not serialize the filled form.")?; if bytes.len() > MAX_OUTPUT { return Err("The filled form output exceeds 256 MiB.".into()); } Ok((bytes, self.fields.into_iter().map(|field| field.dto).collect()))
@@ -724,3 +750,6 @@ impl FormDocument {
 #[cfg(test)]
 #[path = "forms_h2_tests.rs"]
 mod h2_tests;
+#[cfg(test)]
+#[path = "forms_breadth_tests.rs"]
+mod breadth_tests;

@@ -93,7 +93,7 @@ export type FormRadioField = { kind: 'radio'; fieldId: string; name: string; pag
 export type FormChoiceField = { kind: 'choice'; fieldId: string; name: string; page: number; presentation: 'dropdown' | 'list'; options: { optionId: string; label: string }[]; selectedOptionId: string | null };
 export type FormField = FormTextField | FormCheckboxField | FormRadioField | FormChoiceField;
 export type FormPatch = { fieldId: string; kind: 'text'; value: string } | { fieldId: string; kind: 'checkbox'; checked: boolean } | { fieldId: string; kind: 'radio'; optionId: string } | { fieldId: string; kind: 'choice'; optionId: string | null };
-export type DocumentFormFields = { documentId: number; revision: number; status: 'supported' | 'unsupported'; reason: string | null; input: 'printable-ascii'; valueByteLimit: number; fields: FormField[] };
+export type DocumentFormFields = { documentId: number; revision: number; status: 'supported' | 'unsupported'; reason: string | null; input: 'printable-latin1'; valueByteLimit: number; fields: FormField[] };
 export const documentFormFields = (id: number, revision: number) => invoke<DocumentFormFields>('document_form_fields', { id, revision });
 export const fillFormCopy = (id: number, revision: number, values: FormPatch[]) => invoke<SavedCopy | null>('fill_form_copy', { id, revision, values });
 export const combineDocuments = (first: { id: number; revision: number }, second: { id: number; revision: number }) => invoke<SavedCopy | null>('combine_documents', { first, second });

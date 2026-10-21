@@ -57,7 +57,7 @@ export function validateFormPatches(fields: FormField[], values: Record<string, 
     if (patch.kind !== 'text') continue;
     const field = fields.find((item): item is FormTextField => item.fieldId === patch.fieldId && item.kind === 'text');
     if (!field) return 'This form changed. Reload it and try again.';
-    if (!/^[\x20-\x7E]*$/.test(patch.value)) return `${field.name} accepts printable ASCII characters only.`;
+    if (!/^[\x20-\x7E\xA1-\xAC\xAE-\xFF]*$/.test(patch.value)) return `${field.name} accepts printable ASCII and Latin-1 characters only.`;
     if (new TextEncoder().encode(patch.value).byteLength > byteLimit) return `${field.name} exceeds the ${byteLimit.toLocaleString()}-byte value limit.`;
     if (field.maxLength !== null && patch.value.length > field.maxLength) return `${field.name} exceeds its ${field.maxLength.toLocaleString()}-character limit.`;
   }
@@ -98,7 +98,7 @@ export default function FillFormsDialog({ document, formFields, error: loadError
   };
   return <dialog ref={dialog} className={s.dialog} aria-labelledby="fill-forms-title" onCancel={event => { event.preventDefault(); if (!working) close(); }}>
     <h2 id="fill-forms-title">Fill existing fields</h2>
-    <p>Edit the supported fields below. Text fields accept printable ASCII. Windows will ask where to save a new PDF. Your open source PDF stays unchanged.</p>
+    <p>Edit the supported fields below. Text fields accept printable ASCII and Latin-1 characters (such as accented letters). Windows will ask where to save a new PDF. Your open source PDF stays unchanged.</p>
     {loadError ? <p role="alert">{loadError}</p> : !formFields ? <p role="status">Checking this PDF for supported fields…</p> : formFields.status === 'unsupported' ? <p role="status">Filling is unavailable. {formFields.reason || 'This PDF has form fields this build does not change.'}</p> : !fields.length ? <p role="status">This PDF has no supported fields.</p> : <div className={s.fields}>{fields.map(field => {
       if (field.kind === 'text') return <label key={field.fieldId}><span>{field.name}<small>Page {field.page + 1}{field.maxLength === null ? '' : ` · ${field.maxLength} characters`}</small></span><input aria-label={field.name} value={textDraft(field, values)} disabled={working} maxLength={field.maxLength ?? undefined} onChange={event => change(field.fieldId, event.target.value)} /></label>;
       if (field.kind === 'checkbox') return <label className={s.checkbox} key={field.fieldId}><input type="checkbox" aria-label={`${field.name}, page ${field.page + 1}`} checked={checkboxDraft(field, values)} disabled={working} onChange={event => change(field.fieldId, event.target.checked)} /><span>{field.name}<small>Page {field.page + 1}</small></span></label>;
