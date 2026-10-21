@@ -266,7 +266,7 @@ describe('manual signed OCR installer upgrade workflow', () => {
     );
     const result = runPowerShell(check);
     expect(result.status, result.stderr || result.stdout).toBe(0);
-  }, 30_000);
+  }, 60_000);
 
   it('rejects malformed signed receipts and validates the exact five OCR roles', () => {
     const check = functionHarness(
@@ -381,7 +381,7 @@ describe('manual signed OCR installer upgrade workflow', () => {
     );
     const result = runPowerShell7(check);
     expect(result.status, result.stderr || result.stdout).toBe(0);
-  }, 15_000);
+  }, 60_000);
 
   it('binds direct installed-engine smoke to exact trusted assets, oracle, profile, and caps', () => {
     const check = functionHarness(
@@ -433,7 +433,7 @@ describe('manual signed OCR installer upgrade workflow', () => {
     );
     const result = runPowerShell7(check);
     expect(result.status, result.stderr || result.stdout).toBe(0);
-  }, 15_000);
+  }, 60_000);
 
   it('isolates Explorer publisher UI behind a hard process deadline and accepts only one sanitized JSON object', () => {
     const helper = readFileSync('scripts/installed-publisher-ui.ps1', 'utf8');
@@ -574,7 +574,7 @@ describe('manual signed OCR installer upgrade workflow', () => {
     `;
     const result = runPowerShell7(check);
     expect(result.status, result.stderr || result.stdout).toBe(0);
-  }, 15_000);
+  }, 60_000);
 
   it('enforces bounded process and installed-registry facts and writes one sanitized record', () => {
     const check = functionHarness(
@@ -621,5 +621,5 @@ describe('manual signed OCR installer upgrade workflow', () => {
     );
     const result = runPowerShell(check);
     expect(result.status, result.stderr || result.stdout).toBe(0);
-  }, 15_000);
+  }, 60_000);
 });

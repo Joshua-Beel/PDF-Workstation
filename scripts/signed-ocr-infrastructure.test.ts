@@ -359,4 +359,37 @@ describe('signed OCR installer infrastructure', () => {
     expect(result.status, result.stderr || result.stdout).toBe(0);
     expect(result.stdout).toContain('PASS');
   }, 35_000);
+
+  it('restores the Tauri CLI Cargo.toml formatting rewrite so installer builds leave the tracked tree clean', () => {
+    const installer = readFileSync('scripts/build-installer.ps1', 'utf8');
+    expect(installer).toMatch(/\$cargoManifestBytes = \[IO\.File\]::ReadAllBytes\(\$cargoManifest\)\r?\n\s+try \{\r?\n\s+\$buildExitCode = Invoke-TauriInstallerBuild[^\r\n]+\r?\n\s+\} finally \{\r?\n\s+\$manifestState = Restore-TauriRewrittenManifest -Path \$cargoManifest -OriginalBytes \$cargoManifestBytes/);
+    const check = String.raw`
+      $ErrorActionPreference = 'Stop'
+      Set-Location -LiteralPath '${process.cwd().replaceAll("'", "''")}'
+      $tokens=$null;$errors=$null
+      $ast=[Management.Automation.Language.Parser]::ParseFile((Resolve-Path ./scripts/build-installer.ps1),[ref]$tokens,[ref]$errors)
+      if($errors.Count){throw 'build-installer.ps1 did not parse.'}
+      $node=$ast.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Restore-TauriRewrittenManifest'},$true);if(-not $node){throw 'Missing restore function'};Invoke-Expression $node.Extent.Text
+      $root=Join-Path (Resolve-Path target) ('tauri-manifest-restore-'+[Guid]::NewGuid().ToString('N'));[IO.Directory]::CreateDirectory($root)|Out-Null
+      try {
+        $path=Join-Path $root 'Cargo.toml'
+        $crlf=[string][char]13+[char]10;$lf=[string][char]10
+        $original=[Text.Encoding]::UTF8.GetBytes((@('[package]','name = "pdf-workstation"','',"[target.'cfg(windows)'.dependencies]",'windows = { version = "=0.61.3", features = ["Win32_System_ErrorReporting","Win32_System_IO"] }','') -join $crlf))
+        [IO.File]::WriteAllBytes($path,$original)
+        if((Restore-TauriRewrittenManifest -Path $path -OriginalBytes $original) -cne 'unchanged'){throw 'unchanged manifest was reported as changed'}
+        [IO.File]::WriteAllText($path,(@('[package]','name = "pdf-workstation"','',"[target.'cfg(windows)'.dependencies]",'windows = { version = "=0.61.3", features = ["Win32_System_ErrorReporting", "Win32_System_IO"] }','') -join $lf),[Text.UTF8Encoding]::new($false))
+        if((Restore-TauriRewrittenManifest -Path $path -OriginalBytes $original) -cne 'restored-formatting'){throw 'the observed Tauri formatting rewrite was not restored'}
+        if([Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) -cne [Convert]::ToBase64String($original)){throw 'restored bytes differ from the original'}
+        [IO.File]::WriteAllText($path,(@('[package]','name = "pdf-workstation"','[dependencies]','tauri = { version = "2", features = ["tray-icon"] }','') -join $lf),[Text.UTF8Encoding]::new($false))
+        $message=$null;try{Restore-TauriRewrittenManifest -Path $path -OriginalBytes $original|Out-Null}catch{$message=$_.Exception.Message}
+        if($null -eq $message -or -not $message.Contains('beyond whitespace')){throw 'a semantic Cargo.toml rewrite was accepted'}
+        if([Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) -cne [Convert]::ToBase64String($original)){throw 'a semantic rewrite was not restored before failing'}
+      } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+      Write-Output 'PASS'
+    `;
+    const result = runPowerShell(check);
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(result.stdout).toContain('PASS');
+  }, 35_000);
 });

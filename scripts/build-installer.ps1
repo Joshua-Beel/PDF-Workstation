@@ -74,6 +74,21 @@ function Assert-InstallerSourceRevision {
     if ($LASTEXITCODE -ne 0) { throw 'Installer proof requires a clean tracked index.' }
 }
 
+function Restore-TauriRewrittenManifest {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][byte[]]$OriginalBytes
+    )
+    $current = [IO.File]::ReadAllBytes($Path)
+    if ([Convert]::ToBase64String($current) -ceq [Convert]::ToBase64String($OriginalBytes)) { return 'unchanged' }
+    $strict = [Text.UTF8Encoding]::new($false, $true)
+    $originalText = $strict.GetString($OriginalBytes) -replace '\s', ''
+    $currentText = $strict.GetString($current) -replace '\s', ''
+    [IO.File]::WriteAllBytes($Path, $OriginalBytes)
+    if ($originalText -cne $currentText) { throw 'The Tauri CLI changed src-tauri/Cargo.toml beyond whitespace during the build; the file was restored and the build does not match its source.' }
+    return 'restored-formatting'
+}
+
 function Get-InstallerExtractArguments {
     param(
         [Parameter(Mandatory = $true)][string]$Installer,
@@ -276,7 +291,14 @@ try {
         else { npm.cmd run tauri -- build --ci --bundles nsis | Out-Host }
         return [int]$LASTEXITCODE
     }
-    $buildExitCode = Invoke-TauriInstallerBuild -ConfigPath $configPath -DeleteConfig:$deleteConfig -BuildCommand $buildCommand
+    $cargoManifest = Join-Path $projectRoot 'src-tauri/Cargo.toml'
+    $cargoManifestBytes = [IO.File]::ReadAllBytes($cargoManifest)
+    try {
+        $buildExitCode = Invoke-TauriInstallerBuild -ConfigPath $configPath -DeleteConfig:$deleteConfig -BuildCommand $buildCommand
+    } finally {
+        $manifestState = Restore-TauriRewrittenManifest -Path $cargoManifest -OriginalBytes $cargoManifestBytes
+    }
+    if ($manifestState -ceq 'restored-formatting') { Write-Output 'Restored src-tauri/Cargo.toml after the Tauri CLI rewrote its formatting during the build.' }
     if ($buildExitCode -ne 0) { throw 'Installer build failed.' }
     if ($SignedOcr) {
         Assert-SignedBasePeSources -Plan $baseResources -ExpectedPublisher $ExpectedPublisher

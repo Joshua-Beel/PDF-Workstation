@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- Installer builds restore the Cargo.toml formatting that the Tauri CLI rewrites, so the Windows validation pre-flight leaves the tree clean; two timing-sensitive tests get hosted-safe limits (SM6).
 - 0.3.0 update notes now mention accented Latin letters and scrolling list boxes in Fill forms; README trimmed to the newest 15 change lines (SM0; docs only).
 - Removing or replacing pages now drops links and destinations that pointed at the removed pages instead of leaving them broken; Replace cuts stray references the same way (SM2; SM7 F-1; source build).
 - Saved copies after rotate, crop, move or comments keep only objects reachable from the document, so old revisions and orphaned objects in the source no longer travel along (SM2; SM7 L-1; source build).

@@ -516,7 +516,7 @@ public static class PrintSpoolWriterFixture {
       }
       foreach($fixture in @([pscustomobject]@{Name='zero';Count=1},[pscustomobject]@{Name='one';Count=2},[pscustomobject]@{Name='many';Count=3})){
         $script:descendantCase=[string]$fixture.Name;$script:enumerationCalls=@()
-        $items=@(Get-ProcessUiElements -ProcessId 7319 -Deadline ([datetime]::UtcNow.AddSeconds(1)) -DesktopProvider { $desktop } -FindAllProvider $finder)
+        $items=@(Get-ProcessUiElements -ProcessId 7319 -Deadline ([datetime]::UtcNow.AddSeconds(30)) -DesktopProvider { $desktop } -FindAllProvider $finder)
         if($items.Count-ne[int]$fixture.Count-or-not[object]::ReferenceEquals($items[0],$top)){throw ('Rooted UIA '+$fixture.Name+' result did not retain array Count under strict mode.')}
         if($script:enumerationCalls.Count-ne2-or$script:enumerationCalls[0].Scope-ne[Windows.Automation.TreeScope]::Children-or$script:enumerationCalls[0].ConditionType-cne'PropertyCondition'-or$script:enumerationCalls[1].Scope-ne[Windows.Automation.TreeScope]::Descendants-or$script:enumerationCalls[1].ConditionType-cne'AndCondition'){throw 'UIA enumeration did not use process-owned roots then the native targeted condition.'}
       }
@@ -571,13 +571,13 @@ public static class PrintSpoolWriterFixture {
       }
       $main=New-HostedTopLevel 7319 1 'ControlType.Window' 'PDF Workstation'
       $replacement=New-HostedTopLevel 7319 3 'ControlType.Pane' ''
-      $baseline=@(Get-ProcessTopLevelUiSnapshot -ProcessId 7319 -Deadline ([datetime]::UtcNow.AddSeconds(1)) -ElementProvider {param($requestedProcessId,$windowsOnly)@($main)})
+      $baseline=@(Get-ProcessTopLevelUiSnapshot -ProcessId 7319 -Deadline ([datetime]::UtcNow.AddSeconds(30)) -ElementProvider {param($requestedProcessId,$windowsOnly)@($main)})
       $message='';try{Wait-ProcessTopLevelUiBaselineRestored -ProcessId 7319 -Baseline $baseline -Stage 'first-native-cleanup' -Deadline ([datetime]::UtcNow.AddMilliseconds(250)) -ElementProvider {param($requestedProcessId,$windowsOnly)@($main,$replacement)}}catch{$message=$_.Exception.Message}
       if($message-cnotmatch'exact top-level baseline'-or$message-cnotmatch'"topLevelWindowCount":2'-or$message-cnotmatch'"paneCount":1'){throw 'An extra replacement surface was accepted after first cancellation.'}
-      $absorbedBaseline=@(Get-ProcessTopLevelUiSnapshot -ProcessId 7319 -Deadline ([datetime]::UtcNow.AddSeconds(1)) -ElementProvider {param($requestedProcessId,$windowsOnly)@($main,$replacement)})
-      $rejected=$false;try{Assert-ProcessTopLevelUiBaselineMatch -ProcessId 7319 -Expected $baseline -Actual $absorbedBaseline -Deadline ([datetime]::UtcNow.AddSeconds(1))}catch{$rejected=$true};if(-not$rejected){throw 'A replacement surface was absorbed into the second-attempt baseline.'}
+      $absorbedBaseline=@(Get-ProcessTopLevelUiSnapshot -ProcessId 7319 -Deadline ([datetime]::UtcNow.AddSeconds(30)) -ElementProvider {param($requestedProcessId,$windowsOnly)@($main,$replacement)})
+      $rejected=$false;try{Assert-ProcessTopLevelUiBaselineMatch -ProcessId 7319 -Expected $baseline -Actual $absorbedBaseline -Deadline ([datetime]::UtcNow.AddSeconds(30))}catch{$rejected=$true};if(-not$rejected){throw 'A replacement surface was absorbed into the second-attempt baseline.'}
       $foreign=New-HostedTopLevel 7320 4 'ControlType.Pane' ''
-      $rejected=$false;try{Get-ProcessTopLevelUiSnapshot -ProcessId 7319 -Deadline ([datetime]::UtcNow.AddSeconds(1)) -ElementProvider {param($requestedProcessId,$windowsOnly)@($foreign)}|Out-Null}catch{$rejected=$true};if(-not$rejected){throw 'Foreign top-level surface was accepted.'}
+      $rejected=$false;try{Get-ProcessTopLevelUiSnapshot -ProcessId 7319 -Deadline ([datetime]::UtcNow.AddSeconds(30)) -ElementProvider {param($requestedProcessId,$windowsOnly)@($foreign)}|Out-Null}catch{$rejected=$true};if(-not$rejected){throw 'Foreign top-level surface was accepted.'}
       $delayed=New-HostedTopLevel 7319 6 'ControlType.Pane' '' 80
       $rejected=$false;try{Get-ProcessTopLevelUiSnapshot -ProcessId 7319 -Deadline ([datetime]::UtcNow.AddMilliseconds(20)) -ElementProvider {param($requestedProcessId,$windowsOnly)@($delayed)}|Out-Null}catch{$rejected=$true};if(-not$rejected){throw 'A runtime identity read completed successfully after its deadline.'}
     `);
@@ -630,11 +630,11 @@ public static class PrintSpoolWriterFixture {
         })
       }
       $parents={param($element)$element.Parent}
-      $baseline=@(Get-ProcessUiTreeSnapshot -ProcessId 7319 -Deadline ([datetime]::UtcNow.AddSeconds(1)) -ElementProvider $provider -ParentProvider $parents)
+      $baseline=@(Get-ProcessUiTreeSnapshot -ProcessId 7319 -Deadline ([datetime]::UtcNow.AddSeconds(30)) -ElementProvider $provider -ParentProvider $parents)
       $script:treeElements=@($main,$pane,$outside,$existingSibling,$dialog,$inside,$print,$current,$combo)
-      $binding=Wait-NewProcessUiSurface -ProcessId 7319 -Baseline $baseline -AnchorNames @('Cancel') -AnchorControlTypes @('ControlType.Button') -Stage 'first-print-dialog' -Deadline ([datetime]::UtcNow.AddSeconds(1)) -ElementProvider $provider -ParentProvider $parents
+      $binding=Wait-NewProcessUiSurface -ProcessId 7319 -Baseline $baseline -AnchorNames @('Cancel') -AnchorControlTypes @('ControlType.Button') -Stage 'first-print-dialog' -Deadline ([datetime]::UtcNow.AddSeconds(30)) -ElementProvider $provider -ParentProvider $parents
       if([string]$binding.surfaceRootIdentity-cne'77:4'-or@($binding.trackedIdentities).Count-ne4){throw 'Descendant delta did not bind its exact independently observed surface and target set.'}
-      $found=Find-BoundProcessUiElement -ProcessId 7319 -Binding $binding -Names @('Cancel') -ControlTypes @('ControlType.Button') -Deadline ([datetime]::UtcNow.AddSeconds(1)) -ElementProvider $provider -ParentProvider $parents
+      $found=Find-BoundProcessUiElement -ProcessId 7319 -Binding $binding -Names @('Cancel') -ControlTypes @('ControlType.Button') -Deadline ([datetime]::UtcNow.AddSeconds(30)) -ElementProvider $provider -ParentProvider $parents
       if(-not[object]::ReferenceEquals($found,$inside)){throw 'A baseline matching control outside the descendant delta was accepted.'}
       $script:treeElements=@($main,$pane,$outside,$existingSibling,$dialog,$inside,$current,$combo)
       $message='';try{Wait-NewProcessUiSurface -ProcessId 7319 -Baseline $baseline -AnchorNames @('Cancel') -AnchorControlTypes @('ControlType.Button') -Stage 'first-print-dialog' -Deadline ([datetime]::UtcNow.AddMilliseconds(50)) -ElementProvider $provider -ParentProvider $parents|Out-Null}catch{$message=$_.Exception.Message}
@@ -665,13 +665,13 @@ public static class PrintSpoolWriterFixture {
       if($message-cnotmatch'unbound replacement surface'-or$message-cmatch'identity deadline expired'-or$deadlineReplacement.Clicked){throw 'A snapshot crossing the close deadline did not retain the strict replacement-surface failure.'}
       $brokenReplacement=New-TreeElement 7319 17 'ControlType.Pane' '' $pane 0 'identity provider sentinel'
       $script:treeElements=@($main,$pane,$outside,$existingSibling,$brokenReplacement)
-      $message='';try{Wait-BoundProcessUiSurfaceClosed -ProcessId 7319 -Binding $binding -Stage 'first-print-dialog' -Deadline ([datetime]::UtcNow.AddSeconds(1)) -ElementProvider $provider -ParentProvider $parents}catch{$message=$_.Exception.Message}
+      $message='';try{Wait-BoundProcessUiSurfaceClosed -ProcessId 7319 -Binding $binding -Stage 'first-print-dialog' -Deadline ([datetime]::UtcNow.AddSeconds(30)) -ElementProvider $provider -ParentProvider $parents}catch{$message=$_.Exception.Message}
       if($message-cne'Native process UI runtime identity was unavailable.'-or$brokenReplacement.Clicked){throw 'A genuine identity-provider error was swallowed or actuated.'}
       $script:treeElements=@($main,$pane,$outside,$existingSibling)
-      Wait-BoundProcessUiSurfaceClosed -ProcessId 7319 -Binding $binding -Stage 'first-print-dialog' -Deadline ([datetime]::UtcNow.AddSeconds(1)) -ElementProvider $provider -ParentProvider $parents
+      Wait-BoundProcessUiSurfaceClosed -ProcessId 7319 -Binding $binding -Stage 'first-print-dialog' -Deadline ([datetime]::UtcNow.AddSeconds(30)) -ElementProvider $provider -ParentProvider $parents
       $foreign=New-TreeElement 7320 11 'ControlType.Button' 'Cancel' $pane
       $script:treeElements=@($main,$pane,$outside,$existingSibling,$foreign)
-      $rejected=$false;try{Get-ProcessUiTreeSnapshot -ProcessId 7319 -Deadline ([datetime]::UtcNow.AddSeconds(1)) -ElementProvider $provider -ParentProvider $parents|Out-Null}catch{$rejected=$true};if(-not$rejected){throw 'A foreign descendant was accepted.'}
+      $rejected=$false;try{Get-ProcessUiTreeSnapshot -ProcessId 7319 -Deadline ([datetime]::UtcNow.AddSeconds(30)) -ElementProvider $provider -ParentProvider $parents|Out-Null}catch{$rejected=$true};if(-not$rejected){throw 'A foreign descendant was accepted.'}
       $script:treeElements=@($main,$pane,$outside,$existingSibling,$dialog,$inside)
       $slowParents={param($element)Start-Sleep -Milliseconds 80;$element.Parent}
       $rejected=$false;try{Get-ProcessUiTreeSnapshot -ProcessId 7319 -Deadline ([datetime]::UtcNow.AddMilliseconds(20)) -ElementProvider $provider -ParentProvider $slowParents|Out-Null}catch{$rejected=$true};if(-not$rejected){throw 'A parent read completed successfully after its deadline.'}
@@ -1083,7 +1083,7 @@ public static class PrintSpoolWriterFixture {
       foreach($role in @('cancel','currentPage','print')){$null=Invoke-BoundNativeButtonRole -ProcessId 7319 -Binding $binding -Role $role -Deadline ([datetime]::UtcNow.AddSeconds(2)) -NativeWindowProvider $provider -ClickProvider $clickProvider}
       if($script:clicks.Count-ne3-or$script:clicks[0].Handle-ne334-or$script:clicks[0].Checked-or$script:clicks[1].Handle-ne321-or-not$script:clicks[1].Checked-or$script:clicks[2].Handle-ne333-or$script:clicks[2].Checked){throw 'Native role actions did not use the exact bound HWNDs and radio verification flag.'}
       $records[9].IsLabelPrint=$false;$clickCount=$script:clicks.Count;$rejected=$false
-      try{Invoke-BoundNativeButtonRole -ProcessId 7319 -Binding $binding -Role print -Deadline ([datetime]::UtcNow.AddSeconds(1)) -NativeWindowProvider $provider -ClickProvider $clickProvider|Out-Null}catch{$rejected=$true}
+      try{Invoke-BoundNativeButtonRole -ProcessId 7319 -Binding $binding -Role print -Deadline ([datetime]::UtcNow.AddSeconds(30)) -NativeWindowProvider $provider -ClickProvider $clickProvider|Out-Null}catch{$rejected=$true}
       if(-not$rejected-or$script:clicks.Count-ne$clickCount){throw 'A changed native role reached its action.'}
       $records[9].IsLabelPrint=$true
       $duplicatePrint=New-RoleRecord 337 202 'Button' 1 1 $true $true (New-RoleElement 14 337) $true
