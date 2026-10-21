@@ -216,6 +216,7 @@ fn assemble_sequence(first: &EditSession, second: &EditSession, sequence: CopyOp
     // Metadata ownership follows the target/first source independently of the displayed page order.
     let mut pages = flatten_pages(&mut first)?;
     let donor = flatten_pages(&mut second)?;
+    let mut removed = HashSet::new();
     match sequence {
         CopyOperation::Combine => pages.extend(donor),
         CopyOperation::Insert { at } => {
@@ -226,7 +227,7 @@ fn assemble_sequence(first: &EditSession, second: &EditSession, sequence: CopyOp
         CopyOperation::Replace { start, count } => {
             let end = replacement_end(pages.len(), start, count)?;
             let suffix = pages.split_off(end);
-            pages.truncate(start); pages.extend(donor); pages.extend(suffix);
+            removed.extend(pages.drain(start..)); pages.extend(donor); pages.extend(suffix);
         }
     }
     if pages.len() != count { return Err("Combined page count differs from the edit plans.".into()); }
@@ -241,6 +242,11 @@ fn assemble_sequence(first: &EditSession, second: &EditSession, sequence: CopyOp
     if let Some(metadata) = metadata { catalog.set("Metadata", metadata); }
     let catalog = output.add_object(catalog); output.trailer.set("Root", catalog);
     if let Some(info) = info { output.trailer.set("Info", info); }
+    // Defence in depth for SM7 F-1: `supported_shape` already refuses custom catalog and page keys and
+    // any resource or metadata reference into the page tree, so no kept object should reference a
+    // replaced page or an old page-tree node; cut any such reference anyway before pruning.
+    removed.extend(output.objects.iter().filter(|(id, object)| **id != root && object.as_dict().ok().and_then(|dict| dict.get(b"Type").ok()).and_then(|value| value.as_name().ok()) == Some(b"Pages".as_slice())).map(|(id, _)| *id));
+    crate::editor::remove_page_references(&mut output, removed);
     crate::pdf_load::prune_unreachable(&mut output);
     let mut bytes = Vec::new(); output.save_to(&mut bytes).map_err(|error| error.to_string())?;
     output_size(bytes.len())?;
@@ -337,6 +343,49 @@ mod tests {
         assert_eq!(target.source, target_bytes); assert_eq!(donor.source, donor_bytes); assert_eq!(target.plan, target_plan); assert_eq!(donor.plan, donor_plan);
         assert_eq!((target.revision, donor.revision), (3,3)); assert!(target.dirty() && donor.dirty() && target.can_undo() && donor.can_undo());
         target.apply(PageEdit::Undo).unwrap(); target.apply(PageEdit::Undo).unwrap(); assert!(!target.dirty());
+    }
+    #[test]
+    fn replaced_pages_referenced_from_kept_pages_or_the_catalog_are_refused_or_leave_no_trace() {
+        // SM7 F-1. Replace already refuses every way a kept object can reference a replaced page
+        // (custom catalog or page keys, a resource reference into the page tree); without such a
+        // reference the replaced page leaves no trace in the output.
+        let target = |catalog_extra: &str, page_extra: &str, resources_extra: &str| {
+            let content = |text: &str| { let data = format!("BT /F1 12 Tf 20 100 Td ({text}) Tj ET"); format!("<< /Length {} >>\nstream\n{data}\nendstream", data.len()) };
+            let objects = [
+                format!("<< /Type /Catalog /Pages 2 0 R {catalog_extra} >>"),
+                "<< /Type /Pages /Kids [4 0 R 6 0 R] /Count 2 >>".into(),
+                "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+                format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 3 0 R >> {resources_extra} >> /Contents 5 0 R {page_extra} >>"),
+                content("kept page"),
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>".into(),
+                content("SM2REPLACED42"),
+            ];
+            let mut bytes = b"%PDF-1.7\n".to_vec(); let mut offsets = Vec::new();
+            for (index, body) in objects.iter().enumerate() { offsets.push(bytes.len()); bytes.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes()); }
+            let startxref = bytes.len();
+            bytes.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+            for offset in offsets { bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes()); }
+            bytes.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{startxref}\n%%EOF\n", objects.len() + 1).as_bytes());
+            EditSession::new(bytes, 2)
+        };
+        let donor = EditSession::new(sample(), 6);
+        for (catalog_extra, page_extra, resources_extra, expected) in [
+            ("/SMCustom 6 0 R", "", "", "/SMCustom"),
+            ("", "/SMLink [6 0 R]", "", "/SMLink"),
+            ("", "", "/XObject << /X 6 0 R >>", "old catalog or page tree"),
+        ] {
+            let error = assemble_replacement(&target(catalog_extra, page_extra, resources_extra), &donor, 1, 1).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+        let output = assemble_replacement(&target("", "", ""), &donor, 1, 1).unwrap();
+        let marker = b"SM2REPLACED42";
+        let document = Document::load_mem(&output).unwrap();
+        assert!(!output.windows(marker.len()).any(|window| window == marker) && document.objects.values().all(|object| !matches!(object, Object::Stream(stream) if stream.decompressed_content().unwrap_or_else(|_| stream.content.clone()).windows(marker.len()).any(|window| window == marker))), "the replaced page survived");
+        assert_eq!(document.get_pages().len(), 7);
+        assert!(document.extract_text(&[1]).unwrap().contains("kept page"));
+        let page_objects = document.objects.values().filter(|object| object.as_dict().ok().and_then(|dict| dict.get(b"Type").ok()).and_then(|value| value.as_name().ok()) == Some(b"Page".as_slice())).count();
+        assert_eq!(page_objects, 7, "only the output's own page objects remain");
+        assert_eq!(document.objects.values().filter(|object| object.as_dict().ok().and_then(|dict| dict.get(b"Type").ok()).and_then(|value| value.as_name().ok()) == Some(b"Pages".as_slice())).count(), 1, "no old page-tree node remains");
     }
     #[test]
     fn replace_invalid_ranges_removed_page_features_input_limits_and_publish_failures_reject() {

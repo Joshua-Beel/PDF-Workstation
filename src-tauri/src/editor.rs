@@ -359,7 +359,7 @@ impl EditSession {
             let kept: HashSet<ObjectId> = plan.iter().map(|spec| original[spec.source]).collect();
             let old_tree = document.objects.iter().filter(|(id, object)| **id != root && object.as_dict().ok().and_then(|dict| dict.get(b"Type").ok()).and_then(|value| value.as_name().ok()) == Some(b"Pages".as_slice())).map(|(id, _)| *id);
             let removed: HashSet<ObjectId> = original.iter().copied().filter(|id| !kept.contains(id)).chain(old_tree).collect();
-            null_references(&mut document, &removed);
+            remove_page_references(&mut document, removed);
         }
         // Keep only objects reachable from the trailer (SM7 L-1): superseded incremental revisions and
         // freed objects reloaded from an object stream never reach a copy, structural edit or not.
@@ -370,8 +370,32 @@ impl EditSession {
     }
 }
 
+/// Cuts every reference to the removed pages (and old page-tree nodes) in `removed`. A `/Dest` or a GoTo
+/// `/A` that targets one is dropped rather than left as `[null ...]`; a link annotation left with
+/// neither is dropped too, and nulls left in `/Annots` arrays are removed. Every other reference
+/// becomes null, so pruning cannot keep a removed page alive.
+pub(crate) fn remove_page_references(document: &mut Document, mut removed: HashSet<ObjectId>) {
+    if removed.is_empty() { return; }
+    let targets_removed = |destination: &Object| matches!(destination.as_array().ok().and_then(|array| array.first()), Some(Object::Reference(id)) if removed.contains(id));
+    let goto_removed = |action: &lopdf::Dictionary| action.get(b"S").and_then(Object::as_name).is_ok_and(|name| name == b"GoTo") && action.get(b"D").is_ok_and(targets_removed);
+    let dead_actions: HashSet<ObjectId> = document.objects.iter().filter(|(_, object)| object.as_dict().is_ok_and(goto_removed)).map(|(id, _)| *id).collect();
+    let mut dead_links = Vec::new();
+    for (id, object) in document.objects.iter_mut() {
+        let Ok(dict) = object.as_dict_mut() else { continue };
+        if dict.get(b"Dest").is_ok_and(targets_removed) { dict.remove(b"Dest"); }
+        let dead_action = match dict.get(b"A") { Ok(Object::Dictionary(action)) => goto_removed(action), Ok(Object::Reference(action)) => dead_actions.contains(action), _ => false };
+        if dead_action { dict.remove(b"A"); }
+        if dict.get(b"Subtype").and_then(Object::as_name).is_ok_and(|name| name == b"Link") && !dict.has(b"Dest") && !dict.has(b"A") { dead_links.push(*id); }
+    }
+    removed.extend(dead_links);
+    null_references(document, &removed);
+    for object in document.objects.values_mut() {
+        if let Ok(dict) = object.as_dict_mut() { if let Ok(Object::Array(annots)) = dict.get_mut(b"Annots") { annots.retain(|value| !matches!(value, Object::Null)); } }
+    }
+}
+
 /// Replaces every reference to an object in `removed`, anywhere in the document or trailer, with null.
-fn null_references(document: &mut Document, removed: &HashSet<ObjectId>) {
+pub(crate) fn null_references(document: &mut Document, removed: &HashSet<ObjectId>) {
     fn scrub(value: &mut Object, removed: &HashSet<ObjectId>) {
         match value {
             Object::Reference(id) if removed.contains(id) => *value = Object::Null,
@@ -962,10 +986,16 @@ mod tests {
             "<< /Type /Catalog /Pages 2 0 R /SMCustom 6 0 R /SMTree 2 0 R >>".into(),
             "<< /Type /Pages /Kids [4 0 R 6 0 R] /Count 2 >>".into(),
             "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R /SMLink [6 0 R] >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R /SMLink [6 0 R 8 0 R 9 0 R 10 0 R 12 0 R 13 0 R] >>".into(),
             content("kept page"),
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>".into(),
             content("SM2DELETED42"),
+            "<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /Dest [6 0 R /Fit] >>".into(),
+            "<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /A << /S /GoTo /D [6 0 R /Fit] >> >>".into(),
+            "<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /A 11 0 R >>".into(),
+            "<< /S /GoTo /D [6 0 R /XYZ 0 0 0] >>".into(),
+            "<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /Dest [4 0 R /Fit] >>".into(),
+            "<< /Title (bookmark-like) /Dest [6 0 R /Fit] >>".into(),
         ], &[]);
         let mut session = EditSession::new(source.clone(), 2);
         session.apply(PageEdit::Delete { pages: vec![1] }).unwrap();
@@ -975,6 +1005,19 @@ mod tests {
             assert_eq!(document.get_pages().len(), 1);
             assert!(document.extract_text(&[1]).unwrap().contains("kept page"));
             assert_eq!(document.objects.values().filter(|object| object.as_dict().ok().and_then(|dict| dict.get(b"Type").ok()).and_then(|value| value.as_name().ok()) == Some(b"Page".as_slice())).count(), 1, "only the kept page object remains");
+            // Link targets: no destination is left as [null ...]; links to the removed page are gone,
+            // the link to the kept page keeps its destination, and a non-link keeps its other keys.
+            let kept = document.get_pages()[&1];
+            let mut links = Vec::new();
+            for object in document.objects.values() {
+                let Ok(dict) = object.as_dict() else { continue };
+                for key in [b"Dest".as_slice(), b"D"] { if let Ok(destination) = dict.get(key) { assert_ne!(destination.as_array().unwrap().first(), Some(&Object::Null), "dead destination left as null"); } }
+                if dict.get(b"Subtype").and_then(Object::as_name).is_ok_and(|name| name == b"Link") { links.push(dict.clone()); }
+                if dict.get(b"Title").is_ok() { assert!(!dict.has(b"Dest"), "the dead /Dest is dropped, the dictionary kept"); }
+            }
+            assert_eq!(links.len(), 1, "only the link to the kept page remains");
+            assert_eq!(links[0].get(b"Dest").unwrap().as_array().unwrap()[0], Object::Reference(kept));
+            assert!(!document.objects.values().any(|object| object.as_dict().is_ok_and(|dict| dict.get(b"S").and_then(Object::as_name).is_ok_and(|name| name == b"GoTo"))), "dead GoTo actions are unreachable");
         }
     }
 
@@ -989,7 +1032,9 @@ mod tests {
         let elapsed = started.elapsed();
         eprintln!("SM2-PRUNE 1500-page rotate export: {elapsed:?}, {} bytes", output.len());
         assert_eq!(Document::load_mem(&output).unwrap().get_pages().len(), count);
-        assert!(elapsed < std::time::Duration::from_secs(20), "{elapsed:?}");
+        // Measured about 130 ms in a debug build; 5 s leaves room for a loaded machine while still
+        // catching a regression to a much slower walk.
+        assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
     }
 
     #[test]
