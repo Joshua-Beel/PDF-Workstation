@@ -57,7 +57,7 @@ export function validateFormPatches(fields: FormField[], values: Record<string, 
     if (patch.kind !== 'text') continue;
     const field = fields.find((item): item is FormTextField => item.fieldId === patch.fieldId && item.kind === 'text');
     if (!field) return 'This form changed. Reload it and try again.';
-    if (!/^[\x20-\x7E\xA0-\xAC\xAE-\xFF]*$/.test(patch.value)) return `${field.name} accepts printable ASCII and Latin-1 characters only.`;
+    if (!/^[\x20-\x7E\xA1-\xAC\xAE-\xFF]*$/.test(patch.value)) return `${field.name} accepts printable ASCII and Latin-1 characters only.`;
     if (new TextEncoder().encode(patch.value).byteLength > byteLimit) return `${field.name} exceeds the ${byteLimit.toLocaleString()}-byte value limit.`;
     if (field.maxLength !== null && patch.value.length > field.maxLength) return `${field.name} exceeds its ${field.maxLength.toLocaleString()}-character limit.`;
   }

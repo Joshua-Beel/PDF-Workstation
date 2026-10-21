@@ -37,6 +37,7 @@ describe('FillFormsDialog', () => {
     expect(validateFormPatches(fields.fields, { ...initial, name: '世界' }, 4096)).toContain('Latin-1');
     expect(validateFormPatches(fields.fields, { ...initial, name: 'Åda Café' }, 4096)).toBeNull();
     expect(validateFormPatches(fields.fields, { ...initial, name: 'soft­hyphen' }, 4096)).toContain('Latin-1');
+    expect(validateFormPatches(fields.fields, { ...initial, name: 'no break' }, 4096)).toContain('Latin-1');
     expect(validateFormPatches(fields.fields, { ...initial, contact: null }, 4096)).toContain('does not allow this radio group to be cleared');
     expect(formPatches(fields.fields, { ...initial, contact: null, frequency: null })).toEqual([]);
     expect(validateFormPatches(fields.fields, { ...initial, frequency: 'unknown' }, 4096)).toContain('form changed');

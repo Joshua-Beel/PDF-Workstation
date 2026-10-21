@@ -337,8 +337,8 @@ fn number(value: &Object) -> Result<f32, String> { let value = value.as_float().
 fn numbers(value: &Object) -> Result<Vec<f32>, String> { let values = value.as_array().map_err(|_| "The form contains an invalid numeric array.")?; if values.len() > 6 { return Err("The form numeric array is too large.".into()); } values.iter().map(number).collect() }
 fn text(value: &Object) -> Result<String, String> { lopdf::decode_text_string(value).map_err(|_| "The form contains an unsupported text encoding.".into()) }
 fn ascii(value: &str) -> Result<(), String> { if value.len() > MAX_VALUE { return Err("Each form value is limited to 4 KiB.".into()); } if !value.bytes().all(|byte| (0x20..=0x7e).contains(&byte)) { return Err("This form tool accepts printable ASCII text only, without tabs or newlines.".into()); } Ok(()) }
-fn latin_char(character: char) -> bool { matches!(character as u32, 0x20..=0x7e | 0xa0..=0xff) && character != '\u{ad}' }
-// Text values: printable ASCII plus the Latin-1 Supplement (the same code points in WinAnsi), at most 4 KiB, no tabs or newlines.
+fn latin_char(character: char) -> bool { matches!(character as u32, 0x20..=0x7e | 0xa1..=0xff) && character != '\u{ad}' }
+// Text values: printable ASCII plus the Latin-1 Supplement from U+00A1 (the same code points in WinAnsi; U+00A0 is refused because a font may remap code 160 to the euro sign), at most 4 KiB, no tabs or newlines.
 fn latin(value: &str) -> Result<(), String> { if value.len() > MAX_VALUE { return Err("Each form value is limited to 4 KiB.".into()); } if !value.chars().all(latin_char) { return Err("This form tool accepts printable ASCII and Latin-1 characters only (no tabs, newlines, or other scripts).".into()); } Ok(()) }
 fn win_bytes(value: &str) -> Vec<u8> { value.chars().map(|character| character as u32 as u8).collect() }
 fn pdf_text(value: &str) -> Object { if value.is_ascii() { Object::string_literal(value.as_bytes().to_vec()) } else { let mut bytes = vec![0xfe, 0xff]; for unit in value.encode_utf16() { bytes.extend(unit.to_be_bytes()); } Object::string_literal(bytes) } }
@@ -352,7 +352,7 @@ fn full_winansi(doc: &Document, value: &Object) -> bool {
     let Ok(encoding) = encoding.as_dict() else { return false };
     let winansi_base = match encoding.get(b"BaseEncoding").and_then(Object::as_name).ok() { Some(b"WinAnsiEncoding") => true, None | Some(b"StandardEncoding") => false, _ => return false };
     let mut assigned = HashMap::new(); let mut code = 0i64;
-    for value in encoding.get(b"Differences").and_then(Object::as_array).map(Vec::as_slice).unwrap_or(&[]) { if let Ok(index) = value.as_i64() { code = index; } else { if let Ok(name) = value.as_name() { assigned.insert(code, name.to_vec()); } code += 1; } }
+    for value in encoding.get(b"Differences").and_then(Object::as_array).map(Vec::as_slice).unwrap_or(&[]) { if let Ok(index) = value.as_i64() { code = index; } else { if let Ok(name) = value.as_name() { assigned.insert(code, name.to_vec()); } let Some(next) = code.checked_add(1) else { return false }; code = next; } }
     // Every Latin-1 code we emit (0xA1..=0xFF except the soft hyphen) must show its Latin-1 glyph: assigned by name, or inherited from WinAnsi,
     // or inherited from StandardEncoding where that coincides.
     (161..=255i64).filter(|code| *code != 173).all(|code| match assigned.get(&code) { Some(name) => name.as_slice() == LATIN1_NAMES[(code - 161) as usize].as_bytes(), None => winansi_base || [161, 162, 163, 165, 167, 171, 182, 187, 191].contains(&code) })
@@ -600,7 +600,7 @@ fn choice_appearance(style:&Style,choice:&ChoiceInfo)->Result<Content<Vec<Operat
     let mut content=appearance(style,"");content.operations.truncate(content.operations.len()-4);
     if let Some(index)=selected.filter(|index|(top..top+slots).contains(index)){content.operations.extend([op("rg",&[0.600006,0.756866,0.854904]),op("re",&[2.0*style.border,style.height-2.0*style.border-(index-top+1) as f32*leading,style.width-4.0*style.border,leading]),op("f",&[])]);}
     content.operations.extend([op("g",&[0.0]),op("G",&[0.0])]);
-    for(row,option)in visible.iter().enumerate(){let index=top+row;content.operations.push(op("BT",&[]));if row==0{content.operations.push(Operation::new("Tf",vec![Object::Name(style.font.as_bytes().to_vec()),Object::Real(style.size)]));}content.operations.extend([if Some(index)==selected{op("g",&[0.0])}else{paint(&style.text_color,false)},op("Td",&[4.0*style.border,style.height-2.0*style.border-style.size-row as f32*leading]),Operation::new("Tj",vec![Object::string_literal(option.label.as_bytes().to_vec())]),op("ET",&[])]);}
+    for(row,option)in visible.iter().enumerate(){let index=top+row;content.operations.push(op("BT",&[]));if row==0{content.operations.push(Operation::new("Tf",vec![Object::Name(style.font.as_bytes().to_vec()),Object::Real(style.size)]));}content.operations.extend([if Some(index)==selected{op("g",&[0.0])}else{paint(&style.text_color,false)},op("Td",&[4.0*style.border,style.height-2.0*style.border-style.size-row as f32*leading]),Operation::new("Tj",vec![Object::string_literal(win_bytes(&option.label))]),op("ET",&[])]);}
     content.operations.extend([op("Q",&[]),op("EMC",&[])]);Ok(content)
 }
 fn choice_field(document:&Document,form:&Dictionary,field:&Dictionary,id:ObjectId,ap_bytes:&mut usize)->Result<(ChoiceInfo,Style,String),String> {
