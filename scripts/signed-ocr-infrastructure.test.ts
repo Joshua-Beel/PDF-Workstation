@@ -20,7 +20,11 @@ describe('signed OCR installer infrastructure', () => {
     expect(installer).toContain('The release bundle folder must be empty before the release OCR installer is staged.');
     expect(installer).toContain('Staged release asset differs from the verified build output.');
     expect(installer).toContain("if (-not $UnsignedLocal -and -not $ArtifactOnly -and ($ReleaseOcr -or -not $OcrSetupRoot))");
-    expect(installer).toMatch(/if \(\$ReleaseOcr\) \{\r?\n\s+\$releaseBundle = Join-Path \$projectRoot 'src-tauri\/target\/release\/bundle\/nsis'/);
+    expect(installer).toMatch(/if \(\$ReleaseOcr\) \{\r?\n\s+\$releaseBundle = Join-Path \$projectRoot 'src-tauri\/target\/release\/bundle\/nsis'\r?\n\s+Copy-ReleaseOcrAssets -ReleaseBundle \$releaseBundle -Sources @\(\$installer, \$updaterSignature\)/);
+    expect(installer).toContain('$updaterSignature = Assert-ReleaseOcrBundle -BundleRoot $bundleRoot -Installer $installer -Version $releaseVersion');
+    expect(installer).toContain('$extractArguments = Get-InstallerExtractArguments -Installer $installer -Destination $extractionDirectory -ArchivePaths $archivePaths');
+    expect(installer).toContain('& $extractor.FullName @extractArguments');
+    expect(installer).not.toMatch(/& \$extractor\.FullName x \$installer/);
     expect(installer).toContain("Join-Path $PSScriptRoot 'ocr/windows-signing.ps1'");
     expect(installer).toContain('New-SignedOcrSetup');
     expect(installer).toContain("cmd = 'artifact-signing-cli'");
@@ -294,6 +298,61 @@ describe('signed OCR installer infrastructure', () => {
       $badSignature={ param($path) [pscustomobject]@{Status='Valid';Publisher='Joshua Beel';HasTimestamp=$false} }
       $rejected=$false;try{Assert-SignedPdfiumEquivalent -UnsignedPath $unsignedPath -SignedPath $signedPath -SignatureProvider $badSignature -ExpectedPublisher 'Joshua Beel'}catch{$rejected=$true};if(-not $rejected){throw 'Untimestamped signature was accepted.'}
       Write-Output ('PASS ' + $evidence)
+    `;
+    const result = runPowerShell(check);
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(result.stdout).toContain('PASS');
+  }, 35_000);
+
+  it('executes the release-mode single-signature check, uninstaller-safe extraction arguments, and hash-checked staging', () => {
+    const check = String.raw`
+      $ErrorActionPreference = 'Stop'
+      Set-Location -LiteralPath '${process.cwd().replaceAll("'", "''")}'
+      . ./scripts/ocr/installer-package.ps1
+      $tokens=$null;$errors=$null
+      $ast=[Management.Automation.Language.Parser]::ParseFile((Resolve-Path ./scripts/build-installer.ps1),[ref]$tokens,[ref]$errors)
+      if($errors.Count){throw 'build-installer.ps1 did not parse.'}
+      foreach($name in @('Get-InstallerExtractArguments','Assert-ReleaseOcrBundle','Copy-ReleaseOcrAssets')){$node=$ast.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true);if(-not $node){throw ('Missing '+$name)};Invoke-Expression $node.Extent.Text}
+      function Reject([scriptblock]$Action,[string]$Expected,[string]$Kind){$message=$null;try{& $Action}catch{$message=$_.Exception.Message};if($null -eq $message){throw ($Kind+' accepted')};if(-not $message.Contains($Expected)){throw ($Kind+' failed for the wrong reason: '+$message)}}
+      $root=Join-Path (Resolve-Path target) ('release-ocr-staging-'+[Guid]::NewGuid().ToString('N'))
+      try {
+        $plain=Get-InstallerExtractArguments -Installer 'setup.exe' -Destination 'out' -ArchivePaths @('pdf-workstation.exe','resources/welcome.pdf')
+        if(($plain -join '|') -cne 'x|setup.exe|-oout|-y'){throw 'plain extraction arguments changed'}
+        $withUninstaller=Get-InstallerExtractArguments -Installer 'setup.exe' -Destination 'out' -ArchivePaths @('pdf-workstation.exe','Uninstall.exe')
+        if(($withUninstaller -join '|') -cne 'x|setup.exe|-oout|-y|-x!uninstall.exe'){throw 'root uninstaller was not excluded from extraction'}
+        $nested=Get-InstallerExtractArguments -Installer 'setup.exe' -Destination 'out' -ArchivePaths @('resources/uninstall.exe')
+        if($nested -contains '-x!uninstall.exe'){throw 'a nested uninstall.exe must not trigger the root exclusion'}
+        $nsis=Join-Path $root 'cargo-target/release/bundle/nsis';[IO.Directory]::CreateDirectory($nsis)|Out-Null
+        $installer=Join-Path $nsis 'PDF Workstation_0.3.0_x64-setup.exe';[IO.File]::WriteAllText($installer,'signed installer bytes')
+        $bundle=Join-Path $root 'cargo-target/release/bundle'
+        Reject {Assert-ReleaseOcrBundle -BundleRoot $bundle -Installer $installer -Version '0.3.0'} 'exactly the installer updater signature' 'missing signature'
+        [IO.File]::WriteAllText(($installer+'.sig'),'')
+        Reject {Assert-ReleaseOcrBundle -BundleRoot $bundle -Installer $installer -Version '0.3.0'} 'exactly the installer updater signature' 'empty signature'
+        [IO.File]::WriteAllText(($installer+'.sig'),'updater signature')
+        $signature=Assert-ReleaseOcrBundle -BundleRoot $bundle -Installer $installer -Version '0.3.0'
+        if($signature -cne [IO.Path]::GetFullPath($installer+'.sig')){throw 'signature path changed'}
+        Reject {Assert-ReleaseOcrBundle -BundleRoot $bundle -Installer $installer -Version '0.3.1'} 'not the current-version installer' 'other version'
+        [IO.File]::WriteAllText((Join-Path $nsis 'latest.json'),'{}')
+        Reject {Assert-ReleaseOcrBundle -BundleRoot $bundle -Installer $installer -Version '0.3.0'} 'exactly the installer updater signature' 'manifest in bundle'
+        Remove-Item -LiteralPath (Join-Path $nsis 'latest.json')
+        $msi=Join-Path $bundle 'msi';[IO.Directory]::CreateDirectory($msi)|Out-Null;[IO.File]::WriteAllText((Join-Path $msi 'other.msi.SIG'),'x')
+        Reject {Assert-ReleaseOcrBundle -BundleRoot $bundle -Installer $installer -Version '0.3.0'} 'exactly the installer updater signature' 'second signature elsewhere'
+        Remove-Item -LiteralPath $msi -Recurse
+        $release=Join-Path $root 'src-tauri/target/release/bundle/nsis'
+        Copy-ReleaseOcrAssets -ReleaseBundle $release -Sources @($installer,$signature)
+        $names=@(Get-ChildItem -LiteralPath $release -Force | ForEach-Object Name | Sort-Object)
+        if(($names -join '|') -cne 'PDF Workstation_0.3.0_x64-setup.exe|PDF Workstation_0.3.0_x64-setup.exe.sig'){throw 'staged names changed'}
+        foreach($source in @($installer,$signature)){if((Get-ExactSha256 (Join-Path $release ([IO.Path]::GetFileName($source)))) -cne (Get-ExactSha256 $source)){throw 'staged bytes changed'}}
+        Reject {Copy-ReleaseOcrAssets -ReleaseBundle $release -Sources @($installer,$signature)} 'must be empty' 'non-empty release folder'
+        $fresh=Join-Path $root 'fresh-1'
+        Reject {Copy-ReleaseOcrAssets -ReleaseBundle $fresh -Sources @($installer,$signature) -CopyProvider {param($from,$to)[IO.File]::WriteAllText($to,'tampered installer!!')}} 'differs from the verified build output' 'tampered copy'
+        $fresh=Join-Path $root 'fresh-2'
+        Reject {Copy-ReleaseOcrAssets -ReleaseBundle $fresh -Sources @($installer,$signature) -CopyProvider {param($from,$to)}} 'differs from the verified build output' 'missing copy'
+        $fresh=Join-Path $root 'fresh-3'
+        Reject {Copy-ReleaseOcrAssets -ReleaseBundle $fresh -Sources @($installer,$signature) -CopyProvider {param($from,$to)Copy-Item -LiteralPath $from -Destination $to;[IO.File]::WriteAllText((Join-Path (Split-Path -Parent $to) 'extra.exe'),'x')}} 'exactly the verified assets' 'extra staged file'
+      } finally { if(Test-Path -LiteralPath $root){Remove-Item -LiteralPath $root -Recurse -Force} }
+      Write-Output 'PASS'
     `;
     const result = runPowerShell(check);
     expect(result.error).toBeUndefined();

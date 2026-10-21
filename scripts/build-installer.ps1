@@ -74,6 +74,50 @@ function Assert-InstallerSourceRevision {
     if ($LASTEXITCODE -ne 0) { throw 'Installer proof requires a clean tracked index.' }
 }
 
+function Get-InstallerExtractArguments {
+    param(
+        [Parameter(Mandatory = $true)][string]$Installer,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ArchivePaths
+    )
+    $arguments = @('x', $Installer, "-o$Destination", '-y')
+    if (@($ArchivePaths | Where-Object { $_.Equals('uninstall.exe', [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) { $arguments += '-x!uninstall.exe' }
+    return ,$arguments
+}
+
+function Assert-ReleaseOcrBundle {
+    param(
+        [Parameter(Mandatory = $true)][string]$BundleRoot,
+        [Parameter(Mandatory = $true)][string]$Installer,
+        [Parameter(Mandatory = $true)][string]$Version
+    )
+    if ([IO.Path]::GetFileName($Installer) -cne "PDF Workstation_${Version}_x64-setup.exe") { throw 'Release OCR bundle installer is not the current-version installer.' }
+    $signature = [IO.Path]::GetFullPath("$Installer.sig")
+    $updaterArtifacts = @(Get-ChildItem -LiteralPath $BundleRoot -Recurse -File -Force | Where-Object { $_.Name.Equals('latest.json', [StringComparison]::OrdinalIgnoreCase) -or $_.Extension.Equals('.sig', [StringComparison]::OrdinalIgnoreCase) })
+    if ($updaterArtifacts.Count -ne 1 -or -not $updaterArtifacts[0].FullName.Equals($signature, [StringComparison]::OrdinalIgnoreCase) -or $updaterArtifacts[0].Length -le 0) {
+        throw 'Release OCR bundle must contain exactly the installer updater signature and no manifest.'
+    }
+    return $signature
+}
+
+function Copy-ReleaseOcrAssets {
+    param(
+        [Parameter(Mandatory = $true)][string]$ReleaseBundle,
+        [Parameter(Mandatory = $true)][string[]]$Sources,
+        [scriptblock]$CopyProvider = { param($from, $to) Copy-Item -LiteralPath $from -Destination $to }
+    )
+    if ((Test-Path -LiteralPath $ReleaseBundle) -and @(Get-ChildItem -LiteralPath $ReleaseBundle -Force).Count -ne 0) { throw 'The release bundle folder must be empty before the release OCR installer is staged.' }
+    New-Item -ItemType Directory -Path $ReleaseBundle -Force | Out-Null
+    foreach ($source in $Sources) {
+        $destination = Join-Path $ReleaseBundle ([IO.Path]::GetFileName($source))
+        & $CopyProvider $source $destination
+        if (-not (Test-Path -LiteralPath $destination -PathType Leaf) -or (Get-Item -LiteralPath $destination).Length -ne (Get-Item -LiteralPath $source).Length -or (Get-ExactSha256 -Path $destination) -cne (Get-ExactSha256 -Path $source)) { throw 'Staged release asset differs from the verified build output.' }
+    }
+    $staged = @(Get-ChildItem -LiteralPath $ReleaseBundle -Force | ForEach-Object Name | Sort-Object)
+    $expected = @($Sources | ForEach-Object { [IO.Path]::GetFileName($_) } | Sort-Object)
+    if ($staged.Count -ne $expected.Count -or (Compare-Object $expected $staged -CaseSensitive)) { throw 'Staged release folder does not hold exactly the verified assets.' }
+}
+
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $projectRoot
 . (Join-Path $PSScriptRoot 'ocr/installer-package.ps1')
@@ -257,12 +301,7 @@ try {
         if (($UnsignedLocal -or $ArtifactOnly) -and $unexpectedUpdaterArtifacts.Count -ne 0) { throw 'Bounded bundle unexpectedly contains updater signature artifacts.' }
         if ($ReleaseOcr) {
             $releaseVersion = (Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw -Encoding UTF8 | ConvertFrom-Json).version
-            $releaseInstallerName = "PDF Workstation_${releaseVersion}_x64-setup.exe"
-            if ([IO.Path]::GetFileName($installer) -cne $releaseInstallerName) { throw 'Release OCR bundle installer is not the current-version installer.' }
-            $updaterSignature = "$installer.sig"
-            if ($unexpectedUpdaterArtifacts.Count -ne 1 -or -not $unexpectedUpdaterArtifacts[0].FullName.Equals([IO.Path]::GetFullPath($updaterSignature), [StringComparison]::OrdinalIgnoreCase) -or $unexpectedUpdaterArtifacts[0].Length -le 0) {
-                throw 'Release OCR bundle must contain exactly the installer updater signature and no manifest.'
-            }
+            $updaterSignature = Assert-ReleaseOcrBundle -BundleRoot $bundleRoot -Installer $installer -Version $releaseVersion
         }
         $extractor = Get-InstallerExtractor
         $inventoryLines = @(& $extractor.FullName l -slt $installer)
@@ -274,7 +313,8 @@ try {
         $extractionDirectory = Join-Path $resolvedOutput 'extracted-installer'
         if (Test-Path -LiteralPath $extractionDirectory) { throw 'Installer extraction directory already exists.' }
         New-Item -ItemType Directory -Path $extractionDirectory | Out-Null
-        & $extractor.FullName x $installer "-o$extractionDirectory" -y
+        $extractArguments = Get-InstallerExtractArguments -Installer $installer -Destination $extractionDirectory -ArchivePaths $archivePaths
+        & $extractor.FullName @extractArguments
         if ($LASTEXITCODE -ne 0) { throw 'Could not extract the installer for resource verification.' }
         $baseReceipts = @(Assert-ExtractedBaseResources `
             -ExtractionRoot $extractionDirectory `
@@ -342,13 +382,7 @@ try {
 
     if ($ReleaseOcr) {
         $releaseBundle = Join-Path $projectRoot 'src-tauri/target/release/bundle/nsis'
-        if ((Test-Path -LiteralPath $releaseBundle) -and @(Get-ChildItem -LiteralPath $releaseBundle -Force).Count -ne 0) { throw 'The release bundle folder must be empty before the release OCR installer is staged.' }
-        New-Item -ItemType Directory -Path $releaseBundle -Force | Out-Null
-        foreach ($source in @($installer, $updaterSignature)) {
-            $destination = Join-Path $releaseBundle ([IO.Path]::GetFileName($source))
-            Copy-Item -LiteralPath $source -Destination $destination
-            if ((Get-Item -LiteralPath $destination).Length -ne (Get-Item -LiteralPath $source).Length -or (Get-ExactSha256 -Path $destination) -cne (Get-ExactSha256 -Path $source)) { throw 'Staged release asset differs from the verified build output.' }
-        }
+        Copy-ReleaseOcrAssets -ReleaseBundle $releaseBundle -Sources @($installer, $updaterSignature)
         Write-Output ('RELEASE_OCR_IDENTITY identity={0} setupManifestSha256={1} originalEngineBytes={2} originalEngineSha256={3}' -f $ocrPlan.Identity, $ocrPlan.ManifestSha256, $originalEngineReceipt.bytes, $originalEngineReceipt.sha256)
     }
     if (-not $UnsignedLocal -and -not $ArtifactOnly -and ($ReleaseOcr -or -not $OcrSetupRoot)) {

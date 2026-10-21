@@ -9,7 +9,7 @@ Reading and search
 - Print all pages, the current page or a range with Ctrl+P, including your current edits.
 
 OCR, on your computer
-- The installer includes a local English OCR engine (Tesseract). Recognize the current page into a copyable text window, or save a searchable OCR copy: a new PDF in which each page becomes a 150-DPI image with an invisible text layer. Nothing is uploaded. Accuracy on real scans is unmeasured.
+- The installer includes a local English OCR engine (Tesseract). Recognize the current page into a copyable text window, or save a searchable OCR copy of a document of up to 32 pages: a new PDF in which each page becomes a 150-DPI image with an invisible text layer. Nothing is uploaded. Accuracy on real scans is unmeasured.
 
 Pages
 - Split, crop and reset crop, move to page, insert pages from another PDF, replace pages, and combine two PDFs into a new copy.
@@ -22,7 +22,7 @@ Comments and forms
 
 Workspace and updates
 - Remembers theme, zoom, panels and up to 50 recent files, with stars.
-- Before an update installs, the app asks you to confirm and to save your work first. Choosing No keeps your current version.
+- New in 0.3.0, for future updates: before an update installs, the app asks you to confirm and to save your work first. Choosing No keeps your current version.
 - PDF Workstation is now MIT-licensed. Third-party notices are listed in the app.
 
 Still not included: text or image editing, saving over the original file (every save writes a new copy), PDF signing, certificate signatures or signature validation, form preparation, and redaction that keeps text searchable. Printers other than Microsoft Print to PDF are untested.

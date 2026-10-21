@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- Release review follow-ups: uninstaller-safe installer extraction, a tested release staging path, a Windows 2022 pre-flight option and clearer 0.3.0 notes (SM6). Never run hosted.
 - The release workflow now builds the installer with OCR, signing the engine with the app's Azure profile; the draft verifiers require the five OCR files (SM6). Never run hosted.
 - Dev tooling: vite 6.4.3 to 6.4.4 for a dev-server advisory; `npm audit` reports 0 and the built frontend is byte-identical (SM6).
 - Release notes always check out with LF line endings, so the update text in `latest.json` carries no CRLF (SM6).
