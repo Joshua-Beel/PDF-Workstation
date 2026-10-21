@@ -1,55 +1,28 @@
-## 0.2.12 (draft candidate)
+## 0.3.0
 
-- Adds the current reading and workspace work: embedded-text selection, visible match geometry, bounded Page text and bookmarks, document properties, password retry/cancel flows, native printing, and saved theme, view, recent-file, and starred-file preferences. Controlled signed-installed-app checks cover the packaged sample, real clipboard, search geometry, password lifecycle, three launches of persistence, print-dialog cancel/reopen, and one-page Microsoft Print to PDF output. They do not establish arbitrary-PDF compatibility, physical pointer selection, physical paper output, non-Microsoft printer behavior, or native-window visual fidelity.
-- Adds the current page tools: crop and reset crop, fixed-size split, Combine Files, Insert Pages, Replace Pages, one-image PDF creation, and current-page PNG/JPEG export. These create new outputs and retain the documented source tabs and metadata; crop hides content rather than redacting it. Source, mocked-browser, and structural checks pass. The latest installed expanded-page-tools rerun still needs to complete after the native-picker deferral fix, so the 0.2.12 installer and its real Windows save/folder dialogs are not yet verified.
-- Adds app-owned sticky notes, area highlights, selected-text highlights, and a strict form-filling subset for flat single-line text, checkboxes, same-page radio groups, and single-select choices. Unsupported forms are refused as a whole. Replies, author identity, foreign-annotation interchange, editable combos, multi-select lists, form preparation, Fill & Sign, handwritten or certificate signatures, and broader cross-viewer behavior are not provided.
-- Hardens update recovery. Download and installer handoff use separate signed-updater phases with an exact bounded native marker that is atomically written, flushed, replaced, and read back before proceeding. Failed downloads must release their updater resource before a fresh retry; a reopened installer-handoff marker blocks a second concurrent installer and directs recovery through waiting or the latest signed installer. Focused frontend, native, workflow, publisher, production-build, and adversarial gates pass. The public 0.2.0-to-0.2.12 in-app update, restart/relaunch, and controlled missing-executable repair still require the signed stable 0.2.12 release and the read-only hosted verifier.
-- Keeps the canonical updater endpoint and existing updater public key so installed 0.2.0 clients can verify the new update. Release automation remains fail-closed for missing Azure or updater signing credentials, binds one stable tag to the exact npm, Cargo, lockfile, Tauri, checkout, and release source version, and can create only a draft containing the installer, its detached updater signature, and `latest.json`.
+The first update since 0.2.0. Everything below was tested in source builds. These notes were written before the 0.3.0 installer was built, so each item is unverified in an installed 0.3.0 build.
 
-The default release does not bundle OCR. The separately verified opt-in current-page English OCR artifact is not this release and does not establish general accuracy; PDF Workstation still does not create searchable/document OCR. This release also makes no redaction, PDF-signing, certificate-signing, or signature-validation claim. Text or image editing, original-file overwrite, and save-back to the source remain unavailable. The 0.2.12 installer must still be built, publisher-signed, checked, installed, and exercised before the draft can be published. The immutable `v0.2.7` and `v0.2.8` workflows both failed during version validation before tests, signing, build, upload, or draft creation. The immutable `v0.2.9` workflow passed setup and reported 395 passing and six failing frontend/workflow tests before native tests, signing, build, upload, or draft creation. The immutable `v0.2.10` workflow passed setup and reported 402 passing and one failing frontend/workflow test before native tests, signing, build, upload, or draft creation. The immutable `v0.2.11` workflow passed frontend and native tests, then rejected a stale generated dependency inventory before installer compilation, signing, upload, or draft creation. None of those tags produced an installer or release artifact.
+Reading and search
+- Find text with Ctrl+F: case matching, one excerpt per matching page (up to 500 pages), and highlights on the page where the PDF gives text positions.
+- Select embedded text on the page, or open it in the Page text view, and copy it.
+- Page labels, nested bookmarks, document properties (Ctrl+D), and opening password-protected PDFs. Passwords are not saved, and protected PDFs open read-only.
+- Print all pages, the current page or a range with Ctrl+P, including your current edits.
 
-## 0.2.6 (draft candidate)
+OCR, on your computer
+- The installer includes a local English OCR engine (Tesseract). Recognize the current page into a copyable text window, or save a searchable OCR copy of a document of up to 32 pages: a new PDF in which each page becomes a 150-DPI image with an invisible text layer. Nothing is uploaded. Accuracy on real scans is unmeasured.
 
-- Adds on-page embedded-text selection and literal match highlights where supported geometry is available, plus Page text fallbacks for unsupported or capped pages.
-- Adds fixed-size splitting, current-page crop, Combine Files, Insert Pages, and Replace Pages. Structural copy operations use current edits, preserve the stated source metadata, and create a new output without changing either source tab.
-- Adds source-availability archives for five exact MPL-2.0 crates and current dependency notices to the bundled resources.
+Pages
+- Split, crop and reset crop, move to page, insert pages from another PDF, replace pages, and combine two PDFs into a new copy.
+- Create a PDF from 1 to 32 PNG or JPEG images, and export the current page as a PNG or JPEG image.
+- Raster redaction: black out rectangles on one page and save a new copy in which every page becomes a 150-DPI image. Text, forms, annotations and bookmarks are removed from that copy on purpose.
 
-Native desktop verification of selection/clipboard behavior, split and structural-copy save dialogs, crop interaction, printing, installation, and upgrade/relaunch remains open.
+Comments and forms
+- Sticky notes, area highlights and highlights on selected text.
+- Fill a limited set of existing form fields (single-line text, checkboxes, radio buttons, single-choice lists) into a new copy. Forms outside that set are refused rather than partly filled.
 
-## 0.2.5 (tagged; no draft artifacts)
+Workspace and updates
+- Remembers theme, zoom, panels and up to 50 recent files, with stars.
+- New in 0.3.0, for future updates: before an update installs, the app asks you to confirm and to save your work first. Choosing No keeps your current version.
+- PDF Workstation is now MIT-licensed. Third-party notices are listed in the app.
 
-- The release workflow stopped during npm tests because the clean runner had not fetched the locked Cargo registry required by the offline dependency-notice checks.
-- No native test, signing, installer, asset upload, or GitHub draft-release step ran for this tag.
-
-## 0.2.4
-
-- Verifies the actual application extracted from the signed installer, rather than Tauri's restored unsigned build file.
-- Includes embedded-text search, case matching, selectable excerpts, and links to matching pages.
-
-## 0.2.3 (unreleased)
-
-- Runs installer signature verification directly in PowerShell 7 on GitHub Actions.
-- Includes embedded-text search and the Windows signing argument fix described below.
-
-## 0.2.2 (unreleased)
-
-- Find embedded PDF text with Ctrl+F, optional case matching, selectable excerpts, and links to matching pages.
-- Stop a search while reading; results follow the current page order after edits.
-- Fixed Windows signing command arguments containing spaces.
-
-Search shows one excerpt per matching page, up to 500 pages. On-page selection, match highlighting, and OCR remain in development.
-
-## 0.2.1 (unreleased)
-
-- Windows publisher signing through Joshua Beel's Azure signing profile.
-- Release builds verify timestamped signatures on the application and installer.
-- Keeps the existing updater key so version 0.2.0 can accept this update.
-
-## 0.2.0
-
-- Windows installer with the PDF engine included.
-- Menu > Check for updates downloads verified updates from GitHub releases.
-- Update installation waits until every edited PDF has been saved or its edits discarded.
-- PDF viewer and Organize Pages: rotate, move, delete, extract, undo/redo, and save a new copy.
-
-Text editing, OCR, search, printing, and signatures remain in development.
+Still not included: text or image editing, saving over the original file (every save writes a new copy), PDF signing, certificate signatures or signature validation, form preparation, and redaction that keeps text searchable. Printers other than Microsoft Print to PDF are untested.

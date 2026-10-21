@@ -9,10 +9,14 @@ concurrency:
   cancel-in-progress: false
 jobs:
   installer:
-    runs-on: windows-latest
+    runs-on: windows-2022
     environment: release
     permissions:
       contents: read
+    env:
+      OCR_SETUP_ROOT: target/ocr-release-setup-${{ github.run_id }}-${{ github.run_attempt }}
+      RELEASE_PROOF_ROOT: target/ocr-release-build-${{ github.run_id }}-${{ github.run_attempt }}
+      EXPECTED_PUBLISHER: Joshua Beel
     outputs:
       version: ${{ steps.validate.outputs.version }}
     steps:
@@ -83,14 +87,22 @@ jobs:
       - run: npm test -- --pool=threads --maxWorkers=1 --no-file-parallelism
       - run: ./scripts/run-native-recovery-gates.ps1
         shell: pwsh
+      - name: Build the pinned unsigned OCR setup
+        shell: pwsh
+        run: ./scripts/setup-ocr.ps1 -OutputRoot $env:OCR_SETUP_ROOT -Jobs 4
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
         with:
           dotnet-version: '8.0.x'
       - name: Install Azure Artifact Signing CLI
         run: cargo install artifact-signing-cli --version 0.11.0 --locked
-      - name: Build publisher-signed installer and signed update manifest
+      - name: Build publisher-signed installer with OCR and signed update manifest
         shell: pwsh
-        run: ./scripts/build-installer.ps1 -AzureSigning
+        run: |
+          ./scripts/build-installer.ps1 -AzureSigning `
+            -OcrSetupRoot $env:OCR_SETUP_ROOT `
+            -OutputRoot $env:RELEASE_PROOF_ROOT `
+            -ExpectedPublisher $env:EXPECTED_PUBLISHER `
+            -SourceRevision $env:GITHUB_SHA
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
@@ -100,6 +112,16 @@ jobs:
           AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
           AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
           AZURE_SIGNING_PROFILE: ${{ secrets.AZURE_SIGNING_PROFILE }}
+      - name: Verify the release OCR installer proof
+        shell: pwsh
+        run: |
+          $receipt = Get-Content -LiteralPath (Join-Path $env:RELEASE_PROOF_ROOT 'installer-verification.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($receipt.mode -cne 'azure-signed-release-ocr' -or $receipt.sourceRevision -cne $env:GITHUB_SHA -or -not $receipt.ocr.enabled -or @($receipt.ocr.packagedResources).Count -ne 5 -or
+              $receipt.signatures.expectedPublisher -cne $env:EXPECTED_PUBLISHER -or $receipt.signatures.installer -cne 'Valid' -or $receipt.signatures.application -cne 'Valid' -or
+              $receipt.signatures.engine -cne 'Valid' -or $receipt.signatures.originalEngine -cne 'NotSigned') {
+            throw 'The release installer proof did not package the publisher-signed OCR engine, model, and license texts.'
+          }
+          Write-Output ('RELEASE_OCR_PROOF identity={0} setupManifestSha256={1} installerBytes={2} installerSha256={3}' -f $receipt.ocr.identity, $receipt.ocr.setupManifestSha256, $receipt.installer.bytes, $receipt.installer.sha256)
       - name: Verify exact release asset inventory
         shell: pwsh
         run: |

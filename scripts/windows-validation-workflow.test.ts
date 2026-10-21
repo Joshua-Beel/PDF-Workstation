@@ -8,7 +8,10 @@ describe('Windows validation workflow', () => {
     expect(workflow).toContain('workflow_dispatch:');
     expect(workflow).not.toMatch(/^\s*(push|pull_request|schedule):/m);
     expect(workflow).toContain('permissions:\n  contents: read');
-    expect(workflow).toContain('runs-on: windows-latest');
+    expect(workflow).toContain('  workflow_dispatch:\n    inputs:\n      runner:\n        description: Hosted runner image; windows-2022 matches the release installer job\n        required: true\n        type: choice\n        default: windows-2022\n        options:\n          - windows-2022\n          - windows-latest\n');
+    expect(workflow).toContain('runs-on: ${{ inputs.runner }}');
+    expect(workflow).toContain('group: windows-validation-${{ github.sha }}-${{ inputs.runner }}');
+    expect(readFileSync('.github/workflows/release.yml', 'utf8').replace(/\r\n?/g, '\n'), 'the default pre-flight host must match the release installer job').toContain('  installer:\n    runs-on: windows-2022\n');
     expect(workflow).toContain('timeout-minutes: 90');
     expect(workflow).toContain('ref: ${{ github.sha }}');
     expect(workflow).toContain('fetch-depth: 0');

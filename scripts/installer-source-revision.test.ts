@@ -13,9 +13,10 @@ describe('installer source revision binding', () => {
   it('requires explicit source identity for unsigned proofs and records it without trusting ambient CI state', () => {
     const installer = readFileSync('scripts/build-installer.ps1', 'utf8');
     expect(installer).toContain("if ($UnsignedLocal -and [string]::IsNullOrWhiteSpace($SourceRevision))");
-    expect(installer).toContain('if ($ArtifactOnly -or $UnsignedLocal) { Assert-InstallerSourceRevision');
+    expect(installer).toContain('if ($SignedOcr -or $UnsignedLocal) { Assert-InstallerSourceRevision');
+    expect(installer).toContain("if ($ReleaseOcr -and [string]::IsNullOrWhiteSpace($SourceRevision))");
     expect(installer).toContain('sourceRevision = $SourceRevision');
-    expect(installer).not.toMatch(/sourceRevision\s*=\s*if \(\$ArtifactOnly\)/);
+    expect(installer).not.toMatch(/sourceRevision\s*=\s*if \(\$(?:ArtifactOnly|SignedOcr|ReleaseOcr)\)/);
     expect(installer).not.toMatch(/GITHUB_(SHA|REF)/);
   });
 

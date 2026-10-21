@@ -118,6 +118,11 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 - Removing or replacing pages now drops links and destinations that pointed at the removed pages instead of leaving them broken; Replace cuts stray references the same way (SM2; SM7 F-1; source build).
 - Saved copies after rotate, crop, move or comments keep only objects reachable from the document, so old revisions and orphaned objects in the source no longer travel along (SM2; SM7 L-1; source build).
+- Release review follow-ups: uninstaller-safe installer extraction, a tested release staging path, a Windows 2022 pre-flight option and clearer 0.3.0 notes (SM6). Never run hosted.
+- The release workflow now builds the installer with OCR, signing the engine with the app's Azure profile; the draft verifiers require the five OCR files (SM6). Never run hosted.
+- Dev tooling: vite 6.4.3 to 6.4.4 for a dev-server advisory; `npm audit` reports 0 and the built frontend is byte-identical (SM6).
+- Release notes always check out with LF line endings, so the update text in `latest.json` carries no CRLF (SM6).
+- Version 0.3.0 prepared: six version sources bumped, 0.3.0-only release notes, notices regenerated, release steps rewritten (SM6). Not tagged or built; unverified in an installed build.
 - Split folder-picker unit test compares canonical folders, so an 8.3 short TEMP path on CI no longer fails it (SM2; test only).
 - CI fix after its first hosted run failed: full-history checkout for the tests that read pinned commits, and a 15 s timeout on one slow PowerShell workflow test (SM6). Unverified until the next hosted run.
 - Repo renamed to `Joshua-Beel/PDF-Workstation`: workflow guards, release URLs, the updater endpoint for new builds and verifier pins use the new name; older installs keep updating through GitHub's redirects (SM6).

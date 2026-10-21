@@ -68,7 +68,14 @@ describe('default draft verification workflow', () => {
     expect(verifier).toContain("throw 'Extracted installer contains a reparse point.'");
     expect(verifier).toContain('Assert-TrustedWindowsSignature -Path $installerPath');
     expect(verifier).toContain("detachedUpdaterCryptographyVerified=$false");
-    expect(verifier).toContain("ocrBundled=$false");
+    expect(verifier).toContain("ocrBundled=$true");
+    expect(verifier).toContain('schemaVersion=2;');
+    expect(verifier).toContain('Assert-ArchiveResourceInventory -ArchivePaths $archivePaths -BaseEntries $BaseEntries -OcrPlan (Get-DefaultOcrPlanShape $archivePaths)');
+    expect(verifier).toContain('$ocrReceipts=@(Assert-DefaultOcrPackage -Files $files -Identity $inventory.ocrIdentity -SourceRoot $TargetSourceRoot -ApplicationPath $application.FullName -ExpectedPublisher $ExpectedPublisher)');
+    expect(verifier).toContain("$null=Assert-TrustedWindowsSignature -Path $engine.FullName -ExpectedPublisher $ExpectedPublisher");
+    expect(verifier).toContain('Test-ExecutableContainsAscii -Path $ApplicationPath -Marker $engineSha256');
+    expect(verifier).toContain("Join-Path $SourceRoot 'scripts/ocr/pins.json'");
+    expect(verifier).not.toContain('Default installer unexpectedly contains OCR resources.');
     expect(verifier).toContain("$actualNames.Count -ne 3");
     expect(verifier).toContain("$memory.Length+$read -gt 1MB");
     expect(verifier).toContain("$total -gt $Bytes");
@@ -116,7 +123,7 @@ describe('default draft verification workflow', () => {
       . ./scripts/ocr/installer-package.ps1
       $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile((Resolve-Path ./scripts/verify-default-draft.ps1),[ref]$tokens,[ref]$errors)
       if($errors.Count){throw 'Verifier did not parse.'}
-      foreach($name in @('Get-ExactReleaseAsset','Assert-DefaultInventory','Assert-BoundedArchiveListing','Invoke-BoundedSevenZip','Invoke-BoundedSevenZipEntry','Get-SevenZipVersionFact','Assert-ReleaseSourceVersion','Assert-PackagedApplicationIdentity')){$node=$ast.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst]-and $n.Name-ceq$name},$true);if(-not$node){throw ('Missing '+$name)};Invoke-Expression $node.Extent.Text}
+      foreach($name in @('Get-ExactReleaseAsset','Assert-DefaultInventory','Get-DefaultOcrPlanShape','Assert-DefaultOcrPackage','Get-UniqueExtractedFile','Assert-BoundedArchiveListing','Invoke-BoundedSevenZip','Invoke-BoundedSevenZipEntry','Get-SevenZipVersionFact','Assert-ReleaseSourceVersion','Assert-PackagedApplicationIdentity')){$node=$ast.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst]-and $n.Name-ceq$name},$true);if(-not$node){throw ('Missing '+$name)};Invoke-Expression $node.Extent.Text}
       $script:Repository='Joshua-Beel/PDF-Workstation';$TargetTag='v0.2.12';$sha='A'*64
       $asset=[pscustomobject]@{id=[uint64]7;name='PDF.Workstation_0.2.12_x64-setup.exe';size=[uint64]9;state='uploaded';digest=('sha256:'+$sha.ToLowerInvariant());browser_download_url='https://github.com/Joshua-Beel/PDF-Workstation/releases/download/v0.2.12/PDF.Workstation_0.2.12_x64-setup.exe'}
       $release=[pscustomobject]@{assets=@($asset)}
@@ -133,9 +140,31 @@ describe('default draft verification workflow', () => {
       Reject {Invoke-BoundedSevenZipEntry $extractor.FullName $streamZip 'input.bin' (Join-Path $root 'stream-hash.bin') 1 ('0'*64)} 'stream hash mismatch'
       $base=@([pscustomobject]@{Target='resources/welcome.pdf'})
       $paths=@('pdf-workstation.exe','resources/welcome.pdf','$PLUGINSDIR/modern-wizard.bmp','$PLUGINSDIR/nsDialogs.dll','$PLUGINSDIR/nsis_tauri_utils.dll','$PLUGINSDIR/NSISdl.dll','$PLUGINSDIR/StartMenu.dll','$PLUGINSDIR/System.dll')
-      $files=@($paths|ForEach-Object{Put $_});$facts=Assert-DefaultInventory $files $root $base;if($facts.required-ne8-or$facts.actual-ne8){throw 'valid inventory failed'}
+      $identity='a'*64;$ocrPaths=@('bin/tesseract.exe','tessdata/eng.traineddata','licenses/Tesseract-Apache-2.0.txt','licenses/Leptonica-BSD-2-Clause.txt','licenses/eng-fast-Apache-2.0.txt')|ForEach-Object{"resources/ocr/$identity/$_"}
+      $files=@(@($paths)+@($ocrPaths)|ForEach-Object{Put $_});$facts=Assert-DefaultInventory $files $root $base;if($facts.required-ne13-or$facts.actual-ne13-or$facts.ocrIdentity-cne$identity){throw 'valid inventory failed'}
       $extra=@($files)+(Put 'extra.dll');Reject {Assert-DefaultInventory $extra $root $base} 'extra file'
-      $ocr=@($files)+(Put 'resources/ocr/bad/model.bin');Reject {Assert-DefaultInventory $ocr $root $base} 'OCR file'
+      $ocr=@($files)+(Put "resources/ocr/$identity/bad/model.bin");Reject {Assert-DefaultInventory $ocr $root $base} 'sixth OCR file'
+      $noOcr=@($files|Where-Object{-not $_.FullName.Replace('\','/').Contains('/resources/ocr/')});Reject {Assert-DefaultInventory $noOcr $root $base} 'missing OCR package'
+      $lessOcr=@($files|Where-Object{-not $_.FullName.EndsWith('eng.traineddata')});Reject {Assert-DefaultInventory $lessOcr $root $base} 'missing OCR model'
+      $swapped=@($files|Where-Object{-not $_.FullName.EndsWith('eng-fast-Apache-2.0.txt')})+(Put "resources/ocr/$identity/licenses/other.txt");Reject {Assert-DefaultInventory $swapped $root $base} 'unexpected OCR file name'
+      $split=@($files|Where-Object{-not $_.FullName.EndsWith('tesseract.exe')})+(Put ("resources/ocr/"+('b'*64)+"/bin/tesseract.exe"));Reject {Assert-DefaultInventory $split $root $base} 'two OCR identities'
+      Reject {Get-DefaultOcrPlanShape @($ocrPaths|ForEach-Object{$_.Replace($identity,('A'*64))})} 'non-lowercase OCR identity'
+      $shape=Get-DefaultOcrPlanShape @($ocrPaths|ForEach-Object{'prefix/'+$_});if($shape.Identity-cne$identity-or@($shape.Files).Count-ne5){throw 'prefixed archive OCR shape changed'}
+      function Assert-TrustedWindowsSignature{param($Path,$ExpectedPublisher)if($ExpectedPublisher-cne'Test Publisher'){throw 'publisher'};if(-not $Path.EndsWith('tesseract.exe')){throw 'only the engine is checked here'}}
+      $pins=Get-Content scripts/ocr/pins.json -Raw|ConvertFrom-Json;$pkg=Join-Path $root 'pkg';$src=Join-Path $root 'src';[IO.Directory]::CreateDirectory((Join-Path $src 'scripts/ocr'))|Out-Null
+      function PutBytes([string]$Relative,[byte[]]$Bytes){$path=Join-Path $pkg $Relative;[IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($path))|Out-Null;[IO.File]::WriteAllBytes($path,$Bytes);return Get-Item $path}
+      $engineBytes=[Text.Encoding]::ASCII.GetBytes('fake signed engine');$engineSha=([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($engineBytes))).Replace('-','');$pkgId=$engineSha.ToLowerInvariant()
+      $fakePins=[ordered]@{model=[ordered]@{data=[ordered]@{file='eng.traineddata';bytes=1;sha256=''};license=[ordered]@{output='eng-fast-Apache-2.0.txt';bytes=1;sha256=''}};tesseract=[ordered]@{license=[ordered]@{output='Tesseract-Apache-2.0.txt';bytes=1;sha256=''}};leptonica=[ordered]@{license=[ordered]@{output='Leptonica-BSD-2-Clause.txt';bytes=1;sha256=''}}}
+      $pkgFiles=@(PutBytes "resources/ocr/$pkgId/bin/tesseract.exe" $engineBytes)
+      foreach($pair in @(@('tessdata/eng.traineddata',$fakePins.model.data,'m'),@('licenses/Tesseract-Apache-2.0.txt',$fakePins.tesseract.license,'t'),@('licenses/Leptonica-BSD-2-Clause.txt',$fakePins.leptonica.license,'l'),@('licenses/eng-fast-Apache-2.0.txt',$fakePins.model.license,'e'))){$file=PutBytes "resources/ocr/$pkgId/$($pair[0])" ([Text.Encoding]::ASCII.GetBytes($pair[2]));$pair[1].sha256=Get-ExactSha256 $file.FullName;$pkgFiles+=$file}
+      [IO.File]::WriteAllText((Join-Path $src 'scripts/ocr/pins.json'),($fakePins|ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
+      $app=Join-Path $root 'app.exe';[IO.File]::WriteAllText($app,('prefix'+$engineSha+'suffix'),[Text.Encoding]::ASCII)
+      $ocrReceipts=@(Assert-DefaultOcrPackage -Files $pkgFiles -Identity $pkgId -SourceRoot $src -ApplicationPath $app -ExpectedPublisher 'Test Publisher');if($ocrReceipts.Count-ne5-or@($ocrReceipts|Where-Object role -CEQ 'engine').Count-ne1-or@($ocrReceipts|Where-Object role -CEQ 'engine')[0].sha256-cne$engineSha){throw 'valid OCR package failed'}
+      Reject {Assert-DefaultOcrPackage -Files $pkgFiles -Identity ('c'*64) -SourceRoot $src -ApplicationPath $app -ExpectedPublisher 'Test Publisher'} 'wrong OCR identity'
+      Reject {Assert-DefaultOcrPackage -Files $pkgFiles -Identity $pkgId -SourceRoot $src -ApplicationPath $app -ExpectedPublisher 'Other Publisher'} 'wrong OCR publisher'
+      $plainApp=Join-Path $root 'plain.exe';[IO.File]::WriteAllText($plainApp,'no identity',[Text.Encoding]::ASCII);Reject {Assert-DefaultOcrPackage -Files $pkgFiles -Identity $pkgId -SourceRoot $src -ApplicationPath $plainApp -ExpectedPublisher 'Test Publisher'} 'app without OCR identity'
+      [IO.File]::WriteAllText((Join-Path $pkg "resources/ocr/$pkgId/licenses/Tesseract-Apache-2.0.txt"),'X',[Text.Encoding]::ASCII);Reject {Assert-DefaultOcrPackage -Files $pkgFiles -Identity $pkgId -SourceRoot $src -ApplicationPath $app -ExpectedPublisher 'Test Publisher'} 'tampered OCR license'
+      if($pins.model.data.sha256-cne'7D4322BD2A7749724879683FC3912CB542F19906C83BCC1A52132556427170B2'-or$pins.model.data.file-cne'eng.traineddata'-or$pins.tesseract.license.output-cne'Tesseract-Apache-2.0.txt'-or$pins.leptonica.license.output-cne'Leptonica-BSD-2-Clause.txt'-or$pins.model.license.output-cne'eng-fast-Apache-2.0.txt'){throw 'real OCR pins no longer have the shape the verifier reads'}
       $missing=@($files|Where-Object{$_.Name-ne'welcome.pdf'});Reject {Assert-DefaultInventory $missing $root $base} 'missing resource'
       $case=@($files)+(Put 'RESOURCES/WELCOME.PDF');Reject {Assert-DefaultInventory $case $root $base} 'case collision'
       $listing=@('----------','Path = app.exe','Size = 10','Path = data.bin','Size = 20');$bounded=Assert-BoundedArchiveListing $listing;if($bounded.entries-ne2-or$bounded.expandedBytes-ne30){throw 'bounded listing facts changed'}

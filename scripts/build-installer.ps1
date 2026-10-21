@@ -74,6 +74,50 @@ function Assert-InstallerSourceRevision {
     if ($LASTEXITCODE -ne 0) { throw 'Installer proof requires a clean tracked index.' }
 }
 
+function Get-InstallerExtractArguments {
+    param(
+        [Parameter(Mandatory = $true)][string]$Installer,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ArchivePaths
+    )
+    $arguments = @('x', $Installer, "-o$Destination", '-y')
+    if (@($ArchivePaths | Where-Object { $_.Equals('uninstall.exe', [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) { $arguments += '-x!uninstall.exe' }
+    return ,$arguments
+}
+
+function Assert-ReleaseOcrBundle {
+    param(
+        [Parameter(Mandatory = $true)][string]$BundleRoot,
+        [Parameter(Mandatory = $true)][string]$Installer,
+        [Parameter(Mandatory = $true)][string]$Version
+    )
+    if ([IO.Path]::GetFileName($Installer) -cne "PDF Workstation_${Version}_x64-setup.exe") { throw 'Release OCR bundle installer is not the current-version installer.' }
+    $signature = [IO.Path]::GetFullPath("$Installer.sig")
+    $updaterArtifacts = @(Get-ChildItem -LiteralPath $BundleRoot -Recurse -File -Force | Where-Object { $_.Name.Equals('latest.json', [StringComparison]::OrdinalIgnoreCase) -or $_.Extension.Equals('.sig', [StringComparison]::OrdinalIgnoreCase) })
+    if ($updaterArtifacts.Count -ne 1 -or -not $updaterArtifacts[0].FullName.Equals($signature, [StringComparison]::OrdinalIgnoreCase) -or $updaterArtifacts[0].Length -le 0) {
+        throw 'Release OCR bundle must contain exactly the installer updater signature and no manifest.'
+    }
+    return $signature
+}
+
+function Copy-ReleaseOcrAssets {
+    param(
+        [Parameter(Mandatory = $true)][string]$ReleaseBundle,
+        [Parameter(Mandatory = $true)][string[]]$Sources,
+        [scriptblock]$CopyProvider = { param($from, $to) Copy-Item -LiteralPath $from -Destination $to }
+    )
+    if ((Test-Path -LiteralPath $ReleaseBundle) -and @(Get-ChildItem -LiteralPath $ReleaseBundle -Force).Count -ne 0) { throw 'The release bundle folder must be empty before the release OCR installer is staged.' }
+    New-Item -ItemType Directory -Path $ReleaseBundle -Force | Out-Null
+    foreach ($source in $Sources) {
+        $destination = Join-Path $ReleaseBundle ([IO.Path]::GetFileName($source))
+        & $CopyProvider $source $destination
+        if (-not (Test-Path -LiteralPath $destination -PathType Leaf) -or (Get-Item -LiteralPath $destination).Length -ne (Get-Item -LiteralPath $source).Length -or (Get-ExactSha256 -Path $destination) -cne (Get-ExactSha256 -Path $source)) { throw 'Staged release asset differs from the verified build output.' }
+    }
+    $staged = @(Get-ChildItem -LiteralPath $ReleaseBundle -Force | ForEach-Object Name | Sort-Object)
+    $expected = @($Sources | ForEach-Object { [IO.Path]::GetFileName($_) } | Sort-Object)
+    if ($staged.Count -ne $expected.Count -or (Compare-Object $expected $staged -CaseSensitive)) { throw 'Staged release folder does not hold exactly the verified assets.' }
+}
+
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $projectRoot
 . (Join-Path $PSScriptRoot 'ocr/installer-package.ps1')
@@ -85,12 +129,14 @@ Remove-Item Env:PDF_WORKSTATION_OCR_SETUP_ROOT -ErrorAction SilentlyContinue
 
 if ($AzureSigning -and $UnsignedLocal) { throw 'AzureSigning and UnsignedLocal cannot be combined.' }
 if ($ArtifactOnly -and (-not $AzureSigning -or [string]::IsNullOrWhiteSpace($OcrSetupRoot) -or $UnsignedLocal)) { throw 'ArtifactOnly requires AzureSigning with OcrSetupRoot and cannot be combined with UnsignedLocal.' }
-if ($AzureSigning -and $OcrSetupRoot -and -not $ArtifactOnly) { throw 'Azure-signed OCR requires the explicit artifact-only mode.' }
-if ($ExpectedPublisher -and -not $ArtifactOnly) { throw 'ExpectedPublisher is supported only for artifact-only Azure OCR.' }
-if ($SourceRevision -and -not ($ArtifactOnly -or $UnsignedLocal)) { throw 'SourceRevision is supported only for explicit installer proof modes.' }
+$ReleaseOcr = [bool]($AzureSigning -and $OcrSetupRoot -and -not $ArtifactOnly)
+$SignedOcr = [bool]($ArtifactOnly -or $ReleaseOcr)
+if ($ExpectedPublisher -and -not $SignedOcr) { throw 'ExpectedPublisher is supported only for Azure-signed OCR.' }
+if ($SourceRevision -and -not ($SignedOcr -or $UnsignedLocal)) { throw 'SourceRevision is supported only for explicit installer proof modes.' }
 if ($UnsignedLocal -and [string]::IsNullOrWhiteSpace($SourceRevision)) { throw 'UnsignedLocal requires SourceRevision as the exact lowercase 40-character git HEAD.' }
-if ($ArtifactOnly -and ([string]::IsNullOrWhiteSpace($ExpectedPublisher) -or $ExpectedPublisher -cnotmatch "^[A-Za-z0-9][A-Za-z0-9 .,&'()/-]{0,127}$")) { throw 'Artifact-only Azure OCR requires a valid explicit ExpectedPublisher.' }
-if ($ArtifactOnly -or $UnsignedLocal) { Assert-InstallerSourceRevision -ProjectRoot $projectRoot -SourceRevision $SourceRevision }
+if ($ReleaseOcr -and [string]::IsNullOrWhiteSpace($SourceRevision)) { throw 'Azure-signed release OCR requires SourceRevision as the exact lowercase 40-character git HEAD.' }
+if ($SignedOcr -and ([string]::IsNullOrWhiteSpace($ExpectedPublisher) -or $ExpectedPublisher -cnotmatch "^[A-Za-z0-9][A-Za-z0-9 .,&'()/-]{0,127}$")) { throw 'Azure-signed OCR requires a valid explicit ExpectedPublisher.' }
+if ($SignedOcr -or $UnsignedLocal) { Assert-InstallerSourceRevision -ProjectRoot $projectRoot -SourceRevision $SourceRevision }
 if ($OcrSetupRoot -and -not ($AzureSigning -or $UnsignedLocal)) { throw 'OcrSetupRoot requires AzureSigning or UnsignedLocal.' }
 if ($OcrSetupRoot -and [string]::IsNullOrWhiteSpace($OutputRoot)) { throw 'OcrSetupRoot requires a fresh OutputRoot beneath target.' }
 if ($UnsignedLocal -and [string]::IsNullOrWhiteSpace($OutputRoot)) { throw 'UnsignedLocal requires a fresh OutputRoot beneath target.' }
@@ -149,7 +195,7 @@ try {
         $sourceLocks = Open-OcrReadLocks -Plan $originalPlan
         $originalPlan = Get-VerifiedOcrSetup -ProjectRoot $projectRoot -SetupRoot $OcrSetupRoot
         $originalEngineReceipt = [pscustomobject]@{ bytes = $originalPlan.Engine.Bytes; sha256 = $originalPlan.Engine.Sha256 }
-        if ($ArtifactOnly) {
+        if ($SignedOcr) {
             $engineSigner = { param($candidate) Invoke-AzureArtifactSigningCli -Path $candidate }
             $ocrPlan = New-SignedOcrSetup `
                 -ProjectRoot $projectRoot `
@@ -189,7 +235,7 @@ try {
         $baseLocks = Open-PathReadLocks -Paths @($baseResources.Entries | ForEach-Object Source)
         $baseResources = Get-BaseBundleResourceMap -ProjectRoot $projectRoot
         Assert-BaseResourceMapStable -Before $unlockedBaseResources -After $baseResources
-        if ($ArtifactOnly) {
+        if ($SignedOcr) {
             $baseResources = New-SignableBaseResourcePlan -Base $baseResources -OutputRoot $resolvedOutput
         }
     }
@@ -198,7 +244,7 @@ try {
         $resourceMap = Add-OcrBundleResources -Base $baseResources -Entries $ocrEntries -Identity $ocrPlan.Identity
         if ($resourceMap.Count -ne ($baseResources.Count + 5)) { throw 'OCR resource map did not preserve a base-resource bijection.' }
     }
-    $signCommand = if ($ArtifactOnly) {
+    $signCommand = if ($SignedOcr) {
         (New-AzureOcrSigningConfig -HelperPath (Join-Path $PSScriptRoot 'ocr/windows-signing.ps1')).bundle.windows.signCommand
     } elseif ($azureConfig) { $azureConfig.bundle.windows.signCommand } else { $null }
     $override = if ($UnsignedLocal -or $ArtifactOnly -or $signCommand -or $resourceMap) {
@@ -208,7 +254,7 @@ try {
     $configPath = $null
     $deleteConfig = $false
     if ($override) {
-        if ($ArtifactOnly) {
+        if ($SignedOcr) {
             $configDirectory = Join-Path $projectRoot 'src-tauri/target/signing-config'
             New-Item -ItemType Directory -Path $configDirectory -Force | Out-Null
             $configPath = Join-Path $configDirectory ([Guid]::NewGuid().ToString('N') + '.json')
@@ -232,7 +278,7 @@ try {
     }
     $buildExitCode = Invoke-TauriInstallerBuild -ConfigPath $configPath -DeleteConfig:$deleteConfig -BuildCommand $buildCommand
     if ($buildExitCode -ne 0) { throw 'Installer build failed.' }
-    if ($ArtifactOnly) {
+    if ($SignedOcr) {
         Assert-SignedBasePeSources -Plan $baseResources -ExpectedPublisher $ExpectedPublisher
     }
 
@@ -253,6 +299,10 @@ try {
         $bundleRoot = Join-Path $targetRoot 'release/bundle'
         $unexpectedUpdaterArtifacts = @(Get-ChildItem -LiteralPath $bundleRoot -Recurse -File | Where-Object { $_.Name -CEQ 'latest.json' -or $_.Extension -CEQ '.sig' })
         if (($UnsignedLocal -or $ArtifactOnly) -and $unexpectedUpdaterArtifacts.Count -ne 0) { throw 'Bounded bundle unexpectedly contains updater signature artifacts.' }
+        if ($ReleaseOcr) {
+            $releaseVersion = (Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw -Encoding UTF8 | ConvertFrom-Json).version
+            $updaterSignature = Assert-ReleaseOcrBundle -BundleRoot $bundleRoot -Installer $installer -Version $releaseVersion
+        }
         $extractor = Get-InstallerExtractor
         $inventoryLines = @(& $extractor.FullName l -slt $installer)
         if ($LASTEXITCODE -ne 0) { throw 'Could not inventory the installer archive.' }
@@ -263,12 +313,13 @@ try {
         $extractionDirectory = Join-Path $resolvedOutput 'extracted-installer'
         if (Test-Path -LiteralPath $extractionDirectory) { throw 'Installer extraction directory already exists.' }
         New-Item -ItemType Directory -Path $extractionDirectory | Out-Null
-        & $extractor.FullName x $installer "-o$extractionDirectory" -y
+        $extractArguments = Get-InstallerExtractArguments -Installer $installer -Destination $extractionDirectory -ArchivePaths $archivePaths
+        & $extractor.FullName @extractArguments
         if ($LASTEXITCODE -ne 0) { throw 'Could not extract the installer for resource verification.' }
         $baseReceipts = @(Assert-ExtractedBaseResources `
             -ExtractionRoot $extractionDirectory `
             -Entries $baseResources.Entries `
-            -PublisherSigned:$ArtifactOnly `
+            -PublisherSigned:$SignedOcr `
             -ExpectedPublisher $ExpectedPublisher)
         $ocrReceipts = @(Assert-ExtractedOcrPackage -ExtractionRoot $extractionDirectory -Plan $ocrPlan)
         $packagedApplications = @(Get-ChildItem -LiteralPath $extractionDirectory -Recurse -File | Where-Object Name -CEQ 'pdf-workstation.exe')
@@ -276,7 +327,7 @@ try {
         $packagedApplication = $packagedApplications[0].FullName
         if ($ocrPlan -and -not (Test-ExecutableContainsAscii -Path $packagedApplication -Marker $ocrPlan.Engine.Sha256)) { throw 'Packaged application does not embed the packaged OCR engine identity.' }
 
-        if ($ArtifactOnly) {
+        if ($SignedOcr) {
             $installerFacts = Assert-TrustedWindowsSignature -Path $installer -ExpectedPublisher $ExpectedPublisher
             $applicationFacts = Assert-TrustedWindowsSignature -Path $packagedApplication -ExpectedPublisher $ExpectedPublisher
             $installerStatus = [string]$installerFacts.Status
@@ -293,7 +344,7 @@ try {
             if ($engineReceipts.Count -ne 1) { throw 'Extracted OCR proof has no unique engine receipt.' }
             $engineReceipt = $engineReceipts[0]
             $extractedEngine = Find-ExtractedResource -Files @(Get-ChildItem -LiteralPath $extractionDirectory -Recurse -File) -Target $engineReceipt.path
-            if ($ArtifactOnly) {
+            if ($SignedOcr) {
                 $engineFacts = Assert-TrustedWindowsSignature -Path $extractedEngine.FullName -ExpectedPublisher $ExpectedPublisher
                 $engineStatus = [string]$engineFacts.Status
                 Assert-UnsignedWindowsFile -Path ($originalPlan.Files | Where-Object Role -CEQ 'engine').Source
@@ -305,16 +356,16 @@ try {
 
         $receipt = [ordered]@{
             schemaVersion = 1
-            scope = if ($ArtifactOnly) { 'Artifact-only Azure OCR installer extraction proof; no install, launch, update, workflow, or release claim.' } elseif ($ocrPlan) { 'Unsigned OCR installer extraction proof (the default installer configuration); no install, launch, update, or release claim.' } else { 'Unsigned installer extraction proof without OCR; no install, launch, update, or release claim.' }
-            mode = if ($ArtifactOnly) { 'azure-signed-artifact-only-ocr' } elseif ($ocrPlan) { 'unsigned-local-ocr' } else { 'unsigned-local-without-ocr' }
+            scope = if ($ReleaseOcr) { 'Azure-signed release installer with OCR, extraction proof only; no install, launch, update, or publication claim.' } elseif ($ArtifactOnly) { 'Artifact-only Azure OCR installer extraction proof; no install, launch, update, workflow, or release claim.' } elseif ($ocrPlan) { 'Unsigned OCR installer extraction proof (the default installer configuration); no install, launch, update, or release claim.' } else { 'Unsigned installer extraction proof without OCR; no install, launch, update, or release claim.' }
+            mode = if ($ReleaseOcr) { 'azure-signed-release-ocr' } elseif ($ArtifactOnly) { 'azure-signed-artifact-only-ocr' } elseif ($ocrPlan) { 'unsigned-local-ocr' } else { 'unsigned-local-without-ocr' }
             sourceRevision = $SourceRevision
             installer = @{ path = $installer.Substring($resolvedOutput.Length + 1).Replace('\', '/'); bytes = [uint64]$installers[0].Length; sha256 = Get-ExactSha256 -Path $installer }
             application = @{ path = $packagedApplication.Substring($resolvedOutput.Length + 1).Replace('\', '/'); bytes = [uint64]$packagedApplications[0].Length; sha256 = Get-ExactSha256 -Path $packagedApplication }
             archiveInventory = @{ path = 'installer-inventory.txt'; bytes = [uint64](Get-Item -LiteralPath $inventoryPath).Length; sha256 = Get-ExactSha256 -Path $inventoryPath }
             baseResources = $baseReceipts
             ocr = @{ enabled = [bool]$ocrPlan; identity = if ($ocrPlan) { $ocrPlan.Identity } else { $null }; setupManifestSha256 = if ($ocrPlan) { $ocrPlan.ManifestSha256 } else { $null }; originalEngine = $originalEngineReceipt; packagedResources = $ocrReceipts; licensesArePackagedSidecarsNotNoticeDialogContent = [bool]$ocrPlan }
-            signatures = @{ expectedPublisher = if ($ArtifactOnly) { $ExpectedPublisher } else { $null }; installer = $installerStatus; application = $applicationStatus; engine = $engineStatus; originalEngine = $originalEngineStatus }
-            config = if ($ArtifactOnly) { @{ ephemeral = $true; retained = $false; updaterArtifacts = @() } } else { @{ path = $configPath.Substring($resolvedOutput.Length + 1).Replace('\', '/'); sha256 = Get-ExactSha256 -Path $configPath; updaterArtifacts = @() } }
+            signatures = @{ expectedPublisher = if ($SignedOcr) { $ExpectedPublisher } else { $null }; installer = $installerStatus; application = $applicationStatus; engine = $engineStatus; originalEngine = $originalEngineStatus }
+            config = if ($ReleaseOcr) { @{ ephemeral = $true; retained = $false; updaterArtifacts = @([IO.Path]::GetFileName($updaterSignature)) } } elseif ($ArtifactOnly) { @{ ephemeral = $true; retained = $false; updaterArtifacts = @() } } else { @{ path = $configPath.Substring($resolvedOutput.Length + 1).Replace('\', '/'); sha256 = Get-ExactSha256 -Path $configPath; updaterArtifacts = @() } }
         }
         Write-JsonUtf8 -Path (Join-Path $resolvedOutput 'installer-verification.json') -Value $receipt
     } elseif ($AzureSigning) {
@@ -329,7 +380,12 @@ try {
         & "$PSScriptRoot/verify-windows-signatures.ps1" -Paths @($packagedApplication)
     }
 
-    if (-not $UnsignedLocal -and -not $ArtifactOnly -and -not $OcrSetupRoot) {
+    if ($ReleaseOcr) {
+        $releaseBundle = Join-Path $projectRoot 'src-tauri/target/release/bundle/nsis'
+        Copy-ReleaseOcrAssets -ReleaseBundle $releaseBundle -Sources @($installer, $updaterSignature)
+        Write-Output ('RELEASE_OCR_IDENTITY identity={0} setupManifestSha256={1} originalEngineBytes={2} originalEngineSha256={3}' -f $ocrPlan.Identity, $ocrPlan.ManifestSha256, $originalEngineReceipt.bytes, $originalEngineReceipt.sha256)
+    }
+    if (-not $UnsignedLocal -and -not $ArtifactOnly -and ($ReleaseOcr -or -not $OcrSetupRoot)) {
         node scripts/release-manifest.mjs
         if ($LASTEXITCODE -ne 0) { throw 'Update manifest generation failed.' }
     }

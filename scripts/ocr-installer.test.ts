@@ -20,10 +20,10 @@ describe('opt-in OCR installer packaging', () => {
     expect(installer).toContain('Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY -ErrorAction SilentlyContinue');
     expect(installer).toContain('Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue');
     expect(installer.indexOf('Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD')).toBeLessThan(installer.indexOf('npm.cmd run tauri'));
-    expect(installer).toContain("if (-not $UnsignedLocal -and -not $ArtifactOnly -and -not $OcrSetupRoot)");
+    expect(installer).toContain("if (-not $UnsignedLocal -and -not $ArtifactOnly -and ($ReleaseOcr -or -not $OcrSetupRoot))");
     expect(installer).toContain('New-InstallerOverrideConfig -SignCommand $signCommand -UnsignedLocal:$UnsignedLocal -ArtifactOnly:$ArtifactOnly');
-    expect(installer).toContain('if ($AzureSigning -and $OcrSetupRoot -and -not $ArtifactOnly)');
-    expect(installer).toContain('Azure-signed OCR requires the explicit artifact-only mode.');
+    expect(installer).toContain('$ReleaseOcr = [bool]($AzureSigning -and $OcrSetupRoot -and -not $ArtifactOnly)');
+    expect(installer).not.toContain('Azure-signed OCR requires the explicit artifact-only mode.');
     expect(installer.indexOf('$env:PDF_WORKSTATION_OCR_SETUP_ROOT = $ocrPlan.Root')).toBeLessThan(installer.indexOf('npm.cmd run tauri'));
     expect(installer).toContain('New-SignedOcrSetup');
     expect(installer).toContain('New-SignableBaseResourcePlan');

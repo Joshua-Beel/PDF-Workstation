@@ -2,17 +2,26 @@ name: Manual Windows validation
 
 on:
   workflow_dispatch:
+    inputs:
+      runner:
+        description: Hosted runner image; windows-2022 matches the release installer job
+        required: true
+        type: choice
+        default: windows-2022
+        options:
+          - windows-2022
+          - windows-latest
 
 permissions:
   contents: read
 
 concurrency:
-  group: windows-validation-${{ github.sha }}
+  group: windows-validation-${{ github.sha }}-${{ inputs.runner }}
   cancel-in-progress: false
 
 jobs:
   validate:
-    runs-on: windows-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 90
     env:
       OCR_SETUP_ROOT: target/ocr-validation-setup-${{ github.run_id }}-${{ github.run_attempt }}

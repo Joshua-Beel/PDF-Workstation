@@ -67,7 +67,7 @@ describe('release workflow contract', () => {
     const publish = workflow.slice(publishStart);
     expect(workflow).toMatch(/^permissions: \{\}$/m);
     expect(workflow.match(/^\s+environment:/gm)).toHaveLength(1);
-    expect(installer).toContain('    environment: release\n    permissions:\n      contents: read\n');
+    expect(installer).toContain('  installer:\n    runs-on: windows-2022\n    environment: release\n    permissions:\n      contents: read\n');
     expect(installer).toContain('persist-credentials: false');
     expect(installer).not.toContain('contents: write');
     expect(installer).not.toContain('github.token');
@@ -178,11 +178,42 @@ describe('release workflow contract', () => {
       endpoints: ['https://github.com/Joshua-Beel/PDF-Workstation/releases/latest/download/latest.json'],
       windows: { installMode: 'passive' },
     });
-    const notes = readFileSync('docs/release-notes.md', 'utf8');
-    expect(notes.startsWith(`## ${currentVersion} (draft candidate)`)).toBe(true);
-    expect(notes).toContain('Hardens update recovery.');
-    expect(notes).toContain('does not bundle OCR');
-    expect(notes).toContain('does not create searchable/document OCR');
-    expect(notes).toContain('makes no redaction, PDF-signing, certificate-signing, or signature-validation claim');
+    const notes = readFileSync('docs/release-notes.md', 'utf8').replace(/\r\n?/g, '\n');
+    expect(notes.startsWith(`## ${currentVersion}\n`)).toBe(true);
+    expect(notes.match(/^#{1,2} /gm), 'latest.json carries the whole file, so it holds only the released version').toHaveLength(1);
+    expect(notes).toContain('tested in source builds');
+    expect(notes).toContain(`unverified in an installed ${currentVersion} build`);
+    expect(notes).toContain('Accuracy on real scans is unmeasured.');
+    expect(notes).toContain('PDF signing, certificate signatures or signature validation');
+    expect(notes).toContain('every save writes a new copy');
+    expect(notes.length).toBeLessThan(4096);
+    expect(readFileSync('.gitattributes', 'utf8').replace(/\r\n?/g, '\n').split('\n')).toContain('docs/release-notes.md text eol=lf');
+    expect(readFileSync('docs/release-notes.md', 'utf8'), 'latest.json notes must not carry CRLF from a Windows checkout').not.toContain('\r');
+  });
+
+  it('builds the release installer with a fresh pinned OCR engine signed by the same Azure profile, using no new secret', () => {
+    const steps = workflow.split(/\n      - /);
+    const step = (marker: string) => {
+      const found = steps.filter(text => text.includes(marker));
+      expect(found, marker).toHaveLength(1);
+      return found[0];
+    };
+    expect(workflow).toContain('      OCR_SETUP_ROOT: target/ocr-release-setup-${{ github.run_id }}-${{ github.run_attempt }}\n');
+    expect(workflow).toContain('      RELEASE_PROOF_ROOT: target/ocr-release-build-${{ github.run_id }}-${{ github.run_attempt }}\n');
+    expect(workflow).toContain('      EXPECTED_PUBLISHER: Joshua Beel\n');
+    const setup = step('Build the pinned unsigned OCR setup');
+    expect(setup).toContain('run: ./scripts/setup-ocr.ps1 -OutputRoot $env:OCR_SETUP_ROOT -Jobs 4');
+    expect(setup).not.toMatch(/secrets\.|^\s+env:/m);
+    expect(workflow.indexOf('Build the pinned unsigned OCR setup')).toBeGreaterThan(workflow.indexOf('run: ./scripts/run-native-recovery-gates.ps1'));
+    expect(workflow.indexOf('Build the pinned unsigned OCR setup')).toBeLessThan(workflow.indexOf('Install Azure Artifact Signing CLI'));
+    const build = step('Build publisher-signed installer with OCR and signed update manifest');
+    for (const line of ['./scripts/build-installer.ps1 -AzureSigning `', '-OcrSetupRoot $env:OCR_SETUP_ROOT `', '-OutputRoot $env:RELEASE_PROOF_ROOT `', '-ExpectedPublisher $env:EXPECTED_PUBLISHER `', '-SourceRevision $env:GITHUB_SHA']) expect(build).toContain(line);
+    expect(build).not.toMatch(/-ArtifactOnly|-UnsignedLocal/);
+    expect([...build.matchAll(/secrets\.([A-Z_]+)/g)].map(match => match[1]).sort()).toEqual(['AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET', 'AZURE_SIGNING_ACCOUNT', 'AZURE_SIGNING_ENDPOINT', 'AZURE_SIGNING_PROFILE', 'AZURE_TENANT_ID', 'TAURI_SIGNING_PRIVATE_KEY']);
+    const proof = step('Verify the release OCR installer proof');
+    expect(proof).not.toMatch(/secrets\.|^\s+env:/m);
+    for (const check of ["$receipt.mode -cne 'azure-signed-release-ocr'", '$receipt.sourceRevision -cne $env:GITHUB_SHA', '@($receipt.ocr.packagedResources).Count -ne 5', '$receipt.signatures.expectedPublisher -cne $env:EXPECTED_PUBLISHER', "$receipt.signatures.engine -cne 'Valid'", "$receipt.signatures.originalEngine -cne 'NotSigned'"]) expect(proof).toContain(check);
+    expect(workflow.indexOf('Verify the release OCR installer proof')).toBeLessThan(workflow.indexOf('Verify exact release asset inventory'));
+    expect([...workflow.matchAll(/secrets\.([A-Z_]+)/g)].map(match => match[1]).filter((name, index, all) => all.indexOf(name) === index).sort()).toEqual(['AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET', 'AZURE_SIGNING_ACCOUNT', 'AZURE_SIGNING_ENDPOINT', 'AZURE_SIGNING_PROFILE', 'AZURE_TENANT_ID', 'TAURI_SIGNING_PRIVATE_KEY']);
   });
 });

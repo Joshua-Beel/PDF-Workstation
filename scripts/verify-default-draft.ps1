@@ -237,6 +237,41 @@ function Assert-PackagedApplicationIdentity {
     }
 }
 
+function Get-DefaultOcrPlanShape {
+    param([string[]]$Paths)
+    $suffixes=@('bin/tesseract.exe','tessdata/eng.traineddata','licenses/Tesseract-Apache-2.0.txt','licenses/Leptonica-BSD-2-Clause.txt','licenses/eng-fast-Apache-2.0.txt')
+    $ocr=@($Paths|Where-Object{$_.StartsWith('resources/ocr/',[StringComparison]::OrdinalIgnoreCase)-or $_.ToLowerInvariant().Contains('/resources/ocr/')})
+    if($ocr.Count -ne 5){throw 'Default installer must contain exactly five OCR resources.'}
+    $identities=@($ocr|ForEach-Object{if($_ -cnotmatch '(?:^|/)resources/ocr/([a-f0-9]{64})/(.+)$'-or $suffixes -cnotcontains $Matches[2]){throw 'Default installer OCR resource path is invalid.'};$Matches[1]}|Sort-Object -Unique)
+    if($identities.Count -ne 1){throw 'Default installer OCR resources do not share one identity.'}
+    return [pscustomobject]@{Identity=[string]$identities[0];Files=@($suffixes|ForEach-Object{[pscustomobject]@{Suffix=$_}})}
+}
+
+function Assert-DefaultOcrPackage {
+    param([object[]]$Files,[string]$Identity,[string]$SourceRoot,[string]$ApplicationPath,[string]$ExpectedPublisher)
+    if($Identity -cnotmatch '^[a-f0-9]{64}$'){throw 'Default installer OCR identity is invalid.'}
+    $pins=Get-Content -LiteralPath (Join-Path $SourceRoot 'scripts/ocr/pins.json') -Raw -Encoding UTF8|ConvertFrom-Json
+    $pinned=@(
+        ,@('tessdata/eng.traineddata','model',$pins.model.data.file,'eng.traineddata',$pins.model.data)
+        ,@('licenses/Tesseract-Apache-2.0.txt','license',$pins.tesseract.license.output,'Tesseract-Apache-2.0.txt',$pins.tesseract.license)
+        ,@('licenses/Leptonica-BSD-2-Clause.txt','license',$pins.leptonica.license.output,'Leptonica-BSD-2-Clause.txt',$pins.leptonica.license)
+        ,@('licenses/eng-fast-Apache-2.0.txt','license',$pins.model.license.output,'eng-fast-Apache-2.0.txt',$pins.model.license)
+    )
+    $receipts=@()
+    foreach($pin in $pinned){
+        if([string]$pin[2] -cne $pin[3]-or [uint64]$pin[4].bytes -eq 0-or [string]$pin[4].sha256 -cnotmatch '^[A-F0-9]{64}$'){throw 'Tagged OCR pins are not the expected model and license receipts.'}
+        $target="resources/ocr/$Identity/$($pin[0])";$match=Get-UniqueExtractedFile $Files $target 'Packaged OCR resource'
+        if([uint64]$match.Length -ne [uint64]$pin[4].bytes-or (Get-ExactSha256 $match.FullName)-cne [string]$pin[4].sha256){throw 'Packaged OCR resource differs from the tagged pins.'}
+        $receipts+=[pscustomobject][ordered]@{target=$target;role=$pin[1];bytes=[uint64]$match.Length;sha256=[string]$pin[4].sha256}
+    }
+    $engineTarget="resources/ocr/$Identity/bin/tesseract.exe";$engine=Get-UniqueExtractedFile $Files $engineTarget 'Packaged OCR engine';$engineSha256=Get-ExactSha256 $engine.FullName
+    if($engineSha256.ToLowerInvariant() -cne $Identity){throw 'Packaged OCR engine does not match its identity folder.'}
+    $null=Assert-TrustedWindowsSignature -Path $engine.FullName -ExpectedPublisher $ExpectedPublisher
+    if(-not (Test-ExecutableContainsAscii -Path $ApplicationPath -Marker $engineSha256)){throw 'Packaged application does not embed the packaged OCR engine identity.'}
+    $receipts+=[pscustomobject][ordered]@{target=$engineTarget;role='engine';bytes=[uint64]$engine.Length;sha256=$engineSha256}
+    return @($receipts|Sort-Object target)
+}
+
 function Expand-DefaultInstaller {
     param([string]$Installer,[string]$Destination,[object[]]$BaseEntries)
     if(Test-Path -LiteralPath $Destination){throw 'Extraction destination must be fresh.'}
@@ -247,7 +282,7 @@ function Expand-DefaultInstaller {
     try{$listingFacts=Assert-BoundedArchiveListing -Lines $listing -ExactFallbackSizes $fallback -KnownPaths $known}catch{$primary=$_.Exception.Message;$version=Get-SevenZipVersionFact $extractor.FullName;throw ($primary+' SevenZipVersion='+$version+'.')}
     $script:OptionalUninstallerExcluded=$null-ne$listingFacts.excludedUninstaller
     $archivePaths=Convert-SevenZipInventory -Lines $listing
-    Assert-ArchiveResourceInventory -ArchivePaths $archivePaths -BaseEntries $BaseEntries
+    Assert-ArchiveResourceInventory -ArchivePaths $archivePaths -BaseEntries $BaseEntries -OcrPlan (Get-DefaultOcrPlanShape $archivePaths)
     [IO.Directory]::CreateDirectory($Destination)|Out-Null
     Assert-NoReparseAncestors -Path $Destination
     $welcomePath=Join-Path $Destination 'resources/welcome.pdf';[IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($welcomePath))|Out-Null
@@ -277,12 +312,13 @@ function Assert-DefaultInventory {
     $required=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     $null=$required.Add('pdf-workstation.exe')
     foreach($entry in $BaseEntries){$null=$required.Add([string]$entry.Target)}
+    $ocrShape=Get-DefaultOcrPlanShape @($actual)
+    foreach($file in $ocrShape.Files){$null=$required.Add("resources/ocr/$($ocrShape.Identity)/$($file.Suffix)")}
     foreach($path in @('$PLUGINSDIR/modern-wizard.bmp','$PLUGINSDIR/nsDialogs.dll','$PLUGINSDIR/nsis_tauri_utils.dll','$PLUGINSDIR/NSISdl.dll','$PLUGINSDIR/StartMenu.dll','$PLUGINSDIR/System.dll')){$null=$required.Add($path)}
     foreach($path in $required){if(-not $actual.Contains($path)){throw 'Extracted installer is missing an exact payload or NSIS support file.'}}
     foreach($path in $actual){if(-not $required.Contains($path)-and -not $path.Equals('uninstall.exe',[StringComparison]::OrdinalIgnoreCase)){throw 'Extracted installer contains an unexpected file.'}}
     if($actual.Count -ne $required.Count -and $actual.Count -ne ($required.Count+1)){throw 'Extracted installer cardinality is unsupported.'}
-    if(@($actual|Where-Object{$_.StartsWith('resources/ocr/',[StringComparison]::OrdinalIgnoreCase)-or $_.ToLowerInvariant().Contains('/resources/ocr/')}).Count -ne 0){throw 'Default installer unexpectedly contains OCR resources.'}
-    return [pscustomobject]@{required=[uint64]$required.Count;actual=[uint64]$actual.Count;optionalUninstaller=$actual.Contains('uninstall.exe')}
+    return [pscustomobject]@{required=[uint64]$required.Count;actual=[uint64]$actual.Count;optionalUninstaller=$actual.Contains('uninstall.exe');ocrIdentity=$ocrShape.Identity}
 }
 
 function Get-UniqueExtractedFile {
@@ -325,6 +361,7 @@ if([uint64]$base.Count -ne 26){throw 'Default tagged-source resource inventory i
 $extractionRoot=Join-Path $workRoot 'extracted-installer';$files=Expand-DefaultInstaller $installerPath $extractionRoot $base.Entries
 $inventory=Assert-DefaultInventory $files $extractionRoot $base.Entries
 $application=Get-UniqueExtractedFile $files 'pdf-workstation.exe' 'Packaged application';Assert-PackagedApplicationIdentity -Path $application.FullName -Version $TargetVersion;$null=Assert-TrustedWindowsSignature -Path $application.FullName -ExpectedPublisher $ExpectedPublisher
+$ocrReceipts=@(Assert-DefaultOcrPackage -Files $files -Identity $inventory.ocrIdentity -SourceRoot $TargetSourceRoot -ApplicationPath $application.FullName -ExpectedPublisher $ExpectedPublisher)
 $resourceReceipts=@()
 foreach($entry in $base.Entries){
     $match=Get-UniqueExtractedFile $files ([string]$entry.Target) 'Base resource'
@@ -337,10 +374,10 @@ foreach($entry in $base.Entries){
     }
 }
 $record=[ordered]@{
- schemaVersion=1;scope='Read-only default draft download and extraction proof; no installation, launch, updater cryptographic verification, or publication claim.';mode='default-draft-extraction';workflowSourceRevision=$WorkflowSourceRevision;targetVersion=$TargetVersion;targetTag=$TargetTag;targetSourceRevision=$TargetSourceRevision;releaseId=$releaseId
+ schemaVersion=2;scope='Read-only default draft download and extraction proof, including the packaged OCR engine, model and licenses; no installation, launch, OCR recognition, updater cryptographic verification, or publication claim.';mode='default-draft-extraction';workflowSourceRevision=$WorkflowSourceRevision;targetVersion=$TargetVersion;targetTag=$TargetTag;targetSourceRevision=$TargetSourceRevision;releaseId=$releaseId
  assets=@([ordered]@{role='installer';id=$installerId;name=$InstallerName;bytes=$installerLength;sha256=$InstallerSha256},[ordered]@{role='detachedUpdaterSignature';id=$signatureId;name="$InstallerName.sig";bytes=$signatureLength;sha256=$SignatureSha256},[ordered]@{role='updaterManifest';id=$manifestId;name='latest.json';bytes=$manifestLength;sha256=$ManifestSha256})
  packagedApplication=[ordered]@{bytes=[uint64]$application.Length;sha256=Get-ExactSha256 $application.FullName}
- baseResources=@($resourceReceipts|Sort-Object target);signatures=[ordered]@{expectedPublisher=$ExpectedPublisher;installer='Valid';application='Valid';pdfium='Valid';trustedTimestampsRequired=$true}
- verification=[ordered]@{draft=$true;prerelease=$false;exactAssetInventory=$true;exactExtractedInventory=$true;targetSourceSixVersionsMatched=$true;packagedApplicationIdentityAndVersionMatched=$true;sourceBuildExecutableByteProvenanceReconstructed=$false;requiredExtractedFiles=$inventory.required;actualExtractedFiles=$inventory.actual;optionalUninstaller=$inventory.optionalUninstaller;optionalUninstallerExcluded=[bool]$script:OptionalUninstallerExcluded;ocrBundled=$false;manifestSignatureTextBound=$true;detachedUpdaterCryptographyVerified=$false;installedBehaviorVerified=$false}
+ baseResources=@($resourceReceipts|Sort-Object target);ocr=[ordered]@{identity=$inventory.ocrIdentity;resources=$ocrReceipts};signatures=[ordered]@{expectedPublisher=$ExpectedPublisher;installer='Valid';application='Valid';pdfium='Valid';ocrEngine='Valid';trustedTimestampsRequired=$true}
+ verification=[ordered]@{draft=$true;prerelease=$false;exactAssetInventory=$true;exactExtractedInventory=$true;targetSourceSixVersionsMatched=$true;packagedApplicationIdentityAndVersionMatched=$true;sourceBuildExecutableByteProvenanceReconstructed=$false;requiredExtractedFiles=$inventory.required;actualExtractedFiles=$inventory.actual;optionalUninstaller=$inventory.optionalUninstaller;optionalUninstallerExcluded=[bool]$script:OptionalUninstallerExcluded;ocrBundled=$true;manifestSignatureTextBound=$true;detachedUpdaterCryptographyVerified=$false;installedBehaviorVerified=$false}
 }
 [IO.File]::WriteAllText((Join-Path $outputRoot 'default-draft-verification.json'),($record|ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))
