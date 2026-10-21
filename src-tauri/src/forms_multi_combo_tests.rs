@@ -111,3 +111,17 @@ fn unsupported_choice_flag_combinations_are_still_refused() {
     let mut doc = Document::load_mem(CHOICE).unwrap(); let (id, _) = choice_ids(&doc); doc.get_dictionary_mut(id).unwrap().set("Ff", 2097152i64 | 131072);
     let mut bytes = Vec::new(); doc.save_to(&mut bytes).unwrap(); assert_eq!(FormDocument::query(&session(bytes), 1).status, "unsupported", "multi-select combo");
 }
+
+#[test]
+fn typed_combo_text_matches_labels_only_never_another_options_export() {
+    let (bytes, id, options) = combo_source(""); let (label0, label1) = (options[0].label.clone(), options[1].label.clone());
+    let mut doc = Document::load_mem(&bytes).unwrap();
+    doc.get_dictionary_mut(id).unwrap().get_mut(b"Opt").unwrap().as_array_mut().unwrap()[0] = Object::Array(vec![Object::string_literal(label1.clone().into_bytes()), Object::string_literal(label0.clone().into_bytes())]);
+    let mut crafted = Vec::new(); doc.save_to(&mut crafted).unwrap(); let source = session(crafted);
+    let parsed = FormDocument::parse(&source).unwrap(); let field_id = field_of(&parsed, id).dto.field_id.clone();
+    let filled = fill(&source, FieldValue::Combo { field_id: field_id.clone(), text: label1.clone() }).unwrap();
+    let again = FormDocument::parse(&session(filled.clone())).unwrap(); let choice = field_of(&again, id).dto.choice.as_ref().unwrap();
+    assert_eq!(choice.options.iter().find(|option| Some(&option.option_id) == choice.selected_option_id.as_ref()).unwrap().label, label1, "typing a label selects the option with that label, not the option whose export equals it");
+    assert_eq!(read(&filled, id, b"V").unwrap().as_str().unwrap(), options[1].export.as_bytes(), "the stored value is option 1's own export");
+    assert!(fill(&source, FieldValue::Combo { field_id, text: options[1].export.clone() }).unwrap_err().contains("stored value"), "text equal to an export but to no label is refused rather than guessed");
+}

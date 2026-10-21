@@ -264,10 +264,16 @@ impl EngineDocument for InProcessDocument<'_> {
                 if let Some(field)=annotation.as_form_field() {
                     let name=field.name()?;let expected=*expected.get(name.as_str())?;
                     if let Some(choice)=&expected.choice {
-                        let options=if choice.presentation=="dropdown"{let actual=field.as_combo_box_field()?;if actual.has_editable_text_box()!=choice.editable||actual.is_multiselect(){return None;}actual.options()}else{let actual=field.as_list_box_field()?;if actual.is_multiselect()!=choice.multiple{return None;}actual.options()};
+                        let(options,combo_value)=if choice.presentation=="dropdown"{let actual=field.as_combo_box_field()?;if actual.has_editable_text_box()!=choice.editable||actual.is_multiselect(){return None;}(actual.options(),Some(actual.value()))}else{let actual=field.as_list_box_field()?;if actual.is_multiselect()!=choice.multiple{return None;}(actual.options(),None)};
                         if options.len()!=choice.options.len(){return None;}
                         for(index,option)in choice.options.iter().enumerate(){let actual=options.get(index).ok()?;if actual.index()!=index||actual.label().map(String::as_str)!=Some(option.label.as_str())||actual.is_set()!=(if choice.multiple{choice.selected_option_ids.contains(&option.option_id)}else{choice.selected_option_id.as_ref()==Some(&option.option_id)}){return None;}}
-                        if values.insert(name,Some(expected.value.clone())).is_some(){return None;}continue;
+                        // The value comes from what the engine reports as selected, not from the expected field. PDFium's combo API reports the
+                        // selected option's label; typed text that matches no option cannot be read through it, so a custom combo value must read
+                        // as nothing selected and its text is the one value taken from the expected field.
+                        let selected:Vec<&crate::forms::ChoiceOption>=choice.options.iter().enumerate().filter(|(index,_)|options.get(*index).ok().is_some_and(|actual|actual.is_set())).map(|(_,option)|option).collect();
+                        if let Some(read)=combo_value{if read.as_deref()!=selected.first().map(|option|option.label.as_str()){return None;}}
+                        let value=if selected.is_empty()&&!choice.text.is_empty(){expected.value.clone()}else{selected.iter().map(|option|option.export.as_str()).collect::<Vec<_>>().join("\n")};
+                        if values.insert(name,Some(value)).is_some(){return None;}continue;
                     }
                     if let Some(radio)=&expected.radio {
                         let actual=field.as_radio_button_field()?;let index=actual.index_in_group() as usize;let option=radio.options.get(index)?;
