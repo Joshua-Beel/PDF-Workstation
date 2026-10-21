@@ -59,7 +59,7 @@ fn scrolling_list(top: usize) -> (Vec<u8>, ObjectId) {
     let trial = style(&doc, &form, doc.get_dictionary(id).unwrap()).unwrap(); let height = 4.0 * trial.border + 5.4 * trial.size;
     doc.get_dictionary_mut(id).unwrap().set("Rect", vec![Object::Real(rect[0]), Object::Real(rect[1]), Object::Real(rect[0] + 200.0), Object::Real(rect[1] + height)]);
     let mut st = style(&doc, &form, doc.get_dictionary(id).unwrap()).unwrap(); st.top = top; assert_eq!(list_slots(&st), 4);
-    let info = ChoiceInfo { presentation: "list", options: labels.iter().enumerate().map(|(n, label)| ChoiceOption { option_id: format!("o{n}"), label: label.clone(), export: label.clone() }).collect(), selected_option_id: None };
+    let info = ChoiceInfo { presentation: "list", options: labels.iter().enumerate().map(|(n, label)| ChoiceOption { option_id: format!("o{n}"), label: label.clone(), export: label.clone() }).collect(), selected_option_id: None, multiple: false, editable: false, selected_option_ids: Vec::new(), text: String::new() };
     let content = choice_appearance(&st, &info).unwrap().encode().unwrap();
     let normal = doc.get_dictionary(id).unwrap().get(b"AP").unwrap().as_dict().unwrap().get(b"N").unwrap().as_reference().unwrap();
     let stream = doc.get_object_mut(normal).unwrap().as_stream_mut().unwrap(); stream.dict.remove(b"Filter"); stream.set_content(content);

@@ -90,9 +90,9 @@ export const redactDocument = (request: RedactDocumentRequest) => invoke<SavedCo
 export type FormTextField = { kind: 'text'; fieldId: string; name: string; page: number; value: string; maxLength: number | null };
 export type FormCheckboxField = { kind: 'checkbox'; fieldId: string; name: string; page: number; checked: boolean };
 export type FormRadioField = { kind: 'radio'; fieldId: string; name: string; page: number; options: { optionId: string; label: string }[]; selectedOptionId: string | null };
-export type FormChoiceField = { kind: 'choice'; fieldId: string; name: string; page: number; presentation: 'dropdown' | 'list'; options: { optionId: string; label: string }[]; selectedOptionId: string | null };
+export type FormChoiceField = { kind: 'choice'; fieldId: string; name: string; page: number; presentation: 'dropdown' | 'list'; options: { optionId: string; label: string }[]; selectedOptionId: string | null; multiple: boolean; editable: boolean; selectedOptionIds: string[]; text: string };
 export type FormField = FormTextField | FormCheckboxField | FormRadioField | FormChoiceField;
-export type FormPatch = { fieldId: string; kind: 'text'; value: string } | { fieldId: string; kind: 'checkbox'; checked: boolean } | { fieldId: string; kind: 'radio'; optionId: string } | { fieldId: string; kind: 'choice'; optionId: string | null };
+export type FormPatch = { fieldId: string; kind: 'text'; value: string } | { fieldId: string; kind: 'checkbox'; checked: boolean } | { fieldId: string; kind: 'radio'; optionId: string } | { fieldId: string; kind: 'choice'; optionId: string | null } | { fieldId: string; kind: 'choices'; optionIds: string[] } | { fieldId: string; kind: 'combo'; text: string };
 export type DocumentFormFields = { documentId: number; revision: number; status: 'supported' | 'unsupported'; reason: string | null; input: 'printable-latin1'; valueByteLimit: number; fields: FormField[] };
 export const documentFormFields = (id: number, revision: number) => invoke<DocumentFormFields>('document_form_fields', { id, revision });
 export const fillFormCopy = (id: number, revision: number, values: FormPatch[]) => invoke<SavedCopy | null>('fill_form_copy', { id, revision, values });

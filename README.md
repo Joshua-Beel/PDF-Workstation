@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- Fill forms: multi-select list boxes (checkbox list, several option ids per patch) and editable combo boxes (typed Latin-1 text or a listed option) (SM3; source tests only).
 - Forms breadth follow-ups (SM3; source tests only): U+00A0 refused, overflow-safe encoding differences, list-box labels encoded like other text, full Latin-1 width table and more tests.
 - Fill forms list boxes may have more options than visible rows (SM3; source tests only): the scroll position (`/TI`) is validated and an out-of-view choice scrolls into view.
 - Fill forms text values accept printable ASCII plus Latin-1 letters and symbols (SM3; source tests only): WinAnsi appearance bytes, UTF-16 value, Latin-1 Helvetica widths. Not Unicode beyond Latin-1.

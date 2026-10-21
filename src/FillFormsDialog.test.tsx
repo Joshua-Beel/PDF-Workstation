@@ -5,7 +5,7 @@ import type { DocumentFormFields, SavedCopy } from './bridge';
 import type { DocumentInfo } from './model';
 
 const document: DocumentInfo = { id: 4, name: 'form.pdf', path: 'C:/form.pdf', pages: [{ width: 612, height: 792 }], revision: 7, dirty: true, can_undo: true, can_redo: false };
-const fields: DocumentFormFields = { documentId: 4, revision: 7, status: 'supported', reason: null, input: 'printable-latin1', valueByteLimit: 4096, fields: [{ kind: 'text', fieldId: 'name', name: 'Name', page: 0, value: 'Ada', maxLength: 12 }, { kind: 'text', fieldId: 'city', name: 'City', page: 0, value: '', maxLength: null }, { kind: 'checkbox', fieldId: 'approved', name: 'Approve terms', page: 1, checked: true }, { kind: 'checkbox', fieldId: 'updates', name: 'Receive updates', page: 1, checked: false }, { kind: 'radio', fieldId: 'contact', name: 'Contact method', page: 2, options: [{ optionId: 'contact-email', label: 'Email updates' }, { optionId: 'contact-post', label: 'Postal mail' }], selectedOptionId: 'contact-email' }, { kind: 'radio', fieldId: 'frequency', name: 'Contact frequency', page: 2, options: [{ optionId: 'frequency-weekly', label: 'Weekly' }, { optionId: 'frequency-monthly', label: 'Monthly' }], selectedOptionId: null }, { kind: 'choice', fieldId: 'shipping', name: 'Shipping method', page: 3, presentation: 'dropdown', options: [{ optionId: 'shipping-ground', label: 'Ground' }, { optionId: 'shipping-air', label: 'Air' }], selectedOptionId: 'shipping-ground' }, { kind: 'choice', fieldId: 'window', name: 'Delivery window', page: 3, presentation: 'list', options: [{ optionId: 'window-morning', label: 'Morning' }, { optionId: 'window-afternoon', label: 'Afternoon' }, { optionId: 'window-evening', label: 'Evening' }], selectedOptionId: null }] };
+const fields: DocumentFormFields = { documentId: 4, revision: 7, status: 'supported', reason: null, input: 'printable-latin1', valueByteLimit: 4096, fields: [{ kind: 'text', fieldId: 'name', name: 'Name', page: 0, value: 'Ada', maxLength: 12 }, { kind: 'text', fieldId: 'city', name: 'City', page: 0, value: '', maxLength: null }, { kind: 'checkbox', fieldId: 'approved', name: 'Approve terms', page: 1, checked: true }, { kind: 'checkbox', fieldId: 'updates', name: 'Receive updates', page: 1, checked: false }, { kind: 'radio', fieldId: 'contact', name: 'Contact method', page: 2, options: [{ optionId: 'contact-email', label: 'Email updates' }, { optionId: 'contact-post', label: 'Postal mail' }], selectedOptionId: 'contact-email' }, { kind: 'radio', fieldId: 'frequency', name: 'Contact frequency', page: 2, options: [{ optionId: 'frequency-weekly', label: 'Weekly' }, { optionId: 'frequency-monthly', label: 'Monthly' }], selectedOptionId: null }, { kind: 'choice', fieldId: 'shipping', name: 'Shipping method', page: 3, presentation: 'dropdown', options: [{ optionId: 'shipping-ground', label: 'Ground' }, { optionId: 'shipping-air', label: 'Air' }], selectedOptionId: 'shipping-ground', multiple: false, editable: false, selectedOptionIds: [], text: '' }, { kind: 'choice', fieldId: 'window', name: 'Delivery window', page: 3, presentation: 'list', options: [{ optionId: 'window-morning', label: 'Morning' }, { optionId: 'window-afternoon', label: 'Afternoon' }, { optionId: 'window-evening', label: 'Evening' }], selectedOptionId: null, multiple: false, editable: false, selectedOptionIds: [], text: '' }] };
 const output: SavedCopy = { path: 'C:/filled.pdf', document: { ...document, id: 8, name: 'filled.pdf', path: 'C:/filled.pdf', revision: 0, dirty: false, can_undo: false } };
 const save = (ui: ReactTestRenderer) => ui.root.findAllByType('button').find(button => button.children.join('') === 'Save filled copy')!;
 
@@ -160,5 +160,34 @@ describe('FillFormsDialog', () => {
     expect(pending.ui.root.findByProps({ role: 'alert' }).children.join('')).toContain('Document changed');
     expect(pending.ui.root.findByProps({ 'aria-label': 'City' }).props.value).toBe('Paris');
     act(() => pending.ui.unmount());
+  });
+
+  describe('multi-select lists and editable combo boxes', () => {
+    const options = [{ optionId: 'a', label: 'Alpha' }, { optionId: 'b', label: 'Beta' }, { optionId: 'c', label: 'Gamma' }];
+    const multi = { kind: 'choice' as const, fieldId: 'tags', name: 'Tags', page: 0, presentation: 'list' as const, options, selectedOptionId: null, multiple: true, editable: false, selectedOptionIds: ['a', 'c'], text: '' };
+    const combo = { kind: 'choice' as const, fieldId: 'town', name: 'Town', page: 0, presentation: 'dropdown' as const, options, selectedOptionId: null, multiple: false, editable: true, selectedOptionIds: [], text: 'Café' };
+    const both: DocumentFormFields = { ...fields, fields: [multi, combo] };
+    it('sends one ordered optionIds patch for a changed multi-select and a combo patch for typed text', async () => {
+      const { ui, fill } = await mount({ formFields: both });
+      expect(ui.root.findByProps({ 'aria-label': 'Tags: Alpha, page 1' }).props.checked).toBe(true);
+      expect(ui.root.findByProps({ 'aria-label': 'Tags: Beta, page 1' }).props.checked).toBe(false);
+      expect(ui.root.findByProps({ 'aria-label': 'Town, page 1' }).props.value).toBe('Café');
+      expect(formPatches(both.fields, { tags: ['a', 'c'], town: { text: 'Café' } })).toEqual([]);
+      act(() => ui.root.findByProps({ 'aria-label': 'Tags: Beta, page 1' }).props.onChange({ target: { checked: true } }));
+      act(() => ui.root.findByProps({ 'aria-label': 'Tags: Alpha, page 1' }).props.onChange({ target: { checked: false } }));
+      act(() => ui.root.findByProps({ 'aria-label': 'Town, page 1' }).props.onChange({ target: { value: 'Brand new' } }));
+      await act(async () => save(ui).props.onClick());
+      expect(fill).toHaveBeenCalledWith(4, 7, [{ fieldId: 'tags', kind: 'choices', optionIds: ['b', 'c'] }, { fieldId: 'town', kind: 'combo', text: 'Brand new' }]);
+      act(() => ui.unmount());
+    });
+    it('sends an empty selection and an empty text to clear, and validates typed text like text fields', () => {
+      expect(formPatches(both.fields, { tags: [], town: { text: '' } })).toEqual([{ fieldId: 'tags', kind: 'choices', optionIds: [] }, { fieldId: 'town', kind: 'combo', text: '' }]);
+      expect(validateFormPatches(both.fields, { tags: ['a', 'c'], town: { text: '世界' } }, 4096)).toContain('Latin-1');
+      expect(validateFormPatches(both.fields, { tags: ['a', 'c'], town: { text: 'x'.repeat(4097) } }, 4096)).toContain('value limit');
+      expect(validateFormPatches(both.fields, { tags: ['a', 'zzz'], town: { text: 'Café' } }, 4096)).toContain('Reload');
+      expect(validateFormPatches(both.fields, { tags: ['a', 'a'], town: { text: 'Café' } }, 4096)).toContain('Reload');
+      expect(validateFormPatches(both.fields, { tags: ['a', 'c'], town: 'a' }, 4096)).toContain('Reload');
+      expect(validateFormPatches(both.fields, { tags: ['b'], town: { text: 'Café' } }, 4096)).toBeNull();
+    });
   });
 });

@@ -6202,4 +6202,23 @@ mod tests {
             println!("timing text file={name} median_ms={:.2}", median(samples));
         }
     }
+    #[test]
+    fn multi_select_lists_and_editable_combos_fill_and_read_back_through_pdfium() {
+        use crate::forms::{multi_combo_tests::{combo_source, multi_source}, FieldValue};
+        let root=PathBuf::from(env!("CARGO_MANIFEST_DIR"));let service=PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));let folder=tempfile::tempdir().unwrap();
+        let open=|name:&str,bytes:&[u8]|{let path=folder.path().join(name);std::fs::write(&path,bytes).unwrap();call(&service,|reply|Request::Open(path.clone(),reply)).unwrap()};
+        let fields=|id:u64|{let query=call(&service,|reply|Request::FormFields(id,0,reply)).unwrap();assert_eq!(query.status,"supported","{}",query.reason.unwrap_or_default());query.fields};
+        let fill=|id:u64,values:Vec<FieldValue>,name:&str|{let path=folder.path().join(name);call(&service,|reply|Request::FillFormCopy(id,0,values,path.clone(),reply)).unwrap()};
+        let (bytes,list_id)=multi_source(&[1,3]);let source=open("multi.pdf",&bytes);
+        let all=fields(source.id);let list=all.iter().find(|field|field.choice.as_ref().is_some_and(|choice|choice.multiple)).unwrap();let ids:Vec<String>=list.choice.as_ref().unwrap().options.iter().map(|option|option.option_id.clone()).collect();assert_eq!(list.choice.as_ref().unwrap().selected_option_ids,[ids[1].clone(),ids[3].clone()]);let _=list_id;
+        let output=fill(source.id,vec![FieldValue::Choices{field_id:list.field_id.clone(),option_ids:vec![ids[7].clone(),ids[0].clone(),ids[3].clone()]}],"multi-out.pdf");
+        let after=fields(output.document.id);let list=after.iter().find(|field|field.choice.as_ref().is_some_and(|choice|choice.multiple)).unwrap();assert_eq!(list.choice.as_ref().unwrap().selected_option_ids,[ids[0].clone().replace("choice","choice"),ids[3].clone(),ids[7].clone()].iter().map(|id|id.to_string()).collect::<Vec<_>>());
+        let cleared=fill(output.document.id,vec![FieldValue::Choices{field_id:list.field_id.clone(),option_ids:vec![]}],"multi-cleared.pdf");assert!(fields(cleared.document.id).iter().all(|field|field.choice.as_ref().is_none_or(|choice|choice.selected_option_ids.is_empty())));
+        let (bytes,_,options)=combo_source("Typed text");let source=open("combo.pdf",&bytes);
+        let all=fields(source.id);let combo=all.iter().find(|field|field.choice.as_ref().is_some_and(|choice|choice.editable)).unwrap();assert_eq!(combo.choice.as_ref().unwrap().text,"Typed text");
+        let output=fill(source.id,vec![FieldValue::Combo{field_id:combo.field_id.clone(),text:"Caf\u{e9} typed".into()}],"combo-out.pdf");
+        let after=fields(output.document.id);let combo=after.iter().find(|field|field.choice.as_ref().is_some_and(|choice|choice.editable)).unwrap();assert_eq!(combo.choice.as_ref().unwrap().text,"Caf\u{e9} typed");
+        let picked=fill(output.document.id,vec![FieldValue::Choice{field_id:combo.field_id.clone(),option_id:Some(options[1].option_id.clone())}],"combo-picked.pdf");
+        let after=fields(picked.document.id);let combo=after.iter().find(|field|field.choice.as_ref().is_some_and(|choice|choice.editable)).unwrap();assert_eq!(combo.choice.as_ref().unwrap().selected_option_id.as_ref(),Some(&options[1].option_id));assert!(combo.choice.as_ref().unwrap().text.is_empty());
+    }
 }

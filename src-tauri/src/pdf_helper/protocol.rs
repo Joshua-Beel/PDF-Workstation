@@ -464,6 +464,12 @@ pub(crate) fn put_form_fields(writer: &mut FrameWriter, fields: &[FormField]) {
                 writer.str(&option.label);
             }
             writer.opt(choice.selected_option_id.as_deref(), FrameWriter::str);
+            writer.bool(choice.multiple);
+            writer.bool(choice.editable);
+            writer.count(choice.selected_option_ids.len());
+            for id in &choice.selected_option_ids {
+                writer.str(id);
+            }
         });
     }
 }
@@ -492,7 +498,12 @@ pub(crate) fn get_form_fields(reader: &mut WireReader<'_>) -> Result<Vec<FormFie
             let options = (0..count)
                 .map(|_| Ok(ChoiceOption { option_id: text(reader)?, label: text(reader)?, export: String::new() }))
                 .collect::<Result<Vec<_>, Malformed>>()?;
-            Ok(ChoiceInfo { presentation, options, selected_option_id: reader.opt(text)? })
+            let selected_option_id = reader.opt(text)?;
+            let multiple = reader.bool()?;
+            let editable = reader.bool()?;
+            let selected = reader.count(MAX_FORM_FIELDS, 4)?;
+            let selected_option_ids = (0..selected).map(|_| text(reader)).collect::<Result<Vec<_>, Malformed>>()?;
+            Ok(ChoiceInfo { presentation, options, selected_option_id, multiple, editable, selected_option_ids, text: String::new() })
         })?;
         fields.push(FormField { field_id: String::new(), name, page: 0, value, max_length: None, checked, on_state, radio, choice });
     }

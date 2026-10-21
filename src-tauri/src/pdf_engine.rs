@@ -264,9 +264,9 @@ impl EngineDocument for InProcessDocument<'_> {
                 if let Some(field)=annotation.as_form_field() {
                     let name=field.name()?;let expected=*expected.get(name.as_str())?;
                     if let Some(choice)=&expected.choice {
-                        let options=if choice.presentation=="dropdown"{let actual=field.as_combo_box_field()?;if actual.has_editable_text_box()||actual.is_multiselect(){return None;}actual.options()}else{let actual=field.as_list_box_field()?;if actual.is_multiselect(){return None;}actual.options()};
+                        let options=if choice.presentation=="dropdown"{let actual=field.as_combo_box_field()?;if actual.has_editable_text_box()!=choice.editable||actual.is_multiselect(){return None;}actual.options()}else{let actual=field.as_list_box_field()?;if actual.is_multiselect()!=choice.multiple{return None;}actual.options()};
                         if options.len()!=choice.options.len(){return None;}
-                        for(index,option)in choice.options.iter().enumerate(){let actual=options.get(index).ok()?;if actual.index()!=index||actual.label().map(String::as_str)!=Some(option.label.as_str())||actual.is_set()!=(choice.selected_option_id.as_ref()==Some(&option.option_id)){return None;}}
+                        for(index,option)in choice.options.iter().enumerate(){let actual=options.get(index).ok()?;if actual.index()!=index||actual.label().map(String::as_str)!=Some(option.label.as_str())||actual.is_set()!=(if choice.multiple{choice.selected_option_ids.contains(&option.option_id)}else{choice.selected_option_id.as_ref()==Some(&option.option_id)}){return None;}}
                         if values.insert(name,Some(expected.value.clone())).is_some(){return None;}continue;
                     }
                     if let Some(radio)=&expected.radio {

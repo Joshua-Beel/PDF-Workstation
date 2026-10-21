@@ -61,7 +61,7 @@ mod tests {
     }
     #[test]
     fn choices_refuse_unsafe_flags_ambiguous_options_indices_styles_and_patch_kinds() {
-        for kind in 0..17{let mut doc=Document::load_mem(CHOICE).unwrap();let ids=field_ids(&doc);let field=doc.get_dictionary_mut(ids[0]).unwrap();match kind{0=>field.set("Ff",131072|262144),1=>field.set("Ff",131072|2097152),2=>field.set("Ff",131072|524288),3=>field.set("Ff",131073),4=>field.set("I",vec![Object::Integer(0)]),5=>field.set("I",vec![Object::Integer(1),Object::Integer(2)]),6=>field.set("TI",1),7=>field.set("V",Object::string_literal("unknown")),8=>field.set("DV",Object::string_literal("unknown")),9=>field.set("Opt",vec![Object::string_literal("duplicate");2]),10=>field.set("Opt",vec![Object::string_literal("A");33]),11=>field.set("Opt",vec![Object::Array(vec![Object::string_literal("export"),Object::string_literal("label"),Object::string_literal("extra")])]),12=>field.set("Q",1),13=>field.set("F",6),14=>field.set("Parent",ids[1]),15=>field.set("AA",dictionary!{}),_=>field.set("Opt",vec![Object::string_literal("é")])}let mut bytes=Vec::new();doc.save_to(&mut bytes).unwrap();assert_eq!(FormDocument::query(&session(bytes),1).status,"unsupported","Choice adversarial case {kind}");}
+        for kind in 0..17{let mut doc=Document::load_mem(CHOICE).unwrap();let ids=field_ids(&doc);let field=doc.get_dictionary_mut(ids[0]).unwrap();match kind{0=>field.set("Ff",131072|262144|524288),1=>field.set("Ff",131072|2097152),2=>field.set("Ff",131072|524288),3=>field.set("Ff",131073),4=>field.set("I",vec![Object::Integer(0)]),5=>field.set("I",vec![Object::Integer(1),Object::Integer(2)]),6=>field.set("TI",1),7=>field.set("V",Object::string_literal("unknown")),8=>field.set("DV",Object::string_literal("unknown")),9=>field.set("Opt",vec![Object::string_literal("duplicate");2]),10=>field.set("Opt",vec![Object::string_literal("A");33]),11=>field.set("Opt",vec![Object::Array(vec![Object::string_literal("export"),Object::string_literal("label"),Object::string_literal("extra")])]),12=>field.set("Q",1),13=>field.set("F",6),14=>field.set("Parent",ids[1]),15=>field.set("AA",dictionary!{}),_=>field.set("Opt",vec![Object::string_literal("é")])}let mut bytes=Vec::new();doc.save_to(&mut bytes).unwrap();assert_eq!(FormDocument::query(&session(bytes),1).status,"unsupported","Choice adversarial case {kind}");}
         let source=session(CHOICE.to_vec());let field=FormDocument::parse(&source).unwrap().fields[0].dto.clone();for patches in[vec![FieldValue::Text {field_id:field.field_id.clone(),value:"North Hub".into()}],vec![FieldValue::Radio {field_id:field.field_id.clone(),option_id:Some(field.choice.as_ref().unwrap().options[0].option_id.clone())}],vec![FieldValue::Choice {field_id:field.field_id.clone(),option_id:Some("unknown".into())}]]{assert!(FormDocument::parse(&source).unwrap().prepare(&patches).is_err());}assert_eq!(source.source,CHOICE);
     }
     #[test]
@@ -294,7 +294,7 @@ pub(crate) mod hardening;
 #[derive(Clone, Debug)]
 pub struct FormField { pub field_id: String, pub name: String, pub page: usize, pub value: String, pub max_length: Option<usize>, pub checked: Option<bool>, pub(crate) on_state: Option<String>, pub radio: Option<RadioInfo>, pub choice:Option<ChoiceInfo> }
 #[derive(Clone,Debug)]
-pub struct ChoiceInfo { pub presentation:&'static str, pub options:Vec<ChoiceOption>, pub selected_option_id:Option<String> }
+pub struct ChoiceInfo { pub presentation:&'static str, pub options:Vec<ChoiceOption>, pub selected_option_id:Option<String>, pub multiple:bool, pub editable:bool, pub selected_option_ids:Vec<String>, pub text:String }
 #[derive(Clone,Debug,Serialize)]
 #[serde(rename_all="camelCase")]
 pub struct ChoiceOption { pub option_id:String, pub label:String, #[serde(skip)] pub(crate) export:String }
@@ -305,9 +305,9 @@ pub struct RadioInfo { pub options:Vec<RadioOption>, pub selected_option_id:Opti
 pub struct RadioOption { pub option_id:String, pub label:String, #[serde(skip)] pub(crate) object:ObjectId }
 impl Serialize for FormField {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut map = serializer.serialize_map(Some(if self.choice.is_some(){7}else{6}))?;
+        let mut map = serializer.serialize_map(Some(if self.choice.is_some(){11}else{6}))?;
         map.serialize_entry("fieldId", &self.field_id)?; map.serialize_entry("name", &self.name)?; map.serialize_entry("page", &self.page)?;
-        if let Some(choice)=&self.choice {map.serialize_entry("kind","choice")?;map.serialize_entry("presentation",choice.presentation)?;map.serialize_entry("options",&choice.options)?;map.serialize_entry("selectedOptionId",&choice.selected_option_id)?;}
+        if let Some(choice)=&self.choice {map.serialize_entry("kind","choice")?;map.serialize_entry("presentation",choice.presentation)?;map.serialize_entry("options",&choice.options)?;map.serialize_entry("selectedOptionId",&choice.selected_option_id)?;map.serialize_entry("multiple",&choice.multiple)?;map.serialize_entry("editable",&choice.editable)?;map.serialize_entry("selectedOptionIds",&choice.selected_option_ids)?;map.serialize_entry("text",&choice.text)?;}
         else if let Some(radio)=&self.radio {map.serialize_entry("kind","radio")?;map.serialize_entry("options",&radio.options)?;map.serialize_entry("selectedOptionId",&radio.selected_option_id)?;}
         else if let Some(checked) = self.checked { map.serialize_entry("kind", "checkbox")?; map.serialize_entry("checked", &checked)?; }
         else { map.serialize_entry("kind", "text")?; map.serialize_entry("value", &self.value)?; map.serialize_entry("maxLength", &self.max_length)?; }
@@ -321,9 +321,11 @@ pub enum FieldValue {
     Checkbox { #[serde(rename = "fieldId")] field_id: String, checked: bool },
     Radio { #[serde(rename="fieldId")] field_id:String, #[serde(rename="optionId", deserialize_with="present_option")] option_id:Option<String> },
     Choice { #[serde(rename="fieldId")] field_id:String, #[serde(rename="optionId", deserialize_with="present_option")] option_id:Option<String> },
+    Choices { #[serde(rename="fieldId")] field_id:String, #[serde(rename="optionIds")] option_ids:Vec<String> },
+    Combo { #[serde(rename="fieldId")] field_id:String, text:String },
 }
 fn present_option<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> { Option::<String>::deserialize(deserializer) }
-impl FieldValue { fn field_id(&self) -> &str { match self { Self::Text { field_id, .. } | Self::Checkbox { field_id, .. } | Self::Radio {field_id,..} | Self::Choice {field_id,..} => field_id } } }
+impl FieldValue { fn field_id(&self) -> &str { match self { Self::Text { field_id, .. } | Self::Checkbox { field_id, .. } | Self::Radio {field_id,..} | Self::Choice {field_id,..} | Self::Choices {field_id,..} | Self::Combo {field_id,..} => field_id } } }
 
 #[derive(Clone)]
 struct Style { width: f32, height: f32, border: f32, background: Option<Vec<f32>>, border_color: Option<Vec<f32>>, text_color: Vec<f32>, font: String, size: f32, font_object: Object, winansi: bool, top: usize }
@@ -588,9 +590,10 @@ fn fits_style(style:&Style,value:&str,max_length:Option<usize>)->Result<(),Strin
 }
 
 fn list_slots(style:&Style)->usize{((style.height-4.0*style.border)/(1.2*style.size)).floor() as usize}
+fn selected_indices(choice:&ChoiceInfo)->Vec<usize>{if choice.multiple{choice.options.iter().enumerate().filter(|(_,option)|choice.selected_option_ids.contains(&option.option_id)).map(|(index,_)|index).collect()}else{choice.options.iter().position(|option|Some(&option.option_id)==choice.selected_option_id.as_ref()).into_iter().collect()}}
 fn choice_appearance(style:&Style,choice:&ChoiceInfo)->Result<Content<Vec<Operation>>,String> {
-    let selected=choice.options.iter().position(|option|Some(&option.option_id)==choice.selected_option_id.as_ref());
-    if choice.presentation=="dropdown"{return Ok(appearance(style,selected.map(|index|choice.options[index].label.as_str()).unwrap_or("")));}
+    let selected=selected_indices(choice);
+    if choice.presentation=="dropdown"{return Ok(appearance(style,selected.first().map(|index|choice.options[*index].label.as_str()).unwrap_or(choice.text.as_str())));}
     let inner=style.height-4.0*style.border;let slots=list_slots(style);
     if slots==0{return Err("This list box is too short to display any option.".into());}
     let top=style.top;if top>0&&top+slots>choice.options.len().max(slots){return Err("The list box scroll position is out of range.".into());}
@@ -598,24 +601,30 @@ fn choice_appearance(style:&Style,choice:&ChoiceInfo)->Result<Content<Vec<Operat
     let leading=inner/slots as f32;let last=style.height-2.0*style.border-style.size-(visible.len()-1) as f32*leading;
     if last-0.225*style.size<2.0*style.border{return Err("The list box cannot display its options without clipping descenders.".into());}
     let mut content=appearance(style,"");content.operations.truncate(content.operations.len()-4);
-    if let Some(index)=selected.filter(|index|(top..top+slots).contains(index)){content.operations.extend([op("rg",&[0.600006,0.756866,0.854904]),op("re",&[2.0*style.border,style.height-2.0*style.border-(index-top+1) as f32*leading,style.width-4.0*style.border,leading]),op("f",&[])]);}
+    for index in selected.iter().copied().filter(|index|(top..top+slots).contains(index)){content.operations.extend([op("rg",&[0.600006,0.756866,0.854904]),op("re",&[2.0*style.border,style.height-2.0*style.border-(index-top+1) as f32*leading,style.width-4.0*style.border,leading]),op("f",&[])]);}
     content.operations.extend([op("g",&[0.0]),op("G",&[0.0])]);
-    for(row,option)in visible.iter().enumerate(){let index=top+row;content.operations.push(op("BT",&[]));if row==0{content.operations.push(Operation::new("Tf",vec![Object::Name(style.font.as_bytes().to_vec()),Object::Real(style.size)]));}content.operations.extend([if Some(index)==selected{op("g",&[0.0])}else{paint(&style.text_color,false)},op("Td",&[4.0*style.border,style.height-2.0*style.border-style.size-row as f32*leading]),Operation::new("Tj",vec![Object::string_literal(win_bytes(&option.label))]),op("ET",&[])]);}
+    for(row,option)in visible.iter().enumerate(){let index=top+row;content.operations.push(op("BT",&[]));if row==0{content.operations.push(Operation::new("Tf",vec![Object::Name(style.font.as_bytes().to_vec()),Object::Real(style.size)]));}content.operations.extend([if selected.contains(&index){op("g",&[0.0])}else{paint(&style.text_color,false)},op("Td",&[4.0*style.border,style.height-2.0*style.border-style.size-row as f32*leading]),Operation::new("Tj",vec![Object::string_literal(win_bytes(&option.label))]),op("ET",&[])]);}
     content.operations.extend([op("Q",&[]),op("EMC",&[])]);Ok(content)
 }
 fn choice_field(document:&Document,form:&Dictionary,field:&Dictionary,id:ObjectId,ap_bytes:&mut usize)->Result<(ChoiceInfo,Style,String),String> {
     let flags=field.get(b"Ff").ok().map(|value|value.as_i64().map_err(|_|"The choice field flags are invalid.")).transpose()?.unwrap_or(0);
-    let presentation=match flags{0|2=>"list",131072|131074=>"dropdown",_=>return Err("Only noneditable single-select dropdowns and list boxes are supported.".into())};
+    let(presentation,multiple,editable)=match flags&!2{0=>("list",false,false),2097152=>("list",true,false),131072=>("dropdown",false,false),393216=>("dropdown",false,true),_=>return Err("Only dropdowns, editable combo boxes, and single or multi-select list boxes without sorting or commit-on-change flags are supported.".into())};
     let top_index=match field.get(b"TI").ok(){None=>0,Some(value)=>usize::try_from(value.as_i64().map_err(|_|"The choice top index is invalid.")?).map_err(|_|"The choice top index is invalid.")?};
     if presentation=="dropdown"&&top_index!=0{return Err("Dropdowns with a scrolled top index are unsupported.".into());}
     let opts=object(document,field.get(b"Opt").map_err(|_|"The choice options are missing.")?)?.as_array().map_err(|_|"The choice options are invalid.")?;
     if !(1..=32).contains(&opts.len()){return Err("Each choice field requires between one and 32 options.".into());}
     let mut options=Vec::new();let mut exports=HashSet::new();let mut labels=HashSet::new();
     for(index,value)in opts.iter().enumerate(){let value=object(document,value)?;let(export,label)=match value{Object::String(..)=>{let value=text(value)?;(value.clone(),value)},Object::Array(pair) if pair.len()==2=>(text(object(document,&pair[0])?)?,text(object(document,&pair[1])?)?),_=>return Err("A choice option must be a string or an export/display string pair.".into())};ascii(&export)?;ascii(&label)?;if export.trim().is_empty()||label.trim().is_empty()||!exports.insert(export.clone())||!labels.insert(label.clone()){return Err("Choice export values and display labels must be nonblank and distinct.".into());}options.push(ChoiceOption {option_id:format!("choice-{}-{}-{index}",id.0,id.1),label,export});}
-    let value=field.get(b"V").ok().map(text).transpose()?.unwrap_or_default();ascii(&value)?;let selected=if value.is_empty(){None}else{Some(options.iter().position(|option|option.export==value).ok_or("The choice value does not match a source export option.")?)};
-    if let Ok(indices)=field.get(b"I"){let indices=object(document,indices)?.as_array().map_err(|_|"The choice selected indices are invalid.")?;match selected{None if indices.is_empty()=>{},Some(index) if indices.len()==1&&indices[0].as_i64().ok()==Some(index as i64)=>{},_=>return Err("The choice value and selected index disagree.".into())}}
-    if let Ok(default)=field.get(b"DV"){let default=text(default)?;ascii(&default)?;if !default.is_empty()&&!options.iter().any(|option|option.export==default){return Err("The choice default does not match a source export option.".into());}}
-    let choice=ChoiceInfo {presentation,selected_option_id:selected.map(|index|options[index].option_id.clone()),options};let mut style=style(document,form,field)?;style.top=top_index;for option in &choice.options{fits_style(&style,&option.label,None)?;}let expected=choice_appearance(&style,&choice)?;validate_text_appearance(document,field,&style,&expected,presentation=="list"||selected.is_some(),ap_bytes)?;Ok((choice,style,value))
+    let values:Vec<String>=match field.get(b"V").ok().map(|value|object(document,value)).transpose()?{None=>Vec::new(),Some(Object::Array(items)) if multiple=>items.iter().map(|item|text(object(document,item)?)).collect::<Result<Vec<_>,_>>()?,Some(value)=>{let value=text(value)?;if value.is_empty(){Vec::new()}else{vec![value]}}};
+    if values.len()>options.len(){return Err("The choice has more selected values than options.".into());}
+    let mut selected_indices:Vec<usize>=Vec::new();let mut custom=String::new();
+    for value in &values{if editable{latin(value)?;}else{ascii(value)?;}match options.iter().position(|option|option.export==*value){Some(index)=>{if selected_indices.contains(&index){return Err("The choice selects an option twice.".into());}selected_indices.push(index);},None if editable&&values.len()==1=>custom=value.clone(),None=>return Err("The choice value does not match a source export option.".into())}}
+    selected_indices.sort_unstable();
+    if let Ok(indices)=field.get(b"I"){let indices=object(document,indices)?.as_array().map_err(|_|"The choice selected indices are invalid.")?;if indices.len()!=selected_indices.len()||indices.iter().zip(&selected_indices).any(|(actual,wanted)|actual.as_i64().ok()!=Some(*wanted as i64)){return Err("The choice value and selected index disagree.".into());}}
+    if let Ok(default)=field.get(b"DV"){let default=text(default)?;if editable{latin(&default)?;}else{ascii(&default)?;if !default.is_empty()&&!options.iter().any(|option|option.export==default){return Err("The choice default does not match a source export option.".into());}}}
+    let value=if multiple{selected_indices.iter().map(|index|options[*index].export.as_str()).collect::<Vec<_>>().join("\n")}else if !custom.is_empty(){custom.clone()}else{values.first().cloned().unwrap_or_default()};
+    let selected_ids:Vec<String>=selected_indices.iter().map(|index|options[*index].option_id.clone()).collect();
+    let choice=ChoiceInfo {presentation,selected_option_id:if multiple{None}else{selected_ids.first().cloned()},multiple,editable,selected_option_ids:if multiple{selected_ids}else{Vec::new()},text:custom.clone(),options};let mut style=style(document,form,field)?;style.top=top_index;for option in &choice.options{fits_style(&style,&option.label,None)?;}if !custom.is_empty(){fits_style(&style,&custom,None)?;}let expected=choice_appearance(&style,&choice)?;validate_text_appearance(document,field,&style,&expected,presentation=="list"||!selected_indices.is_empty()||!custom.is_empty(),ap_bytes)?;Ok((choice,style,value))
 }
 
 impl FormDocument {
@@ -716,8 +725,10 @@ impl FormDocument {
                 FieldValue::Text {value,..}=>{fits(field,value)?;let different=*value!=field.dto.value;field.dto.value=value.clone();different},
                 FieldValue::Checkbox {checked,..}=>{let current=field.dto.checked.ok_or("The submitted form patch has the wrong field kind.")?;field.dto.checked=Some(*checked);field.dto.value=checked.to_string();current!=*checked},
                 FieldValue::Radio {option_id,..}=>{let radio=field.dto.radio.as_mut().ok_or("The submitted form patch has the wrong field kind.")?;let option_id=option_id.as_ref().ok_or("A radio group selection cannot be cleared: the form author requires one option to stay selected.")?;let option=radio.options.iter().find(|option|&option.option_id==option_id).ok_or("The radio option no longer exists. Refresh the field list.")?;let different=radio.selected_option_id.as_ref()!=Some(option_id);radio.selected_option_id=Some(option_id.clone());field.dto.value=option.label.clone();different},
-                FieldValue::Choice {option_id:None,..}=>{let choice=field.dto.choice.as_mut().ok_or("The submitted form patch has the wrong field kind.")?;let different=choice.selected_option_id.is_some();choice.selected_option_id=None;field.dto.value=String::new();different},
-                FieldValue::Choice {option_id:Some(option_id),..}=>{let choice=field.dto.choice.as_mut().ok_or("The submitted form patch has the wrong field kind.")?;let option=choice.options.iter().find(|option|&option.option_id==option_id).ok_or("The choice option no longer exists. Refresh the field list.")?;let different=choice.selected_option_id.as_ref()!=Some(option_id);choice.selected_option_id=Some(option_id.clone());field.dto.value=option.export.clone();if choice.presentation=="list"{if let Some(style)=field.style.as_mut(){let slots=list_slots(style);let index=choice.options.iter().position(|option|&option.option_id==option_id).unwrap_or(0);if slots>0&&choice.options.len()>slots&&(index<style.top||index>=style.top+slots){style.top=index.min(choice.options.len()-slots);}}}different},
+                FieldValue::Choice {option_id:None,..}=>{let choice=field.dto.choice.as_mut().filter(|choice|!choice.multiple).ok_or("The submitted form patch has the wrong field kind.")?;let different=choice.selected_option_id.is_some()||!choice.text.is_empty();choice.selected_option_id=None;choice.text.clear();field.dto.value=String::new();different},
+                FieldValue::Choices {option_ids,..}=>{let choice=field.dto.choice.as_mut().filter(|choice|choice.multiple).ok_or("The submitted form patch has the wrong field kind.")?;let mut wanted:Vec<&String>=Vec::new();for id in option_ids{if !choice.options.iter().any(|option|&option.option_id==id){return Err("The choice option no longer exists. Refresh the field list.".into());}if wanted.contains(&id){return Err("A choice option was selected twice.".into());}wanted.push(id);}let ordered:Vec<String>=choice.options.iter().filter(|option|wanted.contains(&&option.option_id)).map(|option|option.option_id.clone()).collect();let different=ordered!=choice.selected_option_ids;choice.selected_option_ids=ordered;field.dto.value=choice.options.iter().filter(|option|choice.selected_option_ids.contains(&option.option_id)).map(|option|option.export.as_str()).collect::<Vec<_>>().join("\n");different},
+                FieldValue::Combo {text:typed,..}=>{let style=field.style.as_ref().ok_or("The submitted form patch has the wrong field kind.")?;let choice=field.dto.choice.as_mut().filter(|choice|choice.editable).ok_or("The submitted form patch has the wrong field kind.")?;let matched=choice.options.iter().find(|option|option.label==*typed||option.export==*typed).map(|option|option.option_id.clone());let(selected,custom)=if typed.is_empty(){(None,String::new())}else if matched.is_some(){(matched,String::new())}else{fits_style(style,typed,None)?;(None,typed.clone())};let different=choice.selected_option_id!=selected||choice.text!=custom;choice.selected_option_id=selected;choice.text=custom;field.dto.value=match choice.options.iter().find(|option|Some(&option.option_id)==choice.selected_option_id.as_ref()){Some(option)=>option.export.clone(),None=>choice.text.clone()};different},
+                FieldValue::Choice {option_id:Some(option_id),..}=>{let choice=field.dto.choice.as_mut().filter(|choice|!choice.multiple).ok_or("The submitted form patch has the wrong field kind.")?;let option=choice.options.iter().find(|option|&option.option_id==option_id).ok_or("The choice option no longer exists. Refresh the field list.")?;let different=choice.selected_option_id.as_ref()!=Some(option_id)||!choice.text.is_empty();choice.selected_option_id=Some(option_id.clone());choice.text.clear();field.dto.value=option.export.clone();if choice.presentation=="list"{if let Some(style)=field.style.as_mut(){let slots=list_slots(style);let index=choice.options.iter().position(|option|&option.option_id==option_id).unwrap_or(0);if slots>0&&choice.options.len()>slots&&(index<style.top||index>=style.top+slots){style.top=index.min(choice.options.len()-slots);}}}different},
             };
             if different{changed.insert(field.dto.field_id.clone());}
         }
@@ -739,8 +750,16 @@ impl FormDocument {
             let content = if let Some(choice)=&field.dto.choice{choice_appearance(style,choice)?}else{appearance(style,&field.dto.value)}.encode().map_err(|_| "Could not encode the form appearance.")?;
             let resources = dictionary! { "Font" => dictionary! { style.font.as_bytes() => style.font_object.clone() }, "ProcSet" => vec![Object::Name(b"PDF".to_vec()), Object::Name(b"Text".to_vec())] };
             let ap = self.document.add_object(Stream::new(dictionary! { "Type" => "XObject", "Subtype" => "Form", "FormType" => 1, "BBox" => real(&[0.0,0.0,style.width,style.height]), "Matrix" => real(&[1.0,0.0,0.0,1.0,0.0,0.0]), "Resources" => resources }, content));
-            let widget = self.document.get_dictionary_mut(field.object).map_err(|_| "The form field disappeared during preparation.")?; widget.set("V", pdf_text(&field.dto.value)); widget.set("AP", dictionary! { "N" => ap });
-            if let Some(choice)=&field.dto.choice{if choice.selected_option_id.is_none(){widget.remove(b"V");widget.remove(b"I");continue;}let index=choice.options.iter().position(|option|Some(&option.option_id)==choice.selected_option_id.as_ref()).ok_or("A choice patch must select one source option.")?;widget.set("I",vec![Object::Integer(index as i64)]);if choice.presentation=="list"&&choice.options.len()>list_slots(style){widget.set("TI",Object::Integer(style.top as i64));}}
+            let widget = self.document.get_dictionary_mut(field.object).map_err(|_| "The form field disappeared during preparation.")?; widget.set("AP", dictionary! { "N" => ap });
+            if let Some(choice)=&field.dto.choice{
+                let selected=selected_indices(choice);
+                if choice.multiple{match selected.len(){0=>{widget.remove(b"V");widget.remove(b"I");},1=>{widget.set("V",pdf_text(&choice.options[selected[0]].export));widget.set("I",vec![Object::Integer(selected[0] as i64)]);},_=>{widget.set("V",selected.iter().map(|index|pdf_text(&choice.options[*index].export)).collect::<Vec<_>>());widget.set("I",selected.iter().map(|index|Object::Integer(*index as i64)).collect::<Vec<_>>());}}continue;}
+                if let Some(index)=selected.first(){widget.set("V",pdf_text(&choice.options[*index].export));widget.set("I",vec![Object::Integer(*index as i64)]);if choice.presentation=="list"&&choice.options.len()>list_slots(style){widget.set("TI",Object::Integer(style.top as i64));}}
+                else if !choice.text.is_empty(){widget.set("V",pdf_text(&choice.text));widget.remove(b"I");}
+                else{widget.remove(b"V");widget.remove(b"I");}
+                continue;
+            }
+            widget.set("V", pdf_text(&field.dto.value));
         }
         let live = reachable(&self.document); self.document.objects.retain(|id, _| live.contains(id));
         let mut bytes = Vec::new(); self.document.save_to(&mut bytes).map_err(|_| "Could not serialize the filled form.")?; if bytes.len() > MAX_OUTPUT { return Err("The filled form output exceeds 256 MiB.".into()); } Ok((bytes, self.fields.into_iter().map(|field| field.dto).collect()))
@@ -753,3 +772,6 @@ mod h2_tests;
 #[cfg(test)]
 #[path = "forms_breadth_tests.rs"]
 mod breadth_tests;
+#[cfg(test)]
+#[path = "forms_multi_combo_tests.rs"]
+pub(crate) mod multi_combo_tests;
