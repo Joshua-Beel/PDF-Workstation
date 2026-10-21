@@ -187,5 +187,7 @@ describe('release workflow contract', () => {
     expect(notes).toContain('PDF signing, certificate signatures or signature validation');
     expect(notes).toContain('every save writes a new copy');
     expect(notes.length).toBeLessThan(4096);
+    expect(readFileSync('.gitattributes', 'utf8').replace(/\r\n?/g, '\n').split('\n')).toContain('docs/release-notes.md text eol=lf');
+    expect(readFileSync('docs/release-notes.md', 'utf8'), 'latest.json notes must not carry CRLF from a Windows checkout').not.toContain('\r');
   });
 });
