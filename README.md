@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- Saved copies after rotate, crop, move or comments keep only objects reachable from the document, so old revisions and orphaned objects in the source no longer travel along (SM2; SM7 L-1; source build).
 - Split folder-picker unit test compares canonical folders, so an 8.3 short TEMP path on CI no longer fails it (SM2; test only).
 - CI fix after its first hosted run failed: full-history checkout for the tests that read pinned commits, and a 15 s timeout on one slow PowerShell workflow test (SM6). Unverified until the next hosted run.
 - Repo renamed to `Joshua-Beel/PDF-Workstation`: workflow guards, release URLs, the updater endpoint for new builds and verifier pins use the new name; older installs keep updating through GitHub's redirects (SM6).

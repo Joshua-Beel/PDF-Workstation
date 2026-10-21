@@ -206,6 +206,7 @@ impl EditSession {
     pub fn note_source(&self, plan: &[PageSpec]) -> Result<Option<Vec<u8>>, String> {
         if !self.notes_changed(plan) { return Ok(None); }
         let mut document = self.load_source()?; crate::comments::write(&mut document, plan)?;
+        crate::pdf_load::prune_unreachable(&mut document);
         let mut bytes = Vec::new(); document.save_to(&mut bytes).map_err(|error| error.to_string())?; Ok(Some(bytes))
     }
     pub fn commit_comments(&mut self, next: Vec<PageSpec>) {
@@ -352,12 +353,37 @@ impl EditSession {
         if let Some(root) = new_root {
             document.objects.insert(root, Object::Dictionary(dictionary! { "Type" => "Pages", "Count" => plan.len() as i64, "Kids" => kids }));
             document.catalog_mut().map_err(|e| e.to_string())?.set("Pages", root);
-            crate::pdf_load::prune_unreachable(&mut document);
+            // A removed page, or a node of the old page tree (whose Kids list every source page), can
+            // still be referenced from a custom key on a kept page, the catalog or the trailer; null
+            // those references so pruning does not keep removed pages alive.
+            let kept: HashSet<ObjectId> = plan.iter().map(|spec| original[spec.source]).collect();
+            let old_tree = document.objects.iter().filter(|(id, object)| **id != root && object.as_dict().ok().and_then(|dict| dict.get(b"Type").ok()).and_then(|value| value.as_name().ok()) == Some(b"Pages".as_slice())).map(|(id, _)| *id);
+            let removed: HashSet<ObjectId> = original.iter().copied().filter(|id| !kept.contains(id)).chain(old_tree).collect();
+            null_references(&mut document, &removed);
         }
+        // Keep only objects reachable from the trailer (SM7 L-1): superseded incremental revisions and
+        // freed objects reloaded from an object stream never reach a copy, structural edit or not.
+        crate::pdf_load::prune_unreachable(&mut document);
         let mut bytes = Vec::new();
         document.save_to(&mut bytes).map_err(|e| e.to_string())?;
         Ok(bytes)
     }
+}
+
+/// Replaces every reference to an object in `removed`, anywhere in the document or trailer, with null.
+fn null_references(document: &mut Document, removed: &HashSet<ObjectId>) {
+    fn scrub(value: &mut Object, removed: &HashSet<ObjectId>) {
+        match value {
+            Object::Reference(id) if removed.contains(id) => *value = Object::Null,
+            Object::Array(values) => for value in values { scrub(value, removed); },
+            Object::Dictionary(dict) => for (_, value) in dict.iter_mut() { scrub(value, removed); },
+            Object::Stream(stream) => for (_, value) in stream.dict.iter_mut() { scrub(value, removed); },
+            _ => {}
+        }
+    }
+    if removed.is_empty() { return; }
+    for value in document.objects.values_mut() { scrub(value, removed); }
+    for (_, value) in document.trailer.iter_mut() { scrub(value, removed); }
 }
 
 fn visible_box(document: &Document, id: ObjectId) -> Result<CropBox, String> {
@@ -851,6 +877,121 @@ mod tests {
             assert_eq!(actual, (rotation.rem_euclid(360) + 270) % 360);
         }
     }
+    const ORPHAN: &[u8] = b"SM2ORPHAN42";
+    const OLD_REVISION: &[u8] = b"SM2OLDREV42";
+    const DELETED: &[u8] = b"SM2DELETED42";
+
+    fn literal_pdf(objects: &[String], update: &[(u32, String)]) -> Vec<u8> {
+        let mut bytes = b"%PDF-1.7\n".to_vec(); let mut offsets = Vec::new();
+        for (index, body) in objects.iter().enumerate() { offsets.push(bytes.len()); bytes.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes()); }
+        let startxref = bytes.len(); let size = objects.len() + 1;
+        bytes.extend_from_slice(format!("xref\n0 {size}\n0000000000 65535 f \n").as_bytes());
+        for offset in offsets { bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes()); }
+        bytes.extend_from_slice(format!("trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{startxref}\n%%EOF\n").as_bytes());
+        if update.is_empty() { return bytes; }
+        let mut entries = Vec::new();
+        for (number, body) in update { entries.push((*number, bytes.len())); bytes.extend_from_slice(format!("{number} 0 obj\n{body}\nendobj\n").as_bytes()); }
+        let next = bytes.len(); let size = update.iter().map(|(number, _)| *number as usize + 1).max().unwrap().max(size);
+        bytes.extend_from_slice(b"xref\n");
+        for (number, offset) in entries { bytes.extend_from_slice(format!("{number} 1\n{offset:010} 00000 n \n").as_bytes()); }
+        bytes.extend_from_slice(format!("trailer\n<< /Size {size} /Root 1 0 R /Prev {startxref} >>\nstartxref\n{next}\n%%EOF\n").as_bytes());
+        bytes
+    }
+
+    fn content(text: &str) -> String { let data = format!("BT /F1 12 Tf 20 100 Td ({text}) Tj ET"); format!("<< /Length {} >>\nstream\n{data}\nendstream", data.len()) }
+
+    /// Two pages; object 8 is unreferenced and carries ORPHAN; an incremental update points page 1 at a
+    /// new content stream, leaving the superseded one (object 5, OLD_REVISION) unreferenced.
+    fn leaky_source() -> Vec<u8> {
+        literal_pdf(&[
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [4 0 R 6 0 R] /Count 2 >>".into(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>".into(),
+            content("SM2OLDREV42"),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>".into(),
+            content("page two"),
+            content("SM2ORPHAN42"),
+        ], &[
+            (9, content("revised")),
+            (4, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 3 0 R >> >> /Contents 9 0 R >>".into()),
+        ])
+    }
+
+    fn carries(bytes: &[u8], marker: &[u8]) -> bool {
+        bytes.windows(marker.len()).any(|window| window == marker) || Document::load_mem(bytes).unwrap().objects.values().any(|object| matches!(object, Object::Stream(stream) if stream.decompressed_content().unwrap_or_else(|_| stream.content.clone()).windows(marker.len()).any(|window| window == marker)))
+    }
+
+    #[test]
+    fn copies_never_carry_unreachable_source_objects() {
+        let source = leaky_source();
+        // Positive control: the source carries both markers, and a plain lopdf load and save (what
+        // rotate, crop and comment copies did before) carries them into the copy.
+        let mut unpruned = Vec::new(); Document::load_mem(&source).unwrap().save_to(&mut unpruned).unwrap();
+        assert!(carries(&source, ORPHAN) && carries(&source, OLD_REVISION));
+        assert!(carries(&unpruned, ORPHAN) && carries(&unpruned, OLD_REVISION), "the leak must exist without pruning, or this test proves nothing");
+        let original = Document::load_mem(&source).unwrap();
+        let original_pages: Vec<_> = original.get_pages().into_values().collect();
+        let edits: [(&str, fn(&mut EditSession)); 4] = [
+            ("rotate", |session| session.apply(PageEdit::Rotate { pages: vec![0], clockwise: true }).unwrap()),
+            ("crop", |session| session.apply(PageEdit::Crop { page: 0, crop: CropBox { left: 10.0, bottom: 10.0, right: 190.0, top: 190.0 } }).unwrap()),
+            ("comment", |session| { let plan = session.proposed_comment(Some((0, CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 })), None, Some("note")).unwrap(); session.commit_comments(plan); }),
+            ("move", |session| session.apply(PageEdit::Move { from: 1, to: 0 }).unwrap()),
+        ];
+        for (name, edit) in edits {
+            let mut session = EditSession::new(source.clone(), 2);
+            edit(&mut session);
+            let mut outputs = vec![session.export(None).unwrap()];
+            if let Some(noted) = session.note_source(&session.plan).unwrap() { outputs.push(noted); }
+            for output in outputs {
+                assert!(!carries(&output, ORPHAN) && !carries(&output, OLD_REVISION), "{name}: an unreachable source object reached the copy");
+                let document = Document::load_mem(&output).unwrap();
+                assert_eq!(document.get_pages().len(), 2, "{name}");
+                for (index, spec) in session.plan.iter().enumerate() {
+                    let page = document.get_pages()[&(index as u32 + 1)];
+                    assert_eq!(document.get_page_content(page), original.get_page_content(original_pages[spec.source]), "{name}: page content must be unchanged");
+                }
+                assert!(document.extract_text(&[if name == "move" { 2 } else { 1 }]).unwrap().contains("revised"), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn removed_pages_referenced_from_kept_pages_or_the_catalog_do_not_survive_export() {
+        let source = literal_pdf(&[
+            "<< /Type /Catalog /Pages 2 0 R /SMCustom 6 0 R /SMTree 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [4 0 R 6 0 R] /Count 2 >>".into(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R /SMLink [6 0 R] >>".into(),
+            content("kept page"),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>".into(),
+            content("SM2DELETED42"),
+        ], &[]);
+        let mut session = EditSession::new(source.clone(), 2);
+        session.apply(PageEdit::Delete { pages: vec![1] }).unwrap();
+        for output in [session.export(None).unwrap(), EditSession::new(source.clone(), 2).export(Some(&[0])).unwrap()] {
+            assert!(!carries(&output, DELETED), "a removed page survived through a custom reference");
+            let document = Document::load_mem(&output).unwrap();
+            assert_eq!(document.get_pages().len(), 1);
+            assert!(document.extract_text(&[1]).unwrap().contains("kept page"));
+            assert_eq!(document.objects.values().filter(|object| object.as_dict().ok().and_then(|dict| dict.get(b"Type").ok()).and_then(|value| value.as_name().ok()) == Some(b"Page".as_slice())).count(), 1, "only the kept page object remains");
+        }
+    }
+
+    #[test]
+    fn pruned_export_of_the_1500_page_fixture_stays_fast() {
+        let source = std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../test-corpus/synthetic-text-1500.pdf")).unwrap();
+        let count = Document::load_mem(&source).unwrap().get_pages().len();
+        let mut session = EditSession::new(source, count);
+        session.apply(PageEdit::Rotate { pages: vec![0], clockwise: true }).unwrap();
+        let started = std::time::Instant::now();
+        let output = session.export(None).unwrap();
+        let elapsed = started.elapsed();
+        eprintln!("SM2-PRUNE 1500-page rotate export: {elapsed:?}, {} bytes", output.len());
+        assert_eq!(Document::load_mem(&output).unwrap().get_pages().len(), count);
+        assert!(elapsed < std::time::Duration::from_secs(20), "{elapsed:?}");
+    }
+
     #[test]
     fn unsupported_structures_fail_before_mutation() {
         let mut document = Document::load_mem(&sample()).unwrap();
