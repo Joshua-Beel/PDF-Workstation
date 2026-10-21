@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- 0.3.0 update notes now mention accented Latin letters and scrolling list boxes in Fill forms; README trimmed to the newest 15 change lines (SM0; docs only).
 - Removing or replacing pages now drops links and destinations that pointed at the removed pages instead of leaving them broken; Replace cuts stray references the same way (SM2; SM7 F-1; source build).
 - Saved copies after rotate, crop, move or comments keep only objects reachable from the document, so old revisions and orphaned objects in the source no longer travel along (SM2; SM7 L-1; source build).
 - Release review follow-ups: uninstaller-safe installer extraction, a tested release staging path, a Windows 2022 pre-flight option and clearer 0.3.0 notes (SM6). Never run hosted.
@@ -131,19 +132,5 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 - Repo renamed to `Joshua-Beel/PDF-Workstation`: workflow guards, release URLs, the updater endpoint for new builds and verifier pins use the new name; older installs keep updating through GitHub's redirects (SM6).
 - README restructured: one-line feature and change summaries here; full feature text moved to [docs/features.md](docs/features.md) and the full change log to [docs/changelog.md](docs/changelog.md), verbatim; README links now use the renamed repo `Joshua-Beel/PDF-Workstation` (docs only).
 - CI on every push to `master` and every pull request: tests, type-check and build, read-only, no secrets (SM6). Unverified until its first hosted run.
-- Viewer scroll follow-ups: tighter Find cancellation and stale-page tests (SM1; tests only).
-- Find in document keeps up to 8 page-text requests in flight and throttles progress updates (SM1; source build).
-- Viewer: much cheaper text layer on scroll, and zoom keeps the old page image until the new render arrives (SM1; source build; real scroll smoothness unmeasured).
-- PDF-engine helper: no stale document handle after a helper restart (SM5; debug-only, off by default).
-- PDF-engine helper step 6b: output validation verified through the helper; redaction comparison tightened (SM5; tests only).
-- PDF-engine helper step 6a: a helper that dies while idle is now replaced (SM5; debug-only, off by default).
-- Test for a non-zero OCR exit that never reads its input (SM4; test only).
-- PDF-engine helper step 5b: viewer copy cost recovered with a reused app-private buffer (SM5; debug-only, off by default).
-- PDF-engine helper step 5a: print, page export, raster redaction and OCR rasterization verified through the helper (SM5; tests only).
-- PDF-engine helper step 4 review follow-ups: section handles always closed, viewer renders copied out, finite-value checks (SM5).
-- Flaky OCR child-process test fixed (SM4; test only).
-- PDF-engine helper step 4c: viewer renders at in-process speed, plus memory, real-file and performance checks (SM5; debug-only, off by default).
-- PDF-engine helper step 4b: **Try again** on a page that failed to render (SM5; source build).
-- PDF-engine helper step 4a: sources and bitmaps in app-owned shared sections (SM5; debug-only, off by default).
 
 Full history: [docs/changelog.md](docs/changelog.md)

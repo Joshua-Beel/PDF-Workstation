@@ -18,7 +18,7 @@ Pages
 
 Comments and forms
 - Sticky notes, area highlights and highlights on selected text.
-- Fill a limited set of existing form fields (single-line text, checkboxes, radio buttons, single-choice lists) into a new copy. Forms outside that set are refused rather than partly filled.
+- Fill a limited set of existing form fields (single-line text, including accented Latin letters such as é and ñ; checkboxes; radio buttons; single-choice lists, including scrolling list boxes) into a new copy. Forms outside that set are refused rather than partly filled.
 
 Workspace and updates
 - Remembers theme, zoom, panels and up to 50 recent files, with stars.
