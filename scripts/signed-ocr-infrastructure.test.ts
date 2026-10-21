@@ -10,11 +10,17 @@ function runPowerShell(source: string) {
 }
 
 describe('signed OCR installer infrastructure', () => {
-  it('keeps artifact-only OCR explicit and leaves the release workflow unchanged', () => {
+  it('keeps artifact-only OCR explicit and gives the release workflow a signed OCR mode that keeps updater artifacts', () => {
     const installer = readFileSync('scripts/build-installer.ps1', 'utf8');
     const workflow = readFileSync('.github/workflows/release.yml', 'utf8');
-    expect(installer).toContain('if ($AzureSigning -and $OcrSetupRoot -and -not $ArtifactOnly)');
-    expect(installer).toContain('Azure-signed OCR requires the explicit artifact-only mode.');
+    expect(installer).toContain('$ReleaseOcr = [bool]($AzureSigning -and $OcrSetupRoot -and -not $ArtifactOnly)');
+    expect(installer).toContain('$SignedOcr = [bool]($ArtifactOnly -or $ReleaseOcr)');
+    expect(installer).not.toContain('Azure-signed OCR requires the explicit artifact-only mode.');
+    expect(installer).toContain('Release OCR bundle must contain exactly the installer updater signature and no manifest.');
+    expect(installer).toContain('The release bundle folder must be empty before the release OCR installer is staged.');
+    expect(installer).toContain('Staged release asset differs from the verified build output.');
+    expect(installer).toContain("if (-not $UnsignedLocal -and -not $ArtifactOnly -and ($ReleaseOcr -or -not $OcrSetupRoot))");
+    expect(installer).toMatch(/if \(\$ReleaseOcr\) \{\r?\n\s+\$releaseBundle = Join-Path \$projectRoot 'src-tauri\/target\/release\/bundle\/nsis'/);
     expect(installer).toContain("Join-Path $PSScriptRoot 'ocr/windows-signing.ps1'");
     expect(installer).toContain('New-SignedOcrSetup');
     expect(installer).toContain("cmd = 'artifact-signing-cli'");
@@ -24,8 +30,8 @@ describe('signed OCR installer infrastructure', () => {
     expect(installer.match(/-ExpectedPublisher \$ExpectedPublisher/g)?.length).toBeGreaterThanOrEqual(5);
     expect(installer).toContain("$_.Name -CEQ 'latest.json' -or $_.Extension -CEQ '.sig'");
     expect(installer).toContain('($UnsignedLocal -or $ArtifactOnly) -and $unexpectedUpdaterArtifacts.Count -ne 0');
-    expect(installer).toMatch(/if \(\$ArtifactOnly\) \{[\s\S]*Assert-TrustedWindowsSignature -Path \$installer[\s\S]*\} else \{[\s\S]*Assert-NotPublisherSigned -Path \$installer/);
-    expect(workflow).not.toContain('OcrSetupRoot');
+    expect(installer).toMatch(/if \(\$SignedOcr\) \{[\s\S]*Assert-TrustedWindowsSignature -Path \$installer[\s\S]*\} else \{[\s\S]*Assert-NotPublisherSigned -Path \$installer/);
+    expect(workflow).toContain('-OcrSetupRoot $env:OCR_SETUP_ROOT `');
     expect(workflow).not.toContain('ArtifactOnly');
     expect(workflow).not.toContain('windows-signing.ps1');
   });
@@ -40,8 +46,12 @@ describe('signed OCR installer infrastructure', () => {
         @(@{ArtifactOnly=$true}, 'ArtifactOnly requires AzureSigning'),
         @(@{ArtifactOnly=$true;AzureSigning=$true}, 'ArtifactOnly requires AzureSigning'),
         @(@{ArtifactOnly=$true;OcrSetupRoot='missing'}, 'ArtifactOnly requires AzureSigning'),
-        @(@{AzureSigning=$true;OcrSetupRoot='missing'}, 'Azure-signed OCR requires the explicit artifact-only mode.'),
-        @(@{ExpectedPublisher='Test Publisher'}, 'ExpectedPublisher is supported only for artifact-only Azure OCR.'),
+        @(@{AzureSigning=$true;OcrSetupRoot='missing'}, 'Azure-signed release OCR requires SourceRevision'),
+        @(@{AzureSigning=$true;OcrSetupRoot='missing';OutputRoot='target/missing';SourceRevision=('a'*40)}, 'valid explicit ExpectedPublisher'),
+        @(@{AzureSigning=$true;OcrSetupRoot='missing';OutputRoot='target/missing';ExpectedPublisher='Test Publisher';SourceRevision='bad'}, 'exact lowercase 40-character git HEAD'),
+        @(@{AzureSigning=$true;OcrSetupRoot='missing';OutputRoot='target/missing';ExpectedPublisher='Test Publisher';SourceRevision=('0'*40)}, 'does not match the current git HEAD'),
+        @(@{AzureSigning=$true;ExpectedPublisher='Test Publisher'}, 'ExpectedPublisher is supported only for Azure-signed OCR.'),
+        @(@{ExpectedPublisher='Test Publisher'}, 'ExpectedPublisher is supported only for Azure-signed OCR.'),
         @(@{SourceRevision=('a'*40)}, 'SourceRevision is supported only for explicit installer proof modes.'),
         @(@{ArtifactOnly=$true;AzureSigning=$true;OcrSetupRoot='missing';OutputRoot='target/missing';ExpectedPublisher=' bad'}, 'valid explicit ExpectedPublisher'),
         @(@{ArtifactOnly=$true;AzureSigning=$true;OcrSetupRoot='missing';OutputRoot='target/missing';ExpectedPublisher='Test Publisher';SourceRevision='bad'}, 'exact lowercase 40-character git HEAD'),

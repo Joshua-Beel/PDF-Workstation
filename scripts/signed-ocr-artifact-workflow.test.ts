@@ -58,7 +58,7 @@ describe('manual signed OCR artifact workflow', () => {
     expect(workflow.indexOf('actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02')).toBeGreaterThan(0);
     expect(workflow.slice(workflow.indexOf('actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'))).not.toContain('BUILD_PROOF_ROOT');
 
-    expect(builder).toContain("if ($SourceRevision -and -not ($ArtifactOnly -or $UnsignedLocal))");
+    expect(builder).toContain("if ($SourceRevision -and -not ($SignedOcr -or $UnsignedLocal))");
     expect(builder).toContain('SourceRevision does not match the current git HEAD.');
     expect(builder).toContain('sourceRevision = $SourceRevision');
     expect(release).not.toContain('ocr-signed-artifact');
