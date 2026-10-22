@@ -50,7 +50,7 @@ jobs:
             }
             if ([string]::IsNullOrWhiteSpace($setting)) { throw "Add release environment secret: $name" }
           }
-          if ($env:UPDATER_KEY_PRESENT -cne 'true') { throw 'Add the release signing key as TAURI_SIGNING_PRIVATE_KEY in the release environment secrets.' }
+          if ($env:UPDATER_KEY_PRESENT -cne 'true') { throw 'TAURI_SIGNING_PRIVATE_KEY is missing. Restore the updater key that installed apps trust (scripts/updater-signing-key.json); see docs/releases.md, Updater key rotation.' }
           foreach ($name in @('AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET')) {
             if (-not [Environment]::GetEnvironmentVariable($name)) { throw "Add release environment secret: $name" }
           }
@@ -76,6 +76,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Release source has staged changes.' }
           [IO.File]::AppendAllText($env:GITHUB_ENV, "RELEASE_VERSION=$version`n", [Text.UTF8Encoding]::new($false))
           [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "version=$version`n", [Text.UTF8Encoding]::new($false))
+      - name: Check the embedded updater public key before building
+        shell: pwsh
+        run: ./scripts/assert-updater-signing-key.ps1 -SourceRoot (Get-Location).Path
       - run: npm ci
       - run: npm run fixtures
       - run: ./scripts/setup-pdfium.ps1
@@ -152,6 +155,8 @@ jobs:
             throw 'Updater signature does not name the exact installer in its trusted comment; installed clients would refuse this update.'
           }
           ./scripts/assert-updater-signing-key.ps1 -SignaturePath (Join-Path $bundle "$installerName.sig") -SourceRoot (Get-Location).Path
+          node scripts/verify-updater-signature.mjs (Join-Path $bundle $installerName) (Join-Path $bundle "$installerName.sig") scripts/updater-signing-key.json
+          if ($LASTEXITCODE -ne 0) { throw 'The updater signature does not verify against the key that installed apps trust.' }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: windows-installer

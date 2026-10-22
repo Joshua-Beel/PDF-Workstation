@@ -3,65 +3,124 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
+import { displayKeyId, parsePublicKey, verifyTrustedComment, verifyUpdaterSignature } from './verify-updater-signature.mjs';
 
 const pin = JSON.parse(readFileSync('scripts/updater-signing-key.json', 'utf8'));
-const tauri = JSON.parse(readFileSync('src-tauri/tauri.conf.json', 'utf8'));
 const published020Signature = readFileSync('src-tauri/src/update_commands.rs', 'utf8').match(/PUBLISHED_0_2_0_SIGNATURE: &str = "([^"]+)"/)?.[1] ?? '';
 const OLD_UPDATER_KEY = 'dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg1OTcwQzM0QUVBQkQ3NzUKUldSMTE2dXVOQXlYaFdZN0k1Mk1CcSt2NS81bzNRTERRbU16ejYxTDNiS3V6b1RTZ0tuTlRjZVEK';
 
-function keyId(base64: string, length: number) {
-  const lines = Buffer.from(base64, 'base64').toString('utf8').split(/\r?\n/);
-  const raw = Buffer.from(lines[1], 'base64');
-  expect(raw.length).toBe(length);
-  return raw.subarray(2, 10).toString('hex');
-}
-
-function runAssert(signature: string, pinValue: unknown) {
+function scratch() {
   const root = join('target', `updater-key-${randomUUID()}`);
   mkdirSync(join(root, 'scripts'), { recursive: true });
+  mkdirSync(join(root, 'src-tauri'), { recursive: true });
+  return root;
+}
+
+function fixturePublicKey() {
+  const raw = Buffer.alloc(42);
+  raw.write('Ed', 0, 'latin1');
+  for (let index = 2; index < 42; index += 1) raw[index] = index;
+  return Buffer.from(`untrusted comment: test fixture public key, not a real key\n${raw.toString('base64')}\n`, 'utf8').toString('base64');
+}
+
+function runAssert(options: { signature?: string; pin: unknown; embedded: string }) {
+  const root = scratch();
   try {
-    writeFileSync(join(root, 'scripts', 'updater-signing-key.json'), JSON.stringify(pinValue), 'utf8');
-    writeFileSync(join(root, 'installer.exe.sig'), signature, 'utf8');
-    return spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-File', 'scripts/assert-updater-signing-key.ps1', '-SignaturePath', join(root, 'installer.exe.sig'), '-SourceRoot', root], { encoding: 'utf8', timeout: 45_000 });
+    writeFileSync(join(root, 'scripts', 'updater-signing-key.json'), JSON.stringify(options.pin), 'utf8');
+    writeFileSync(join(root, 'src-tauri', 'tauri.conf.json'), JSON.stringify({ plugins: { updater: { pubkey: options.embedded } } }), 'utf8');
+    const args = ['-NoProfile', '-NonInteractive', '-File', 'scripts/assert-updater-signing-key.ps1', '-SourceRoot', root];
+    if (options.signature !== undefined) {
+      writeFileSync(join(root, 'installer.exe.sig'), options.signature, 'utf8');
+      args.push('-SignaturePath', join(root, 'installer.exe.sig'));
+    }
+    return spawnSync('pwsh.exe', args, { encoding: 'utf8', timeout: 45_000 });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 }
 
+function withChangedKeyId(signature: string) {
+  const lines = Buffer.from(signature, 'base64').toString('utf8').split('\n');
+  const raw = Buffer.from(lines[1], 'base64');
+  raw[5] ^= 0xff;
+  lines[1] = raw.toString('base64');
+  return Buffer.from(lines.join('\n'), 'utf8').toString('base64');
+}
+
 describe('updater signing key pin', () => {
-  it('pins, for this release, the key that signed published 0.2.0 (the key every installed copy trusts)', () => {
-    expect(Object.keys(pin)).toEqual(['releaseSigningPublicKey']);
+  it('pins, for 0.3.0, the key that signed published 0.2.0 as the signing key and forbids embedding it', () => {
+    expect(Object.keys(pin).sort()).toEqual(['forbiddenEmbeddedPublicKey', 'releaseSigningPublicKey']);
     expect(pin.releaseSigningPublicKey).toBe(OLD_UPDATER_KEY);
-    expect(keyId(published020Signature, 74)).toBe(keyId(pin.releaseSigningPublicKey, 42));
-    expect(typeof tauri.plugins.updater.pubkey).toBe('string');
+    expect(pin.forbiddenEmbeddedPublicKey).toBe(OLD_UPDATER_KEY);
+    expect(displayKeyId(parsePublicKey(pin.releaseSigningPublicKey).keyId)).toBe('85970C34AEABD775');
+    expect(verifyTrustedComment(published020Signature, pin.releaseSigningPublicKey).signature.trustedComment).toContain('file:PDF Workstation_0.2.0_x64-setup.exe');
   });
 
-  it('accepts a signature made with the pinned key and refuses any other key or malformed input', () => {
-    const accepted = runAssert(published020Signature, pin);
+  it('accepts a signature from the pinned key with a new embedded key and refuses the forbidden embedded key, other keys and malformed input', () => {
+    const newKey = fixturePublicKey();
+    const accepted = runAssert({ signature: published020Signature, pin, embedded: newKey });
     expect(accepted.status, accepted.stderr || accepted.stdout).toBe(0);
-    expect(accepted.stdout).toContain('UPDATER_SIGNING_KEY_ID 75D7ABAE340C9785');
+    expect(accepted.stdout).toContain('UPDATER_SIGNING_KEY_ID 85970C34AEABD775');
 
+    const configOnly = runAssert({ pin, embedded: newKey });
+    expect(configOnly.status, configOnly.stderr || configOnly.stdout).toBe(0);
+
+    const stillOld = runAssert({ pin, embedded: OLD_UPDATER_KEY });
+    expect(stillOld.status).not.toBe(0);
+    expect((stillOld.stderr + stillOld.stdout).replace(/\s+/g, ' ')).toContain('still the retired key 85970C34AEABD775');
+
+    const noForbidden = runAssert({ pin: { releaseSigningPublicKey: OLD_UPDATER_KEY, forbiddenEmbeddedPublicKey: null }, embedded: OLD_UPDATER_KEY });
+    expect(noForbidden.status, noForbidden.stderr || noForbidden.stdout).toBe(0);
+
+    const otherKey = runAssert({ signature: withChangedKeyId(published020Signature), pin, embedded: newKey });
+    expect(otherKey.status).not.toBe(0);
+    expect((otherKey.stderr + otherKey.stdout).replace(/\s+/g, ' ')).toMatch(/was made with key [0-9A-F]{16}, not 85970C34AEABD775/);
+
+    expect(runAssert({ signature: 'not base64 !', pin, embedded: newKey }).status).not.toBe(0);
+    expect(runAssert({ signature: published020Signature, pin: { releaseSigningPublicKey: OLD_UPDATER_KEY }, embedded: newKey }).status).not.toBe(0);
+    expect(runAssert({ signature: published020Signature, pin: { ...pin, extra: 1 }, embedded: newKey }).status).not.toBe(0);
+  }, 180_000);
+
+  it('verifies real Ed25519 minisign signatures and refuses tampering', () => {
+    expect(() => verifyTrustedComment(withChangedKeyId(published020Signature), OLD_UPDATER_KEY)).toThrow(/not the expected key/);
     const lines = Buffer.from(published020Signature, 'base64').toString('utf8').split('\n');
-    const raw = Buffer.from(lines[1], 'base64');
-    raw[5] ^= 0xff;
-    lines[1] = raw.toString('base64');
-    const otherKey = Buffer.from(lines.join('\n'), 'utf8').toString('base64');
-    const refused = runAssert(otherKey, pin);
-    expect(refused.status).not.toBe(0);
-    expect(refused.stderr + refused.stdout).toContain('was not made with the key that installed apps trust');
+    lines[2] = lines[2].replace('0.2.0', '9.9.9');
+    expect(() => verifyTrustedComment(Buffer.from(lines.join('\n'), 'utf8').toString('base64'), OLD_UPDATER_KEY)).toThrow(/trusted comment does not verify/);
 
-    expect(runAssert('not base64 !', pin).status).not.toBe(0);
-    expect(runAssert(published020Signature, { releaseSigningPublicKey: OLD_UPDATER_KEY, extra: 1 }).status).not.toBe(0);
-    expect(runAssert(published020Signature, { releaseSigningPublicKey: published020Signature }).status).not.toBe(0);
-  }, 120_000);
+    const root = scratch();
+    try {
+      const keyPath = join(root, 'throwaway.key');
+      const file = join(root, 'installer.exe');
+      writeFileSync(file, Buffer.from('installer bytes for a throwaway signing test'));
+      const tauri = join('node_modules', '.bin', process.platform === 'win32' ? 'tauri.cmd' : 'tauri');
+      const generated = spawnSync(tauri, ['signer', 'generate', '-w', keyPath, '-p', 'throwaway', '--ci'], { encoding: 'utf8', shell: true, timeout: 60_000 });
+      expect(generated.status, generated.stderr || generated.stdout).toBe(0);
+      const signed = spawnSync(tauri, ['signer', 'sign', '-f', keyPath, '-p', 'throwaway', file], { encoding: 'utf8', shell: true, timeout: 60_000 });
+      expect(signed.status, signed.stderr || signed.stdout).toBe(0);
+      const publicKey = readFileSync(`${keyPath}.pub`, 'utf8');
+      const signature = readFileSync(`${file}.sig`, 'utf8');
+      expect(verifyUpdaterSignature(readFileSync(file), signature, publicKey)).toBe(displayKeyId(parsePublicKey(publicKey).keyId));
+      expect(() => verifyUpdaterSignature(Buffer.from('changed installer bytes'), signature, publicKey)).toThrow(/does not verify for this file/);
+      expect(() => verifyUpdaterSignature(readFileSync(file), signature, OLD_UPDATER_KEY)).toThrow(/not the expected key/);
+      const cli = spawnSync(process.execPath, ['scripts/verify-updater-signature.mjs', file, `${file}.sig`, 'scripts/updater-signing-key.json'], { encoding: 'utf8' });
+      expect(cli.status).not.toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 180_000);
 
-  it('runs the check in the release workflow and the draft verifier, which also requires the packaged app to embed the tagged key', () => {
-    const workflow = readFileSync('.github/workflows/release.yml', 'utf8');
+  it('runs the checks in the release workflow before building and before upload, and in the draft verifier', () => {
+    const workflow = readFileSync('.github/workflows/release.yml', 'utf8').replace(/\r\n?/g, '\n');
+    const early = workflow.indexOf('      - name: Check the embedded updater public key before building\n        shell: pwsh\n        run: ./scripts/assert-updater-signing-key.ps1 -SourceRoot (Get-Location).Path\n');
+    expect(early).toBeGreaterThan(workflow.indexOf('id: validate'));
+    expect(early).toBeLessThan(workflow.indexOf('- run: npm ci'));
     expect(workflow).toContain('./scripts/assert-updater-signing-key.ps1 -SignaturePath (Join-Path $bundle "$installerName.sig") -SourceRoot (Get-Location).Path');
-    expect(workflow).not.toMatch(/updater-signing-key\.json[^\n]*secrets\./);
+    expect(workflow).toContain('node scripts/verify-updater-signature.mjs (Join-Path $bundle $installerName) (Join-Path $bundle "$installerName.sig") scripts/updater-signing-key.json');
+    expect(workflow.indexOf('node scripts/verify-updater-signature.mjs')).toBeLessThan(workflow.indexOf('name: windows-installer'));
+    expect(workflow).not.toContain('Add the release signing key as TAURI_SIGNING_PRIVATE_KEY in the release environment secrets.');
     const verifier = readFileSync('scripts/verify-default-draft.ps1', 'utf8');
     expect(verifier).toContain("$null=& (Join-Path $PSScriptRoot 'assert-updater-signing-key.ps1') -SignaturePath $signaturePath -SourceRoot $TargetSourceRoot");
-    expect(verifier).toContain("Test-ExecutableContainsAscii -Path $application.FullName -Marker $configuredUpdaterKey");
+    expect(verifier).toContain('Test-ExecutableContainsAscii -Path $application.FullName -Marker $configuredUpdaterKey');
     expect(verifier).toContain('updaterSignatureKeyIsReleaseSigningKey=$true;packagedApplicationEmbedsTaggedUpdaterKey=$true;');
   });
 });
