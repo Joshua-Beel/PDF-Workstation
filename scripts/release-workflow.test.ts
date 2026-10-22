@@ -174,7 +174,7 @@ describe('release workflow contract', () => {
     const cargoLock = readFileSync('src-tauri/Cargo.lock', 'utf8').match(/\[\[package\]\]\r?\nname = "pdf-workstation"\r?\nversion = "([^"]+)"/)?.[1];
     expect([pkg.version, npmLock.version, npmLock.packages[''].version, tauri.version, cargo, cargoLock]).toEqual(Array(6).fill(currentVersion));
     expect(tauri.plugins.updater).toEqual({
-      pubkey: 'dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg1OTcwQzM0QUVBQkQ3NzUKUldSMTE2dXVOQXlYaFdZN0k1Mk1CcSt2NS81bzNRTERRbU16ejYxTDNiS3V6b1RTZ0tuTlRjZVEK',
+      pubkey: 'dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNFNkRENTQ5MTZBNEU1RTgKUldUbzVhUVdTZFZ0UG9SVS9rWk15TFRhMUc0R0pzWEdGQXFhMGlFcWJ6UlFyRmJiU0cvUExqclkK',
       endpoints: ['https://github.com/Joshua-Beel/PDF-Workstation/releases/latest/download/latest.json'],
       windows: { installMode: 'passive' },
     });
