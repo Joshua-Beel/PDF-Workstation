@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- Updater key rotation prepared: release and draft checks require the release signature to come from the key installed apps trust, and the app to embed the configured key; new public key still pending (SM6).
 - Draft verifiers expect the 28 bundled base resources (PDFium `VERSION` and `args.gn` were added), not the stale 26 (SM6).
 - Installer builds restore the Cargo.toml formatting that the Tauri CLI rewrites, so the Windows validation pre-flight leaves the tree clean; two timing-sensitive tests get hosted-safe limits (SM6).
 - 0.3.0 update notes now mention accented Latin letters and scrolling list boxes in Fill forms; README trimmed to the newest 15 change lines (SM0; docs only).

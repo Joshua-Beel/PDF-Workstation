@@ -356,11 +356,14 @@ $platform=$manifest.platforms.'windows-x86_64';$notes=Get-Content -LiteralPath (
 $expectedUrl="https://github.com/$script:Repository/releases/download/$TargetTag/$InstallerName"
 if([string]$manifest.version -cne $TargetVersion-or [string]$platform.url -cne $expectedUrl-or [string]$platform.signature -cne $signatureText-or [string]$manifest.notes -cne $notes){throw 'Updater manifest is not exactly bound to version, URL, signature text, and tagged notes.'}
 $null=Assert-TrustedWindowsSignature -Path $installerPath -ExpectedPublisher $ExpectedPublisher
+$null=& (Join-Path $PSScriptRoot 'assert-updater-signing-key.ps1') -SignaturePath $signaturePath -SourceRoot $TargetSourceRoot
+$configuredUpdaterKey=[string](Get-Content -LiteralPath (Join-Path $TargetSourceRoot 'src-tauri/tauri.conf.json') -Raw -Encoding UTF8|ConvertFrom-Json).plugins.updater.pubkey;if($configuredUpdaterKey -cnotmatch '^[A-Za-z0-9+/=]{100,400}$'){throw 'Tagged updater public key is malformed.'}
 $base=Get-BaseBundleResourceMap -ProjectRoot $TargetSourceRoot
 if([uint64]$base.Count -ne 28){throw 'Default tagged-source resource inventory is not exactly 28 files.'}
 $extractionRoot=Join-Path $workRoot 'extracted-installer';$files=Expand-DefaultInstaller $installerPath $extractionRoot $base.Entries
 $inventory=Assert-DefaultInventory $files $extractionRoot $base.Entries
 $application=Get-UniqueExtractedFile $files 'pdf-workstation.exe' 'Packaged application';Assert-PackagedApplicationIdentity -Path $application.FullName -Version $TargetVersion;$null=Assert-TrustedWindowsSignature -Path $application.FullName -ExpectedPublisher $ExpectedPublisher
+if(-not (Test-ExecutableContainsAscii -Path $application.FullName -Marker $configuredUpdaterKey)){throw 'Packaged application does not embed the tagged updater public key.'}
 $ocrReceipts=@(Assert-DefaultOcrPackage -Files $files -Identity $inventory.ocrIdentity -SourceRoot $TargetSourceRoot -ApplicationPath $application.FullName -ExpectedPublisher $ExpectedPublisher)
 $resourceReceipts=@()
 foreach($entry in $base.Entries){
@@ -378,6 +381,6 @@ $record=[ordered]@{
  assets=@([ordered]@{role='installer';id=$installerId;name=$InstallerName;bytes=$installerLength;sha256=$InstallerSha256},[ordered]@{role='detachedUpdaterSignature';id=$signatureId;name="$InstallerName.sig";bytes=$signatureLength;sha256=$SignatureSha256},[ordered]@{role='updaterManifest';id=$manifestId;name='latest.json';bytes=$manifestLength;sha256=$ManifestSha256})
  packagedApplication=[ordered]@{bytes=[uint64]$application.Length;sha256=Get-ExactSha256 $application.FullName}
  baseResources=@($resourceReceipts|Sort-Object target);ocr=[ordered]@{identity=$inventory.ocrIdentity;resources=$ocrReceipts};signatures=[ordered]@{expectedPublisher=$ExpectedPublisher;installer='Valid';application='Valid';pdfium='Valid';ocrEngine='Valid';trustedTimestampsRequired=$true}
- verification=[ordered]@{draft=$true;prerelease=$false;exactAssetInventory=$true;exactExtractedInventory=$true;targetSourceSixVersionsMatched=$true;packagedApplicationIdentityAndVersionMatched=$true;sourceBuildExecutableByteProvenanceReconstructed=$false;requiredExtractedFiles=$inventory.required;actualExtractedFiles=$inventory.actual;optionalUninstaller=$inventory.optionalUninstaller;optionalUninstallerExcluded=[bool]$script:OptionalUninstallerExcluded;ocrBundled=$true;manifestSignatureTextBound=$true;detachedUpdaterCryptographyVerified=$false;installedBehaviorVerified=$false}
+ verification=[ordered]@{draft=$true;prerelease=$false;exactAssetInventory=$true;exactExtractedInventory=$true;targetSourceSixVersionsMatched=$true;packagedApplicationIdentityAndVersionMatched=$true;sourceBuildExecutableByteProvenanceReconstructed=$false;requiredExtractedFiles=$inventory.required;actualExtractedFiles=$inventory.actual;optionalUninstaller=$inventory.optionalUninstaller;optionalUninstallerExcluded=[bool]$script:OptionalUninstallerExcluded;ocrBundled=$true;updaterSignatureKeyIsReleaseSigningKey=$true;packagedApplicationEmbedsTaggedUpdaterKey=$true;manifestSignatureTextBound=$true;detachedUpdaterCryptographyVerified=$false;installedBehaviorVerified=$false}
 }
 [IO.File]::WriteAllText((Join-Path $outputRoot 'default-draft-verification.json'),($record|ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))

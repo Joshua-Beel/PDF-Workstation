@@ -52,6 +52,30 @@ Store the private updater signing key outside Git and preserve a secure backup. 
 
 Store the private key as the `TAURI_SIGNING_PRIVATE_KEY` secret of the GitHub Actions environment `release`, not as a repository secret. The current key has no password, and the release workflow passes an empty `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; a password-protected replacement key would need a workflow change to read a password secret. Do not generate a replacement key for each release.
 
+### Updater key rotation in 0.3.0
+
+The private key that signed 0.2.0 (key id `85970C34AEABD775`) has no backup; it exists only as the repository-level `TAURI_SIGNING_PRIVATE_KEY` secret. The maintainer decided on 2026-10-22 to rotate inside 0.3.0: 0.3.0 is signed with that old key, so 0.2.0 can verify it, and 0.3.0 trusts a new key that the maintainer generates offline with a password. Only the new public key enters the repository.
+
+| Installed version | Updater endpoint | Trusts |
+|---|---|---|
+| 0.2.0 (published) | `Joshua-Beel/F-CK-Adobe/releases/latest/download/latest.json`, reached through GitHub's rename redirects | old key `85970C34AEABD775` |
+| 0.3.0 and later | `Joshua-Beel/PDF-Workstation/releases/latest/download/latest.json` | new key (`plugins.updater.pubkey` in `src-tauri/tauri.conf.json`) |
+
+How the checks follow the rotation:
+
+- `scripts/updater-signing-key.json` names the public key whose private key must have signed the release being built: for 0.3.0 the old key, because the installed base is 0.2.0. `scripts/assert-updater-signing-key.ps1` compares the minisign key id in the release `.sig` with it; `release.yml` runs it before uploading assets, and the Step 1 draft verifier runs it on the downloaded draft. A release signed with the wrong key fails before anything is published.
+- `plugins.updater.pubkey` in `tauri.conf.json` is the key the new version will trust. The Step 1 draft verifier requires the packaged application to embed exactly that tagged key.
+- The Tauri CLI only warns when the signing key does not match `plugins.updater.pubkey` ("If you are not rotating keys…") and still writes the signature. This was checked locally on 2026-10-22 with two throwaway keys; the built executable embedded the configured key and not the old one.
+- No step verifies the Ed25519 signature itself before publishing. The in-app update check (release step 10) does: it installs published 0.2.0 and lets its updater, which trusts only the old key, install 0.3.0.
+
+Order, which must not change:
+
+1. Put the new public key into `plugins.updater.pubkey` (and the `release-workflow` test pin) before the 0.3.0 tag. `scripts/updater-signing-key.json` stays on the old key.
+2. Tag and release 0.3.0 with the repository-level old key. Do not add a `TAURI_SIGNING_PRIVATE_KEY` secret to the `release` environment yet: an environment secret overrides the repository secret with the same name, so 0.3.0 would be signed with the new key. `assert-updater-signing-key.ps1` would then stop the run; without it, 0.2.0 could not verify the update.
+3. Publish 0.3.0 and run the in-app update check. Only after it passes, swap in one reviewed commit plus the secret change: add the new private key and its password to the `release` environment, set `scripts/updater-signing-key.json` to the new public key, and make `release.yml` pass a `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secret instead of the empty value (with its tests). Then delete the repository-level old key.
+
+0.2.0 users who skip 0.3.0: the updater reads only the `latest.json` of the latest published release and offers that one version. There is no route through an intermediate version, and 0.2.0's endpoint has no version placeholder. A `latest.json` holds one signature per platform and the updater plugin accepts one public key, so a release cannot carry signatures for both keys. Once a release after 0.3.0 is published, a 0.2.0 install that has not updated yet is offered it, fails signature verification and cannot update in the app. Its user must download and run the current installer from the Releases page. A manual install over 0.2.0 kept synthetic settings and document files in the hosted signed OCR upgrade check; real user settings were not tested. Mitigations: leave time between 0.3.0 and the next release so more installs pass through 0.3.0; keep the 0.3.0 release published and downloadable; and say in the notes of every later release and on the Releases page that 0.2.0 users whose in-app update fails must install manually.
+
 ### Release environment and gates
 
 The release workflow's `installer` job runs in the `release` environment and waits there until a required reviewer approves the deployment. The environment exists (created 2026-10-14) with required reviewer Joshua Beel and a deployment rule limited to tags matching `v*`. The signing secrets still have to be moved into it by the maintainer before the next tag. The job refuses to run unless the tagged commit is already on `origin/master`. It holds a read-only token with no persisted checkout credentials. Only the signing build step receives `TAURI_SIGNING_PRIVATE_KEY`; the validation step sees only whether the secret is set. A separate `publish` job, which checks out no source and runs no npm, Cargo, or repository script, downloads the verified assets, rechecks their names, manifest version, installer URL, signature, notes and trusted-comment file name, and is the only job with `contents: write`, used only by the step that creates the draft. Before upload, the workflow also requires the updater signature's trusted comment to name exactly `PDF Workstation_<version>_x64-setup.exe`, because clients from this change on refuse an update whose signature names another installer.

@@ -151,6 +151,7 @@ jobs:
           if ($trusted.Count -ne 1 -or $signedFiles.Count -ne 1 -or $signedFiles[0] -cne $installerName) {
             throw 'Updater signature does not name the exact installer in its trusted comment; installed clients would refuse this update.'
           }
+          ./scripts/assert-updater-signing-key.ps1 -SignaturePath (Join-Path $bundle "$installerName.sig") -SourceRoot (Get-Location).Path
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: windows-installer
