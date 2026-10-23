@@ -13,27 +13,27 @@ Set-StrictMode -Version Latest
 
 $script:ReadingVerificationPins = [ordered]@{
     Repository = 'Joshua-Beel/PDF-Workstation'
-    SignedArtifactId = [uint64]11005152678
-    SignedRunId = [uint64]36499724415
-    SignedSourceRevision = '67d238218f4796ba7b8505d072868da0f397174a'
+    SignedArtifactId = [uint64]12510717103
+    SignedRunId = [uint64]39969839829
+    SignedSourceRevision = '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'
     SignedRecordName = 'artifact-verification.json'
-    SignedRecordBytes = [uint64]7386
-    SignedRecordSha256 = '4ED82057155877F2677262479FF4F2B00398CF5F524C51302DB50275D315E205'
+    SignedRecordBytes = [uint64]7715
+    SignedRecordSha256 = '0383DAE8FA04705FA26F63CB3CC4EDE16442129D87F99E7900BD1EF301C4FB5C'
     ExpectedPublisher = 'Joshua Beel'
     FeatureBlobs = [ordered]@{
-        'src/Viewer.tsx' = '30359386c5d706e408b9911fc24efe7cd166ce39'
-        'src/TextLayer.tsx' = 'e73c8b5b6433439bd651a162e0637145c7c2c73b'
-        'src/SearchPanel.tsx' = 'eb26ef73a1db33141f5395672683b007ccfda691'
-        'src/PasswordDialog.tsx' = 'ff73396e79fd66c0689e4a6a4a9d2e0438bb45f4'
+        'src/Viewer.tsx' = '4e9e5464521d2a963eff84f71cc16453acda9940'
+        'src/TextLayer.tsx' = '9984131a916f911d48005979b070f653e4b37215'
+        'src/SearchPanel.tsx' = 'db36f2dd70795cf3f581f255d32eb7ae834c5c59'
+        'src/PasswordDialog.tsx' = '5a06bea211de4be9403f74c2739e2194ce264a77'
         'src/PageText.tsx' = '2d0a8708a3d325f3d097717485ea625b6f1e18c3'
-        'src/bridge.ts' = 'f05fd937ecd72c82cb25c61f62687aebff98f3a3'
+        'src/bridge.ts' = '88707e0cf6b140002845044be3016cb832d78d24'
         'src/searchHighlights.ts' = 'fc52f09167b694ff7870bd28696bb3eedd904ed1'
         'src/textHighlightSelection.ts' = 'dad6f6b36924606de1728f8908acb03dea83126b'
-        'src-tauri/src/main.rs' = 'aff583c81b8fdeff897e4b87e341a31649a3e452'
-        'src-tauri/src/service.rs' = 'e65e890bfbc57cda8b99787a0f7d909d5a445bf0'
-        'src-tauri/src/text_geometry.rs' = 'c6fb8b84c111d45d44aaa40c7e40d2ccab5b1241'
+        'src-tauri/src/main.rs' = 'd9aa9862c286913108d75ca2cac0d1305f11c002'
+        'src-tauri/src/service.rs' = '737a4492b4006eb6272c1b9084dc54f508309037'
+        'src-tauri/src/text_geometry.rs' = '7d54d3fcac02ffd1d873b5fd6b265d9d42b25e4b'
     }
-    SignedApplicationShellBlob = '35a6d3b5c2dadecf378386f41ffe405da15c8c4c'
+    SignedApplicationShellBlob = '2af97705343967869b4174e2037fec6619b68fe5'
     MaximumFixtureBytes = 2MB
     ProtectedFixtureBytes = [uint64]912
     ProtectedFixtureSha256 = '9BE85022232671CFD796C711E0B8B06847E7020D49AA07FA20DBD6DADE168A37'
@@ -257,7 +257,7 @@ function Write-SanitizedReadingRecord {
         cleanup = [ordered]@{ clipboardClearedAndVerified=$true;sessionDeleted=[bool]$UiResult.sessionDeleted;ownedProcessTreeStopped=[bool]$UiResult.ownedProcessTreeStopped;relevantProcessesRemaining=[int]$UiResult.relevantProcessesRemaining }
     }
     $json = $record | ConvertTo-Json -Depth 8
-    if ($json -match '(?i)([A-Z]:\\|\\Users\\|test password|wrong password|A place for your PDFs|Sample document|GITHUB_TOKEN|GH_TOKEN|11005152678|36499724415|raw\.log)') { throw 'The reading-tools record contains a raw path, text fixture value, password, token, artifact identifier, or raw log reference.' }
+    if ($json -match '(?i)([A-Z]:\\|\\Users\\|test password|wrong password|A place for your PDFs|Sample document|GITHUB_TOKEN|GH_TOKEN|12510717103|39969839829|raw\.log)') { throw 'The reading-tools record contains a raw path, text fixture value, password, token, artifact identifier, or raw log reference.' }
     $path = Join-Path $OutputRoot 'reading-tools-verification.json'
     [IO.File]::WriteAllText($path,$json,[Text.UTF8Encoding]::new($false))
     return $path
