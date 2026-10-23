@@ -205,6 +205,28 @@ function Wait-ImagePageStableFile {
     throw 'An image page-tools output did not become stable before its bounded deadline.'
 }
 
+function Write-ImagePageOutputDiagnostics {
+    param([Parameter(Mandatory = $true)][string]$Path,[Parameter(Mandatory = $true)][string]$Stage,[string]$SessionId,[datetime]$Deadline)
+    try {
+        $exists = Test-Path -LiteralPath $Path -PathType Leaf
+        $length = if ($exists) { [long](Get-Item -LiteralPath $Path -Force).Length } else { -1 }
+        [Console]::Out.WriteLine(('IMAGE_PAGE_DIAG {0} output={1} exists={2} bytes={3}' -f $Stage, [IO.Path]::GetFileName($Path), $exists.ToString().ToLowerInvariant(), $length))
+        $parent = Split-Path -Parent $Path
+        foreach ($item in @(Get-ChildItem -LiteralPath $parent -Force -ErrorAction Stop | Sort-Object Name | Select-Object -First 30)) {
+            [Console]::Out.WriteLine(('IMAGE_PAGE_DIAG {0} sibling={1} bytes={2}' -f $Stage, $item.Name, $(if ($item.PSIsContainer) { 'dir' } else { [string]$item.Length })))
+        }
+    } catch { [Console]::Out.WriteLine("IMAGE_PAGE_DIAG $Stage file listing failed") }
+    if (-not $SessionId) { return }
+    try {
+        $remaining = [Math]::Min(10000, [Math]::Max(0, ($Deadline - [datetime]::UtcNow).TotalMilliseconds))
+        if ($remaining -lt 500) { [Console]::Out.WriteLine("IMAGE_PAGE_DIAG $Stage no time left for a DOM snapshot"); return }
+        $snapshot = Invoke-WebDriverScript -SessionId $SessionId -Deadline ([datetime]::UtcNow.AddMilliseconds($remaining)) -Script "const t=s=>(s||'').replace(/\s+/g,' ').trim().slice(0,300);return {title:document.title,dialogs:[...document.querySelectorAll('dialog[open]')].map(d=>({heading:t(d.querySelector('h2')?.textContent),alerts:[...d.querySelectorAll('[role=alert]')].map(x=>t(x.textContent)),status:[...d.querySelectorAll('[role=status]')].map(x=>t(x.textContent))})),pageAlerts:[...document.querySelectorAll('[role=alert]')].slice(0,5).map(x=>t(x.textContent)),pageImage:!!document.querySelector('img[alt=`"Page 1`"]')};"
+        $json = $snapshot | ConvertTo-Json -Compress -Depth 6
+        if ($json.Length -gt 2000) { $json = $json.Substring(0, 2000) }
+        [Console]::Out.WriteLine("IMAGE_PAGE_DIAG $Stage dom=$json")
+    } catch { [Console]::Out.WriteLine("IMAGE_PAGE_DIAG $Stage DOM snapshot failed") }
+}
+
 function Get-ImagePagePngProof {
     param([Parameter(Mandatory = $true)][string]$Path)
     Assert-NoReparseAncestors -Path $Path
@@ -421,7 +443,8 @@ function Invoke-RealInstalledImagePageTools {
         $createDefaults = Wait-ImagePageWebDriverOracle -SessionId $sessionId -Script "const d=document.querySelector('dialog[aria-labelledby=`"create-pdf-title`"]');const s=d?.querySelector('select[aria-label=`"Page size`"]');const o=d?.querySelector('select[aria-label=`"Orientation`"]');const m=d?.querySelector('input[aria-label=`"Margin in points`"]');return {dialog:!!d,pageSize:s?.value||'',orientation:o?.value||'',margin:m?.value||''};" -Deadline $deadline -Stage 'create-defaults' -Predicate { param($v) [bool]$v.dialog -and [string]$v.pageSize -ceq 'letter' -and [string]$v.orientation -ceq 'auto' -and [string]$v.margin -ceq '36' }
         $nativeDeadline = Get-ImagePagePhaseDeadline -TotalDeadline $deadline -MaximumMilliseconds $script:ImagePagePins.NativeDialogTimeoutMilliseconds
         $createNative = Invoke-ImagePageCreateNativeFlow -SessionId $sessionId -ProcessId $appProcessId -ProcessStartUtcTicks $appProcessStartUtcTicks -SourceImagePath $SourceImagePath -CreatedPdfPath $CreatedPdfPath -Deadline $nativeDeadline
-        $createdItem = Wait-ImagePageStableFile -Path $CreatedPdfPath -Deadline (Get-ImagePagePhaseDeadline -TotalDeadline $deadline -MaximumMilliseconds $script:ImagePagePins.OutputTimeoutMilliseconds)
+        try { $createdItem = Wait-ImagePageStableFile -Path $CreatedPdfPath -Deadline (Get-ImagePagePhaseDeadline -TotalDeadline $deadline -MaximumMilliseconds $script:ImagePagePins.OutputTimeoutMilliseconds) }
+        catch { Write-ImagePageOutputDiagnostics -Path $CreatedPdfPath -Stage 'create-output' -SessionId $sessionId -Deadline $deadline; throw }
         $createdProof = Get-PdfiumPrintProof -PdfiumPath $PdfiumPath -PdfPath $CreatedPdfPath
         if ([int]$createdProof.Pages -ne 1 -or [Math]::Abs([double]$createdProof.WidthPoints - $script:ImagePagePins.ExpectedPdfWidthPoints) -gt 0.01 -or [Math]::Abs([double]$createdProof.HeightPoints - $script:ImagePagePins.ExpectedPdfHeightPoints) -gt 0.01) { throw 'Created image PDF did not parse as one exact Letter page.' }
         $createdRaster = Get-ImagePagePdfiumRasterProof -PdfiumPath $PdfiumPath -PdfPath $CreatedPdfPath
@@ -433,7 +456,8 @@ function Invoke-RealInstalledImagePageTools {
         $exportDefaults = Wait-ImagePageWebDriverOracle -SessionId $sessionId -Script "const d=document.querySelector('dialog[aria-labelledby=`"export-image-title`"]');const f=d?.querySelector('select[aria-label=`"Image format`"]');const r=d?.querySelector('select[aria-label=`"Image resolution`"]');return {dialog:!!d,format:f?.value||'',dpi:r?.value||''};" -Deadline $deadline -Stage 'export-defaults' -Predicate { param($v) [bool]$v.dialog -and [string]$v.format -ceq 'png' -and [string]$v.dpi -ceq '150' }
         $nativeDeadline = Get-ImagePagePhaseDeadline -TotalDeadline $deadline -MaximumMilliseconds $script:ImagePagePins.NativeDialogTimeoutMilliseconds
         $exportSaveVerified = Invoke-ImagePageExportNativeFlow -SessionId $sessionId -ProcessId $appProcessId -ProcessStartUtcTicks $appProcessStartUtcTicks -ExportedPngPath $ExportedPngPath -Deadline $nativeDeadline
-        $null = Wait-ImagePageStableFile -Path $ExportedPngPath -Deadline (Get-ImagePagePhaseDeadline -TotalDeadline $deadline -MaximumMilliseconds $script:ImagePagePins.OutputTimeoutMilliseconds)
+        try { $null = Wait-ImagePageStableFile -Path $ExportedPngPath -Deadline (Get-ImagePagePhaseDeadline -TotalDeadline $deadline -MaximumMilliseconds $script:ImagePagePins.OutputTimeoutMilliseconds) }
+        catch { Write-ImagePageOutputDiagnostics -Path $ExportedPngPath -Stage 'export-output' -SessionId $sessionId -Deadline $deadline; throw }
         $pngProof = Get-ImagePagePngProof -Path $ExportedPngPath
         if ([int]$pngProof.width -ne $script:ImagePagePins.ExpectedExportWidth -or [int]$pngProof.height -ne $script:ImagePagePins.ExpectedExportHeight) { throw 'Exported PNG dimensions did not match the exact Letter-page 150 DPI request.' }
         $rasterComparison = [ImagePagePdfiumRasterProof]::ComparePng($createdRaster.Rgb,$ExportedPngPath,[int]$pngProof.width,[int]$pngProof.height)

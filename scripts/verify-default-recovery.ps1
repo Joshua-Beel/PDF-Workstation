@@ -59,9 +59,16 @@ function Open-RecoveryFixture { param($Context,[string]$Path)
  Submit-ProcessBoundOpenDialog -Binding $picker -ApplicationProcessId $appPid -ApplicationProcessStartUtcTicks $ticks -Path $Path -Deadline $deadline
  [Console]::Out.WriteLine('RECOVERY_STAGE open: picker submitted')
 }
+function Test-RecoveryQuarterTurnRender { param([int]$Width,[int]$Height,[int]$OriginalWidth,[int]$OriginalHeight)
+ if($Width-le0-or$Height-le0-or$OriginalWidth-le0-or$OriginalHeight-le0-or$OriginalWidth-eq$OriginalHeight){return $false}
+ if(($Width-gt$Height)-eq($OriginalWidth-gt$OriginalHeight)){return $false}
+ return [Math]::Abs((([double]$Width/[double]$Height)/([double]$OriginalHeight/[double]$OriginalWidth))-1)-lt0.02
+}
 function Wait-RecoveryOracle { param($Context,[string]$Script,[scriptblock]$Predicate,[string]$Kind)
  [Console]::Out.WriteLine("RECOVERY_STAGE oracle: $Kind")
- Wait-WebDriverOracle -SessionId $Context.SessionId -Script $Script -Deadline $Context.Deadline -Kind $Kind -Predicate $Predicate
+ $script:RecoveryLastObserved=$null;$recoveryPredicate=$Predicate
+ try{Wait-WebDriverOracle -SessionId $Context.SessionId -Script $Script -Deadline $Context.Deadline -Kind $Kind -Predicate {param($v)$script:RecoveryLastObserved=$v;& $recoveryPredicate $v}}
+ catch{$last=if($null-ne$script:RecoveryLastObserved){[string]($script:RecoveryLastObserved|ConvertTo-Json -Compress -Depth 4)}else{'none'};if($last.Length-gt800){$last=$last.Substring(0,800)};throw "$($_.Exception.Message) Last observed: $last"}
 }
 function Invoke-RecoveryPhaseA { param($Context,[string]$Fixture,[string]$Application)
  Open-RecoveryFixture $Context $Fixture
@@ -78,7 +85,7 @@ function Invoke-RecoveryPhaseB { param($Context,[string]$Fixture,$PhaseA)
  Open-RecoveryFixture $Context $Fixture
  $null=Wait-RecoveryOracle $Context 'const d=document.querySelector("dialog[aria-labelledby=\"recovery-offer-title\"]"),k=d?[...d.querySelectorAll("button")].filter(x=>x.textContent.trim()==="Keep recovered edits"&&!x.disabled):[],o=d?[...d.querySelectorAll("button")].filter(x=>x.textContent.trim()==="Open original"&&!x.disabled):[];return {count:document.querySelectorAll("dialog[aria-labelledby=\"recovery-offer-title\"]").length,heading:d?.querySelector("h2")?.textContent||"",text:d?.innerText||"",keep:k.length,original:o.length,dirty:document.body.innerText.includes("Unsaved changes")};' {param($v)[int]$v.count-eq1-and[string]$v.heading-ceq'Recovered edits are available'-and[string]$v.text-like'*unsaved revision 1*'-and[int]$v.keep-eq1-and[int]$v.original-eq1-and-not[bool]$v.dirty} 'Recovery B offer'
  $null=Invoke-WebDriverScript -SessionId $Context.SessionId -Deadline $Context.Deadline -Script 'const d=document.querySelector("dialog[aria-labelledby=\"recovery-offer-title\"]");[...d.querySelectorAll("button")].find(x=>x.textContent.trim()==="Keep recovered edits").click();return true;'
- $kept=Wait-RecoveryOracle $Context 'const p=document.querySelector("input[aria-label=\"Page number\"]"),u=document.querySelector("button[aria-label=\"Undo\"]"),i=document.querySelector("img[alt=\"Page 1\"]");return {notice:document.body.innerText.includes("Recovered edits are open. The source PDF was not changed."),dirty:document.body.innerText.includes("Unsaved changes"),page:p?.value||"",undo:!!u&&!u.disabled,w:i?.naturalWidth||0,h:i?.naturalHeight||0};' {param($v)[bool]$v.notice-and[bool]$v.dirty-and[string]$v.page-ceq'2'-and[bool]$v.undo-and[int]$v.w-eq[int]$PhaseA.originalHeight-and[int]$v.h-eq[int]$PhaseA.originalWidth} 'Recovery B rotated render'
+ $kept=Wait-RecoveryOracle $Context 'const p=document.querySelector("input[aria-label=\"Page number\"]"),u=document.querySelector("button[aria-label=\"Undo\"]"),i=document.querySelector("img[alt=\"Page 1\"]");return {notice:document.body.innerText.includes("Recovered edits are open. The source PDF was not changed."),dirty:document.body.innerText.includes("Unsaved changes"),page:p?.value||"",undo:!!u&&!u.disabled,w:i?.naturalWidth||0,h:i?.naturalHeight||0};' {param($v)[bool]$v.notice-and[bool]$v.dirty-and[string]$v.page-ceq'2'-and[bool]$v.undo-and(Test-RecoveryQuarterTurnRender ([int]$v.w) ([int]$v.h) ([int]$PhaseA.originalWidth) ([int]$PhaseA.originalHeight))} 'Recovery B rotated render'
  $null=Invoke-WebDriverScript -SessionId $Context.SessionId -Deadline $Context.Deadline -Script 'document.querySelector("button[aria-label=\"Undo\"]").click();return true;'
  $null=Wait-RecoveryOracle $Context 'const u=document.querySelector("button[aria-label=\"Undo\"]");return {clean:document.body.innerText.includes("Source preserved"),undo:!!u&&u.disabled,offer:document.querySelectorAll("dialog[aria-labelledby=\"recovery-offer-title\"]").length};' {param($v)[bool]$v.clean-and[bool]$v.undo-and[int]$v.offer-eq0} 'Recovery B tombstone'
  $closed=Invoke-WebDriverScript -SessionId $Context.SessionId -Deadline $Context.Deadline -Script 'const b=document.querySelector("button[aria-label=\"Close controlled-source.pdf\"]");if(b)b.click();return !!b;';if($closed-isnot[bool]-or-not$closed){throw 'Recovery B clean tab did not close.'}

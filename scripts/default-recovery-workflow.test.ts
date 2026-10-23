@@ -201,8 +201,7 @@ it('binds exact recovery sources, draft proof, candidate, token clearing, and re
 it('requires acknowledged A, exact B recovery and rendered rotation, then clean C', () => {
   const source = readFileSync(verifierPath, 'utf8');
   for (const marker of ['Invoke-RecoveryPhaseA','Invoke-RecoveryPhaseB','Invoke-RecoveryPhaseC','Recovered edits are available','unsaved revision 1','Recovered edits are open. The source PDF was not changed.','renderedRotationVerified=$true','undoToClean=$true','staleOfferAbsent=$true']) expect(source).toContain(marker);
-  expect(source).toContain('[int]$v.w-eq[int]$PhaseA.originalHeight');
-  expect(source).toContain('[int]$v.h-eq[int]$PhaseA.originalWidth');
+  expect(source).toContain('Test-RecoveryQuarterTurnRender ([int]$v.w) ([int]$v.h) ([int]$PhaseA.originalWidth) ([int]$PhaseA.originalHeight)');
   for (const profile of ['profile-a','profile-b','profile-c']) expect(source).toContain("Join-Path $Work '" + profile + "'");
 });
 
