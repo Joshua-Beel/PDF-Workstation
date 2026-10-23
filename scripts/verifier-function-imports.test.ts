@@ -4,93 +4,90 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
-const importers = ['verify-default-expanded-page-tools.ps1', 'verify-default-comments-forms.ps1', 'verify-default-recovery.ps1'];
+const defaultWorkflows = [
+  '.github/workflows/default-draft-verification.yml',
+  '.github/workflows/default-expanded-page-tools-verification.yml',
+  '.github/workflows/default-comments-forms-verification.yml',
+  '.github/workflows/default-recovery-verification.yml',
+];
 
-const analysis = String.raw`
-param([string]$Importers)
-$ErrorActionPreference = 'Stop'
-$importerList = @($Importers -split ',')
-function Read-Ast([string]$Path) {
-  $tokens = $null; $errors = $null
-  $ast = [Management.Automation.Language.Parser]::ParseFile((Resolve-Path -LiteralPath $Path).Path, [ref]$tokens, [ref]$errors)
-  if ($errors.Count) { throw "Parse error in $Path" }
-  return $ast
+function analyse(extraEntries: string[] = [], workflows = defaultWorkflows) {
+  const result = spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-File', 'scripts/verifier-reachability.ps1', '-Workflows', workflows.join(','), '-ExtraEntries', extraEntries.join(',')], { encoding: 'utf8', timeout: 120_000 });
+  const lines = result.stdout.split(/\r?\n/);
+  return { result, problems: lines.filter(line => line.startsWith('PROBLEM ')), entries: lines.find(line => line.startsWith('ENTRIES ')) ?? '' };
 }
-function Get-Definitions($Ast) { @($Ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] }, $true)) }
-function Get-CommandNames($Ast) { @($Ast.FindAll({ param($n) $n -is [Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() } | Where-Object { $_ }) }
-$repoFunctions = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-foreach ($file in Get-ChildItem -LiteralPath 'scripts' -Recurse -Filter '*.ps1') { foreach ($d in Get-Definitions (Read-Ast $file.FullName)) { $null = $repoFunctions.Add($d.Name) } }
-function Add-DotSourced([string]$Path, $Available, $Visited) {
-  $full = (Resolve-Path -LiteralPath $Path).Path
-  if (-not $Visited.Add($full)) { return }
-  $ast = Read-Ast $full
-  foreach ($d in Get-Definitions $ast) { $null = $Available.Add($d.Name) }
-  foreach ($m in [regex]::Matches($ast.Extent.Text, "(?m)^\s*\.\s+\(Join-Path\s+\`$PSScriptRoot\s+'([^']+\.ps1)'\)")) { Add-DotSourced (Join-Path (Split-Path -Parent $full) $m.Groups[1].Value) $Available $Visited }
-}
-$problems = @()
-foreach ($importer in $importerList) {
-  $path = Join-Path 'scripts' $importer
-  $ast = Read-Ast $path
-  $available = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-  Add-DotSourced $path $available ([Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase))
-  $needed = [Collections.Generic.List[object]]::new()
-  foreach ($name in Get-CommandNames $ast) { $needed.Add([pscustomobject]@{ Name = $name; From = $importer }) }
-  $imports = [regex]::Matches($ast.Extent.Text, "(?m)^Import-[A-Za-z]+Functions\s+\(Join-Path\s+\`$PSScriptRoot\s+'([^']+\.ps1)'\)\s+@\(([^)]*)\)")
-  if ($imports.Count -eq 0) { $problems += "$importer imports nothing (pattern changed?)" }
-  foreach ($import in $imports) {
-    $source = Join-Path 'scripts' $import.Groups[1].Value
-    $sourceAst = Read-Ast $source
-    $names = @([regex]::Matches($import.Groups[2].Value, "'([^']+)'") | ForEach-Object { $_.Groups[1].Value })
-    foreach ($name in $names) {
-      $null = $available.Add($name)
-      $definition = @(Get-Definitions $sourceAst | Where-Object { $_.Name -ceq $name })
-      if ($definition.Count -ne 1) { $problems += "$importer imports $name, which $($import.Groups[1].Value) does not define exactly once"; continue }
-      foreach ($called in Get-CommandNames $definition[0].Body) { $needed.Add([pscustomobject]@{ Name = $called; From = "$name ($($import.Groups[1].Value))" }) }
-    }
-  }
-  foreach ($item in $needed) {
-    if ($repoFunctions.Contains($item.Name) -and -not $available.Contains($item.Name)) { $problems += "$importer cannot resolve $($item.Name), called by $($item.From)" }
-  }
-}
-$problems | Sort-Object -Unique | ForEach-Object { Write-Output "MISSING $_" }
-Write-Output 'ANALYSIS DONE'
-`;
 
-function runAnalysis(files: string[]) {
-  const root = join('target', `verifier-imports-${randomUUID()}`);
-  mkdirSync(root, { recursive: true });
-  const path = join(root, 'analyse.ps1');
+function withTemporaryScript(content: string, run: (name: string) => void) {
+  const name = `zz-reachability-control-${randomUUID()}.ps1`;
+  const path = join('scripts', name);
   try {
-    writeFileSync(path, analysis, 'utf8');
-    return spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-File', path, '-Importers', files.join(',')], { encoding: 'utf8', timeout: 90_000 });
+    writeFileSync(path, content, 'utf8');
+    run(name);
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    rmSync(path, { force: true });
   }
 }
 
-describe('installed-app verifier helper imports', () => {
-  it('every repository function a default verifier or one of its imported helpers calls is defined, dot-sourced or imported', () => {
-    const result = runAnalysis(importers);
+describe('installed-app verifier reachability', () => {
+  it('resolves every repository function reachable from the four default verifier workflows, transitively, and has no blind closures', () => {
+    const { result, problems, entries } = analyse();
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain('ANALYSIS DONE');
-    expect(result.stdout.split(/\r?\n/).filter(line => line.startsWith('MISSING '))).toEqual([]);
-  }, 120_000);
-
-  it('finds a missing helper import (negative control)', () => {
-    const source = readFileSync('scripts/verify-default-expanded-page-tools.ps1', 'utf8');
-    const name = `zz-negative-control-${randomUUID()}.ps1`;
-    const root = join('scripts', name);
-    try {
-      const broken = source.replace(",'Get-UniqueResource','Convert-RegistryFilePath')", ",'Get-UniqueResource')");
-      expect(broken).not.toBe(source);
-      writeFileSync(root, broken, 'utf8');
-      const result = runAnalysis([name]);
-      expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toMatch(/MISSING .* cannot resolve Convert-RegistryFilePath, called by Get-InstallFacts/);
-    } finally {
-      rmSync(root, { force: true });
+    expect(problems).toEqual([]);
+    for (const script of ['verify-default-draft.ps1', 'verify-default-expanded-page-tools.ps1', 'verify-default-comments-forms.ps1', 'verify-default-recovery.ps1', 'assert-updater-signing-key.ps1', 'setup-installed-app-webdriver.ps1', 'prepare-default-draft-pdfium.ps1']) {
+      expect(entries).toContain(script);
     }
-  }, 120_000);
+  }, 150_000);
+
+  it('reports a helper that an imported helper calls but nobody imports (negative control)', () => {
+    const source = readFileSync('scripts/verify-default-expanded-page-tools.ps1', 'utf8');
+    const broken = source.replace(",'Get-UniqueResource','Convert-RegistryFilePath')", ",'Get-UniqueResource')");
+    expect(broken).not.toBe(source);
+    withTemporaryScript(broken, name => {
+      const { result, problems } = analyse([name], []);
+      expect(result.status, result.stderr).toBe(0);
+      expect(problems.join('\n')).toMatch(/cannot resolve Convert-RegistryFilePath, called by Get-InstallFacts in verify-signed-ocr-upgrade\.ps1/);
+    });
+  }, 150_000);
+
+  it('reports a GetNewClosure() callback that calls script functions (negative control)', () => {
+    const control = [
+      ". (Join-Path $PSScriptRoot 'installed-image-page-tools.ps1')",
+      "function Invoke-ControlCallback { $callback = { param($c) Wait-ImagePageWebDriverOracle -SessionId 'x' }.GetNewClosure(); & $callback 1 }",
+    ].join('\n');
+    withTemporaryScript(control, name => {
+      const { result, problems } = analyse([name], []);
+      expect(result.status, result.stderr).toBe(0);
+      expect(problems.join('\n')).toContain(`${name}:2 GetNewClosure() scriptblock calls script functions`);
+      expect(problems.join('\n')).toContain('Wait-ImagePageWebDriverOracle');
+    });
+  }, 150_000);
+
+  it('reproduces why GetNewClosure() breaks under the hosted runner invocation while a plain callback works', () => {
+    const root = join('target', `closure-scope-${randomUUID()}`);
+    mkdirSync(root, { recursive: true });
+    try {
+      writeFileSync(join(root, 'helper.ps1'), [
+        'function Inner-Helper { "inner" }',
+        'function Run-Callback { param([scriptblock]$Callback) & $Callback }',
+        'function Use-Closure { param($Value) Run-Callback ({ "$Value " + (Inner-Helper) }.GetNewClosure()) }',
+        'function Use-Plain { param($Value) Run-Callback { "$Value " + (Inner-Helper) } }',
+      ].join('\n'), 'utf8');
+      writeFileSync(join(root, 'entry.ps1'), [
+        "$ErrorActionPreference = 'Stop'",
+        ". (Join-Path $PSScriptRoot 'helper.ps1')",
+        'try { Use-Closure "closure" } catch { "closure failed" }',
+        'Use-Plain "plain"',
+      ].join('\n'), 'utf8');
+      writeFileSync(join(root, 'runner.ps1'), `& '${join(process.cwd(), root, 'entry.ps1').replaceAll("'", "''")}'`, 'utf8');
+      const runner = spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', `. '${join(process.cwd(), root, 'runner.ps1').replaceAll("'", "''")}'`], { encoding: 'utf8', timeout: 60_000 });
+      expect(runner.status, runner.stderr).toBe(0);
+      expect(runner.stdout).toContain('closure failed');
+      expect(runner.stdout).toContain('plain inner');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 90_000);
 
   it('clicks only the toolbar Open control, because a fresh profile also shows an empty-state Open button', () => {
     const app = readFileSync('src/App.tsx', 'utf8');
@@ -103,5 +100,14 @@ describe('installed-app verifier helper imports', () => {
     expect(recovery.split(scoped).length - 1).toBe(2);
     expect(recovery).not.toMatch(/textContent\.trim\(\)==="Open a file"&&!x\.disabled\)/);
     expect(recovery.indexOf("'Recovery toolbar Open control'")).toBeLessThan(recovery.indexOf('Get-ReadingProcessUiSurfaceSnapshot -ApplicationProcessId $appPid'));
+    expect(recovery).toContain("[Console]::Out.WriteLine(\"RECOVERY_STAGE oracle: $Kind\")");
+  });
+
+  it('accepts a failed session delete only after the callback reports an intentional abrupt termination', () => {
+    const helper = readFileSync('scripts/installed-image-page-tools.ps1', 'utf8');
+    expect(helper).toContain("if ($sessionDeleteOutcome -cne 'verified' -and $null -ne $result -and $null -ne $result.PSObject.Properties['abruptTermination'] -and $result.abruptTermination -is [bool] -and $result.abruptTermination) { $assertedDeleteOutcome = 'verified' }");
+    expect(helper).toContain('Assert-LaunchCleanupState -Result $result -SessionDeleteOutcome $assertedDeleteOutcome');
+    expect(helper).toContain("$result | Add-Member sessionDeleted ($sessionDeleteOutcome -ceq 'verified')");
+    expect(readFileSync('scripts/verify-default-recovery.ps1', 'utf8')).toContain('abruptTermination=$killed');
   });
 });

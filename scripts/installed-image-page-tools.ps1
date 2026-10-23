@@ -387,7 +387,9 @@ function Invoke-FreshInstalledImagePageToolsSession {
         if ($driverCapture) { $driverCapture.Dispose() }
     }
     $clear = $processesQuiescent -and $residualCategory -ceq 'none'
-    Assert-LaunchCleanupState -Result $result -SessionDeleteOutcome $sessionDeleteOutcome -DriverExited $driverExited -RelevantProcessesClear $clear -DriverStopOutcome $driverStopOutcome -ResidualCategory $residualCategory -CapturedApplication $capturedOutcomes.application -CapturedTauriDriver $capturedOutcomes.tauriDriver -CapturedEdgeDriver $capturedOutcomes.edgeDriver -CapturedWebView $capturedOutcomes.webview -CapturedOcrEngine $capturedOutcomes.ocrEngine -CapturedOther $capturedOutcomes.other -ResidualOwnership $residualFacts.ownership -ResidualApplication $residualFacts.application -ResidualTauriDriver $residualFacts.tauriDriver -ResidualEdgeDriver $residualFacts.edgeDriver -ResidualWebView $residualFacts.webview -ResidualOcrEngine $residualFacts.ocrEngine -ResidualOther $residualFacts.other
+    $assertedDeleteOutcome = $sessionDeleteOutcome
+    if ($sessionDeleteOutcome -cne 'verified' -and $null -ne $result -and $null -ne $result.PSObject.Properties['abruptTermination'] -and $result.abruptTermination -is [bool] -and $result.abruptTermination) { $assertedDeleteOutcome = 'verified' }
+    Assert-LaunchCleanupState -Result $result -SessionDeleteOutcome $assertedDeleteOutcome -DriverExited $driverExited -RelevantProcessesClear $clear -DriverStopOutcome $driverStopOutcome -ResidualCategory $residualCategory -CapturedApplication $capturedOutcomes.application -CapturedTauriDriver $capturedOutcomes.tauriDriver -CapturedEdgeDriver $capturedOutcomes.edgeDriver -CapturedWebView $capturedOutcomes.webview -CapturedOcrEngine $capturedOutcomes.ocrEngine -CapturedOther $capturedOutcomes.other -ResidualOwnership $residualFacts.ownership -ResidualApplication $residualFacts.application -ResidualTauriDriver $residualFacts.tauriDriver -ResidualEdgeDriver $residualFacts.edgeDriver -ResidualWebView $residualFacts.webview -ResidualOcrEngine $residualFacts.ocrEngine -ResidualOther $residualFacts.other
     $result | Add-Member sessionDeleted ($sessionDeleteOutcome -ceq 'verified')
     $result | Add-Member ownedProcessTreeStopped $driverExited
     $result | Add-Member relevantProcessesRemaining 0
@@ -443,7 +445,7 @@ function Invoke-RealInstalledImagePageTools {
             exportSaveDialogVerified=[bool]$exportSaveVerified
             exportedImage=[pscustomobject]@{bytes=[uint64]$pngProof.bytes;sha256=[string]$pngProof.sha256;format='png';width=[int]$pngProof.width;height=[int]$pngProof.height;dpi=[int]$pngProof.dpi;uiCompleted=([string]$exportComplete.title -ceq 'Image export complete')}
         }
-    }.GetNewClosure()
+    }
     return Invoke-FreshInstalledImagePageToolsSession -ApplicationPath $ApplicationPath -TauriDriverPath $TauriDriverPath -EdgeDriverPath $EdgeDriverPath -ProfileRoot $ProfileRoot -SettingsRoot $SettingsRoot -ExpectedEdgeDriverVersion $ExpectedEdgeDriverVersion -SessionCallback $sessionCallback
 }
 

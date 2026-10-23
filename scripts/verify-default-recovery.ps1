@@ -46,14 +46,21 @@ function Stop-ExactRecoveryApplication { param([int]$ProcessId,[long]$ProcessSta
 }
 function Open-RecoveryFixture { param($Context,[string]$Path)
  $appPid=[int]$Context.ApplicationProcessId;$ticks=[long]$Context.ApplicationProcessStartUtcTicks;$deadline=[datetime]$Context.Deadline
+ [Console]::Out.WriteLine('RECOVERY_STAGE open: waiting for the toolbar Open control')
  $null=Wait-RecoveryOracle $Context 'return [...document.querySelectorAll("button")].filter(x=>x.textContent.trim()==="Open a file"&&!x.disabled&&x.parentElement?.querySelector("button[aria-label=\"Toggle theme\"]")).length;' {param($v)[int]$v-eq1} 'Recovery toolbar Open control'
+ [Console]::Out.WriteLine('RECOVERY_STAGE open: taking UI baselines')
  $surfaces=@(Get-ReadingProcessUiSurfaceSnapshot -ApplicationProcessId $appPid -ApplicationProcessStartUtcTicks $ticks -Deadline $deadline);$ids=Assert-ReadingSurfaceSnapshot -Snapshot $surfaces -ApplicationProcessId $appPid -Kind 'Recovery open baseline'
  $targets=@(Get-ReadingPickerTargetSnapshot -Surfaces $surfaces -ApplicationProcessId $appPid -ApplicationProcessStartUtcTicks $ticks -Deadline $deadline);$null=Assert-ReadingPickerTargetSnapshot -Snapshot $targets -SurfaceIdentities $ids -ApplicationProcessId $appPid -Kind 'Recovery picker baseline'
  $clicked=Invoke-WebDriverScript -SessionId $Context.SessionId -Script 'const b=[...document.querySelectorAll("button")].filter(x=>x.textContent.trim()==="Open a file"&&!x.disabled&&x.parentElement?.querySelector("button[aria-label=\"Toggle theme\"]"));if(b.length===1)setTimeout(()=>b[0].click(),0);return b.length===1;' -Deadline $deadline
- if($clicked-isnot[bool]-or-not$clicked){throw 'Exact Open control was unavailable.'};$picker=Wait-ReadingProcessBoundPickerTargets -ApplicationProcessId $appPid -ApplicationProcessStartUtcTicks $ticks -BaselineSurfaces $surfaces -BaselineTargets $targets -Deadline $deadline
+ if($clicked-isnot[bool]-or-not$clicked){throw 'Exact Open control was unavailable.'}
+ [Console]::Out.WriteLine('RECOVERY_STAGE open: clicked, waiting for the native picker')
+ $picker=Wait-ReadingProcessBoundPickerTargets -ApplicationProcessId $appPid -ApplicationProcessStartUtcTicks $ticks -BaselineSurfaces $surfaces -BaselineTargets $targets -Deadline $deadline
+ [Console]::Out.WriteLine('RECOVERY_STAGE open: submitting the native picker')
  Submit-ProcessBoundOpenDialog -Binding $picker -ApplicationProcessId $appPid -ApplicationProcessStartUtcTicks $ticks -Path $Path -Deadline $deadline
+ [Console]::Out.WriteLine('RECOVERY_STAGE open: picker submitted')
 }
 function Wait-RecoveryOracle { param($Context,[string]$Script,[scriptblock]$Predicate,[string]$Kind)
+ [Console]::Out.WriteLine("RECOVERY_STAGE oracle: $Kind")
  Wait-WebDriverOracle -SessionId $Context.SessionId -Script $Script -Deadline $Context.Deadline -Kind $Kind -Predicate $Predicate
 }
 function Invoke-RecoveryPhaseA { param($Context,[string]$Fixture,[string]$Application)
@@ -63,6 +70,7 @@ function Invoke-RecoveryPhaseA { param($Context,[string]$Fixture,[string]$Applic
  $null=Wait-RecoveryOracle $Context 'return {ready:!!document.querySelector("section[aria-label=\"Organize pages workspace\"]")};' {param($v)[bool]$v.ready} 'Recovery A organizer'
  $null=Invoke-WebDriverScript -SessionId $Context.SessionId -Deadline $Context.Deadline -Script 'document.querySelector("button[aria-label=\"Select page 1\"]").click();document.querySelector("button[aria-label=\"Rotate selected pages clockwise\"]").click();return true;'
  $null=Wait-RecoveryOracle $Context 'const p=document.querySelector("input[aria-label=\"Page number\"]"),u=document.querySelector("button[aria-label=\"Undo\"]");return {dirty:document.body.innerText.includes("Unsaved changes"),page:p?.value||"",undo:!!u&&!u.disabled,dialogs:document.querySelectorAll("dialog").length,alerts:document.querySelectorAll("[role=alert]").length};' {param($v)[bool]$v.dirty-and[string]$v.page-ceq'2'-and[bool]$v.undo-and[int]$v.dialogs-eq0-and[int]$v.alerts-eq0} 'Recovery A acknowledged edit'
+ [Console]::Out.WriteLine('RECOVERY_STAGE A: terminating the application abruptly')
  $killed=Stop-ExactRecoveryApplication -ProcessId $Context.ApplicationProcessId -ProcessStartUtcTicks $Context.ApplicationProcessStartUtcTicks -ApplicationPath $Application
  [pscustomobject]@{editAcknowledged=$true;currentPage=2;revision=1;originalWidth=[int]$before.w;originalHeight=[int]$before.h;abruptTermination=$killed;closeActionInvoked=$false}
 }
@@ -83,8 +91,11 @@ function Invoke-RecoveryPhaseC { param($Context,[string]$Fixture)
  [pscustomobject]@{staleOfferAbsent=$true;cleanOriginal=$true;cleanTabClosed=$true}
 }
 function Invoke-InstalledRecoveryRuntime { param([string]$Application,[string]$TauriDriver,[string]$EdgeDriver,[string]$Settings,[string]$Work,[string]$Fixture,[string]$EdgeVersion)
+ [Console]::Out.WriteLine('RECOVERY_STAGE session A: launching')
  $a=Invoke-FreshInstalledImagePageToolsSession -ApplicationPath $Application -TauriDriverPath $TauriDriver -EdgeDriverPath $EdgeDriver -ProfileRoot (Join-Path $Work 'profile-a') -SettingsRoot $Settings -ExpectedEdgeDriverVersion $EdgeVersion -SessionCallback {param($c)Invoke-RecoveryPhaseA $c $Fixture $Application}
+ [Console]::Out.WriteLine('RECOVERY_STAGE session B: launching')
  $b=Invoke-FreshInstalledImagePageToolsSession -ApplicationPath $Application -TauriDriverPath $TauriDriver -EdgeDriverPath $EdgeDriver -ProfileRoot (Join-Path $Work 'profile-b') -SettingsRoot $Settings -ExpectedEdgeDriverVersion $EdgeVersion -SessionCallback {param($c)Invoke-RecoveryPhaseB $c $Fixture $a}
+ [Console]::Out.WriteLine('RECOVERY_STAGE session C: launching')
  $c=Invoke-FreshInstalledImagePageToolsSession -ApplicationPath $Application -TauriDriverPath $TauriDriver -EdgeDriverPath $EdgeDriver -ProfileRoot (Join-Path $Work 'profile-c') -SettingsRoot $Settings -ExpectedEdgeDriverVersion $EdgeVersion -SessionCallback {param($x)Invoke-RecoveryPhaseC $x $Fixture}
  [pscustomobject]@{a=$a;b=$b;c=$c;profilesRetained=$true}
 }
