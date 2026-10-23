@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- Review fixes for the input-driven signed checks: the reading-tools source record no longer claims blob verification it does not perform, the OCR upgrade workflow checks source-revision ancestry and validates artifact metadata before its second checkout (SM6b).
 - The five signed installed checks (expanded page tools, OCR upgrade, persistence, print dialog, reading tools) now take the signed OCR artifact, source revision, hashes and version as dispatch inputs, computing fingerprints at run time, so a new build needs no code change; none run hosted yet (SM6b).
 - Pre-tag rehearsal: the three default installed checks can now run on a signed release-candidate artifact before tagging (`default-rehearsal-verification.yml`, read-only, no secrets); the draft checks are unchanged (SM6; scripts, workflows, tests and docs only).
 - Installed-app verifiers: typed Save-dialog filenames are re-checked after the dialog settles and re-typed if the dialog replaced them with its suggested name (SM6; scripts and tests only).

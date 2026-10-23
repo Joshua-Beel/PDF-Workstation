@@ -76,7 +76,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Verify the exact clean dispatched source
@@ -92,17 +92,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'The tracked index changed after checkout.' }
           . ./scripts/signed-check-inputs.ps1
           $null = Get-SignedCheckInputs -TargetVersion $env:TARGET_VERSION -SourceRevision $env:SOURCE_REVISION -ArtifactRunId $env:ARTIFACT_RUN_ID -ArtifactId $env:ARTIFACT_ID -ArtifactName $env:ARTIFACT_NAME -ArtifactBytes $env:ARTIFACT_BYTES -ArtifactDigest $env:ARTIFACT_DIGEST -InstallerName $env:INSTALLER_NAME -InstallerBytes $env:INSTALLER_BYTES -InstallerSha256 $env:INSTALLER_SHA256 -RecordBytes $env:RECORD_BYTES -RecordSha256 $env:RECORD_SHA256
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ inputs.source_revision }}
-          fetch-depth: 1
-          persist-credentials: false
-          path: target-source
-
-      - name: Prepare exact pinned PDFium resources in the signed source
-        shell: pwsh
-        run: ./scripts/prepare-default-draft-pdfium.ps1 -TargetSourceRoot (Resolve-Path target-source).Path -WorkRoot (Join-Path $env:RUNNER_TEMP 'upgrade-pdfium-prep')
+          git cat-file -e "$env:SOURCE_REVISION^{commit}"
+          if ($LASTEXITCODE -ne 0) { throw 'The exact signed source commit is unavailable.' }
+          git merge-base --is-ancestor $env:SOURCE_REVISION HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'The signed source revision is not on the dispatched master history.' }
 
       - name: Prepare exact hosted WebDriver inputs
         shell: pwsh
@@ -120,6 +113,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Tracked working-tree files changed during WebDriver preparation.' }
           git diff --cached --quiet --
           if ($LASTEXITCODE -ne 0) { throw 'The tracked index changed during WebDriver preparation.' }
+
+      - name: Verify exact signed artifact metadata
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if (Test-Path -LiteralPath $env:SIGNED_ARTIFACT_ROOT) { throw 'Signed artifact download root must be fresh.' }
+          ./scripts/assert-signed-artifact-metadata.ps1 -TargetSourceRevision $env:SOURCE_REVISION -ArtifactRunId $env:ARTIFACT_RUN_ID -ArtifactId $env:ARTIFACT_ID -ArtifactName $env:ARTIFACT_NAME -ArtifactBytes $env:ARTIFACT_BYTES -ArtifactDigest $env:ARTIFACT_DIGEST
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.source_revision }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: target-source
+
+      - name: Prepare exact pinned PDFium resources in the signed source
+        shell: pwsh
+        run: ./scripts/prepare-default-draft-pdfium.ps1 -TargetSourceRoot (Resolve-Path target-source).Path -WorkRoot (Join-Path $env:RUNNER_TEMP 'upgrade-pdfium-prep')
 
       - name: Download the exact published 0.2.0 baseline asset
         shell: pwsh
@@ -147,14 +159,6 @@ jobs:
             'X-GitHub-Api-Version' = '2022-11-28'
           }
           Invoke-WebRequest -Uri $api -Headers $downloadHeaders -OutFile (Join-Path $env:BASELINE_ROOT $asset.name)
-
-      - name: Verify exact signed artifact metadata
-        shell: pwsh
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          if (Test-Path -LiteralPath $env:SIGNED_ARTIFACT_ROOT) { throw 'Signed artifact download root must be fresh.' }
-          ./scripts/assert-signed-artifact-metadata.ps1 -TargetSourceRevision $env:SOURCE_REVISION -ArtifactRunId $env:ARTIFACT_RUN_ID -ArtifactId $env:ARTIFACT_ID -ArtifactName $env:ARTIFACT_NAME -ArtifactBytes $env:ARTIFACT_BYTES -ArtifactDigest $env:ARTIFACT_DIGEST
 
       - name: Download the exact signed OCR artifact
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131

@@ -34,13 +34,18 @@ describe('manual signed reading-tools workflow', () => {
     expect(verifier).not.toMatch(/\b(?:11005152678|12510717103|39969839829)\b/);
     expect(verifier).toContain('currentApplicationShellMatchesSigned = [bool]($currentShell -ceq $signedShell)');
     expect(verifier).toContain("[string]$script:ReadingVerificationPins.LeakIds");
+    expect(verifier).not.toMatch(/signedFeatureBlobsVerified|signedApplicationShellBlobVerified/);
+    const parity = verifier.slice(verifier.indexOf('function Assert-SignedReadingSourceParity'), verifier.indexOf('function Get-ReadingFileReceipt'));
+    expect(parity).not.toMatch(/^(?!.*Mandatory).*=\s*\$true/m);
     const run = (signed: string, current: string) => runPwsh(String.raw`${preamble}
       ${guarded(String.raw`
       ${signedInputsSnippet(signed)}
       ${importFunctions('verify-signed-reading-tools.ps1', '$script:ReadingVerificationPins', ['Assert-SignedReadingSourceParity', 'Initialize-ReadingPins'])}
       Initialize-ReadingPins -Inputs $inputs
       $result = Assert-SignedReadingSourceParity -ProjectRoot '${process.cwd().replaceAll("'", "''")}' -CurrentRevision '${current}'
-      if ($result.featureBlobCount -ne 11 -or -not $result.currentApplicationShellMatchesSigned) { throw 'Unexpected parity result.' }
+      if ($result.featureBlobCount -ne 11 -or -not $result.currentApplicationShellMatchesSigned -or -not $result.currentFeatureParityVerified) { throw 'Unexpected parity result.' }
+      $names = @($result.PSObject.Properties.Name | Sort-Object -CaseSensitive) -join ','
+      if ($names -cne 'currentApplicationShellMatchesSigned,currentFeatureParityVerified,featureBlobCount') { throw ('The parity record claims unverified facts: ' + $names) }
       `)}
     `);
     const control = run(REV_NEW, REV_NEW);

@@ -72,17 +72,17 @@ function Assert-ReadingHostedSource {
 function Assert-SignedReadingSourceParity {
     param([Parameter(Mandatory = $true)][string]$ProjectRoot,[string]$CurrentRevision = 'HEAD')
     $signedBlobs = Get-SignedSourceBlobs -ProjectRoot $ProjectRoot -Revision $script:ReadingVerificationPins.SignedSourceRevision -Paths @($script:ReadingVerificationPins.FeaturePaths + 'src/App.tsx')
+    $matchedFeatureBlobs = 0
     foreach ($path in $script:ReadingVerificationPins.FeaturePaths) {
         $current = (& git -C $ProjectRoot rev-parse "${CurrentRevision}:$path").Trim()
         if ($LASTEXITCODE -ne 0 -or $current -cne $signedBlobs[$path]) { throw 'A reading feature source blob does not match the exact signed and dispatched source parity contract.' }
+        $matchedFeatureBlobs++
     }
     $signedShell = $signedBlobs['src/App.tsx']
     $currentShell = (& git -C $ProjectRoot rev-parse "${CurrentRevision}:src/App.tsx").Trim()
     return [pscustomobject]@{
-        signedFeatureBlobsVerified = $true
-        currentFeatureParityVerified = $true
-        featureBlobCount = [int]$script:ReadingVerificationPins.FeaturePaths.Count
-        signedApplicationShellBlobVerified = $true
+        currentFeatureParityVerified = [bool]($matchedFeatureBlobs -eq $script:ReadingVerificationPins.FeaturePaths.Count)
+        featureBlobCount = [int]$matchedFeatureBlobs
         currentApplicationShellMatchesSigned = [bool]($currentShell -ceq $signedShell)
     }
 }

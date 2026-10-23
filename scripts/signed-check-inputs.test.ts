@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
@@ -34,6 +34,13 @@ describe('signed installed checks take the artifact from dispatch inputs', () =>
       for (const input of inputNames) expect(jobEnv).toContain(`\${{ inputs.${input} }}`);
       expect(jobEnv).not.toMatch(/GITHUB_TOKEN|github\.token/);
       expect(workflow.indexOf('Get-SignedCheckInputs')).toBeLessThan(workflow.indexOf('assert-signed-artifact-metadata.ps1'));
+      expect(workflow).toMatch(/git merge-base --is-ancestor \$(?:env:SOURCE_REVISION|signedRevision|signed) HEAD/);
+      expect(workflow).toMatch(/ref: \$\{\{ github\.sha \}\}\r?\n\s+fetch-depth: 0\r?\n/);
+      const secondCheckout = workflow.indexOf('ref: ${{ inputs.source_revision }}');
+      if (secondCheckout >= 0) {
+        expect(workflow.indexOf('git merge-base --is-ancestor')).toBeLessThan(secondCheckout);
+        if (name === 'ocr-installer-upgrade') expect(workflow.indexOf('assert-signed-artifact-metadata.ps1')).toBeLessThan(secondCheckout);
+      }
     });
   }
 
@@ -88,6 +95,7 @@ describe('signed installed checks take the artifact from dispatch inputs', () =>
       expect(result.status, result.stderr).toBe(0);
       return result.stdout.trim();
     };
+    try {
     mkdirSync(resolve(root, 'src-tauri/resources/pdfium/licenses'), { recursive: true });
     mkdirSync(resolve(root, 'src-tauri/resources/third-party-sources'), { recursive: true });
     writeFileSync(resolve(root, 'src-tauri/tauri.conf.json'), JSON.stringify({
@@ -121,6 +129,9 @@ describe('signed installed checks take the artifact from dispatch inputs', () =>
     `);
     expect(otherHead.status).toBe(1);
     expect(otherHead.stderr).toContain('not the signed source revision');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }, 120_000);
 
   it('adds the same pin fields every verifier reads, including run-time leak ids', () => {
