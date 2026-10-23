@@ -9,6 +9,7 @@ const defaultWorkflows = [
   '.github/workflows/default-expanded-page-tools-verification.yml',
   '.github/workflows/default-comments-forms-verification.yml',
   '.github/workflows/default-recovery-verification.yml',
+  '.github/workflows/default-rehearsal-verification.yml',
 ];
 
 function analyse(extraEntries: string[] = [], workflows = defaultWorkflows) {
@@ -29,12 +30,12 @@ function withTemporaryScript(content: string, run: (name: string) => void) {
 }
 
 describe('installed-app verifier reachability', () => {
-  it('resolves every repository function reachable from the four default verifier workflows, transitively, and has no blind closures', () => {
+  it('resolves every repository function reachable from the four default verifier workflows and the pre-tag rehearsal, transitively, and has no blind closures', () => {
     const { result, problems, entries } = analyse();
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain('ANALYSIS DONE');
     expect(problems).toEqual([]);
-    for (const script of ['verify-default-draft.ps1', 'verify-default-expanded-page-tools.ps1', 'verify-default-comments-forms.ps1', 'verify-default-recovery.ps1', 'assert-updater-signing-key.ps1', 'setup-installed-app-webdriver.ps1', 'prepare-default-draft-pdfium.ps1']) {
+    for (const script of ['verify-default-draft.ps1', 'verify-default-expanded-page-tools.ps1', 'verify-default-comments-forms.ps1', 'verify-default-recovery.ps1', 'assert-updater-signing-key.ps1', 'setup-installed-app-webdriver.ps1', 'prepare-default-draft-pdfium.ps1', 'verify-default-artifact.ps1', 'assert-signed-artifact-metadata.ps1']) {
       expect(entries).toContain(script);
     }
   }, 150_000);
@@ -47,6 +48,22 @@ describe('installed-app verifier reachability', () => {
       const { result, problems } = analyse([name], []);
       expect(result.status, result.stderr).toBe(0);
       expect(problems.join('\n')).toMatch(/cannot resolve Convert-RegistryFilePath, called by Get-InstallFacts in verify-signed-ocr-upgrade\.ps1/);
+    });
+  }, 150_000);
+
+  it('counts functions nested inside an imported helper, and still reports a missing helper of the artifact extraction (negative control)', () => {
+    const source = readFileSync('scripts/verify-default-artifact.ps1', 'utf8');
+    withTemporaryScript(source, name => {
+      const { result, problems } = analyse([name], []);
+      expect(result.status, result.stderr).toBe(0);
+      expect(problems).toEqual([]);
+    });
+    const broken = source.replace("'Invoke-BoundedSevenZip',", '');
+    expect(broken).not.toBe(source);
+    withTemporaryScript(broken, name => {
+      const { problems } = analyse([name], []);
+      expect(problems.join(' | ')).toMatch(/cannot resolve Invoke-BoundedSevenZip, called by (Get-SevenZipVersionFact|Expand-DefaultInstaller)/);
+      expect(problems.join(' | ')).not.toContain('Complete-Entry');
     });
   }, 150_000);
 

@@ -1,0 +1,138 @@
+name: Manual pre-tag default rehearsal
+
+on:
+  workflow_dispatch:
+    inputs:
+      check:
+        required: true
+        type: choice
+        options: [expanded-page-tools, comments-forms, recovery]
+      target_version: { required: true, type: string }
+      target_source_revision: { required: true, type: string }
+      artifact_run_id: { required: true, type: string }
+      artifact_id: { required: true, type: string }
+      artifact_name: { required: true, type: string }
+      artifact_bytes: { required: true, type: string }
+      artifact_digest: { required: true, type: string }
+      installer_name: { required: true, type: string }
+      installer_bytes: { required: true, type: string }
+      installer_sha256: { required: true, type: string }
+      expected_publisher: { required: true, type: string }
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  rehearse:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - name: Require a manual master dispatch
+        shell: pwsh
+        env: { CHECK: '${{ inputs.check }}' }
+        run: |
+          if ($env:GITHUB_REPOSITORY -cne 'Joshua-Beel/PDF-Workstation' -or $env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or $env:GITHUB_REF -cne 'refs/heads/master') { throw 'Dispatch only from master.' }
+          if ($env:CHECK -cnotin @('expanded-page-tools','comments-forms','recovery')) { throw 'Unknown rehearsal check.' }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with: { ref: '${{ github.sha }}', fetch-depth: 0, persist-credentials: false }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: Joshua-Beel/PDF-Workstation
+          ref: ${{ inputs.target_source_revision }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: target-source
+      - name: Verify exact clean sources and a merged release candidate
+        shell: pwsh
+        env: { TARGET_SHA: '${{ inputs.target_source_revision }}' }
+        run: |
+          if($env:TARGET_SHA-cnotmatch'^[a-f0-9]{40}$'){throw 'Target revision must be a full lowercase commit id.'}
+          $head=(git rev-parse HEAD).Trim();$target=(git -C target-source rev-parse HEAD).Trim()
+          if($LASTEXITCODE-ne0-or$head-cne$env:GITHUB_SHA-or$target-cne$env:TARGET_SHA){throw 'Source identity mismatch.'}
+          git merge-base --is-ancestor $env:TARGET_SHA HEAD;if($LASTEXITCODE-ne0){throw 'The release candidate is not on master.'}
+          git diff --quiet --;if($LASTEXITCODE-ne0){throw 'Workflow source changed.'};git diff --cached --quiet --;if($LASTEXITCODE-ne0){throw 'Workflow index changed.'}
+          git -C target-source diff --quiet --;if($LASTEXITCODE-ne0){throw 'Target source changed.'};git -C target-source diff --cached --quiet --;if($LASTEXITCODE-ne0){throw 'Target index changed.'}
+      - name: Initialize fresh roots
+        shell: pwsh
+        run: |
+          $root=[IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\');$writer=[IO.StreamWriter]::new($env:GITHUB_ENV,$true,[Text.UTF8Encoding]::new($false));try{
+            foreach($value in @("ARTIFACT_ROOT=$root\rehearsal-signed-artifact","EXTRACTION_WORK_ROOT=$root\rehearsal-extraction-work","EXTRACTION_PROOF_ROOT=$root\rehearsal-extraction-proof","REHEARSAL_WORK_ROOT=$root\rehearsal-work","REHEARSAL_OUTPUT_ROOT=$root\rehearsal-output","WEBDRIVER_ROOT=$root\rehearsal-webdriver")){$writer.WriteLine($value)}
+          }finally{$writer.Dispose()}
+      - name: Verify the pinned signed artifact metadata
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ inputs.target_source_revision }}
+          ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          ARTIFACT_NAME: ${{ inputs.artifact_name }}
+          ARTIFACT_BYTES: ${{ inputs.artifact_bytes }}
+          ARTIFACT_DIGEST: ${{ inputs.artifact_digest }}
+        run: ./scripts/assert-signed-artifact-metadata.ps1 -TargetSourceRevision $env:TARGET_SHA -ArtifactRunId $env:ARTIFACT_RUN_ID -ArtifactId $env:ARTIFACT_ID -ArtifactName $env:ARTIFACT_NAME -ArtifactBytes $env:ARTIFACT_BYTES -ArtifactDigest $env:ARTIFACT_DIGEST
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ inputs.artifact_id }}
+          github-token: ${{ github.token }}
+          repository: Joshua-Beel/PDF-Workstation
+          run-id: ${{ inputs.artifact_run_id }}
+          path: ${{ env.ARTIFACT_ROOT }}
+          merge-multiple: true
+      - name: Prepare exact pinned PDFium resources in target source
+        shell: pwsh
+        run: ./scripts/prepare-default-draft-pdfium.ps1 -TargetSourceRoot (Resolve-Path target-source).Path -WorkRoot (Join-Path $env:RUNNER_TEMP 'rehearsal-pdfium-prep')
+      - name: Prepare exact hosted WebDriver inputs
+        shell: pwsh
+        run: ./scripts/setup-installed-app-webdriver.ps1 -OutputRoot $env:WEBDRIVER_ROOT
+      - name: Extract and verify the signed release-candidate installer
+        shell: pwsh
+        env:
+          TARGET_VERSION: ${{ inputs.target_version }}
+          TARGET_SHA: ${{ inputs.target_source_revision }}
+          ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          ARTIFACT_NAME: ${{ inputs.artifact_name }}
+          ARTIFACT_BYTES: ${{ inputs.artifact_bytes }}
+          ARTIFACT_DIGEST: ${{ inputs.artifact_digest }}
+          INSTALLER_NAME: ${{ inputs.installer_name }}
+          INSTALLER_BYTES: ${{ inputs.installer_bytes }}
+          INSTALLER_SHA: ${{ inputs.installer_sha256 }}
+          PUBLISHER: ${{ inputs.expected_publisher }}
+        run: ./scripts/verify-default-artifact.ps1 -ProjectRoot (Get-Location).Path -TargetSourceRoot (Resolve-Path target-source).Path -ArtifactRoot $env:ARTIFACT_ROOT -WorkRoot $env:EXTRACTION_WORK_ROOT -OutputRoot $env:EXTRACTION_PROOF_ROOT -WorkflowSourceRevision $env:GITHUB_SHA -TargetVersion $env:TARGET_VERSION -TargetSourceRevision $env:TARGET_SHA -ArtifactRunId $env:ARTIFACT_RUN_ID -ArtifactId $env:ARTIFACT_ID -ArtifactName $env:ARTIFACT_NAME -ArtifactBytes $env:ARTIFACT_BYTES -ArtifactDigest $env:ARTIFACT_DIGEST -InstallerName $env:INSTALLER_NAME -InstallerBytes $env:INSTALLER_BYTES -InstallerSha256 $env:INSTALLER_SHA -ExpectedPublisher $env:PUBLISHER
+      - name: Run the selected installed check on the release candidate
+        shell: pwsh
+        env:
+          CHECK: ${{ inputs.check }}
+          TARGET_VERSION: ${{ inputs.target_version }}
+          TARGET_SHA: ${{ inputs.target_source_revision }}
+          ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
+          ARTIFACT_ID: ${{ inputs.artifact_id }}
+          ARTIFACT_NAME: ${{ inputs.artifact_name }}
+          ARTIFACT_BYTES: ${{ inputs.artifact_bytes }}
+          ARTIFACT_DIGEST: ${{ inputs.artifact_digest }}
+          INSTALLER_NAME: ${{ inputs.installer_name }}
+          INSTALLER_BYTES: ${{ inputs.installer_bytes }}
+          INSTALLER_SHA: ${{ inputs.installer_sha256 }}
+          PUBLISHER: ${{ inputs.expected_publisher }}
+        run: |
+          $common=@{ProjectRoot=(Get-Location).Path;TargetSourceRoot=(Resolve-Path target-source).Path;DraftProofRoot=$env:EXTRACTION_PROOF_ROOT;WorkRoot=$env:REHEARSAL_WORK_ROOT;OutputRoot=$env:REHEARSAL_OUTPUT_ROOT;WebDriverRoot=$env:WEBDRIVER_ROOT;WorkflowSourceRevision=$env:GITHUB_SHA;TargetVersion=$env:TARGET_VERSION;TargetSourceRevision=$env:TARGET_SHA;InstallerName=$env:INSTALLER_NAME;InstallerBytes=$env:INSTALLER_BYTES;InstallerSha256=$env:INSTALLER_SHA;ExpectedPublisher=$env:PUBLISHER;ProofSource='artifact';ArtifactRoot=$env:ARTIFACT_ROOT;ArtifactRunId=$env:ARTIFACT_RUN_ID;ArtifactId=$env:ARTIFACT_ID;ArtifactName=$env:ARTIFACT_NAME;ArtifactBytes=$env:ARTIFACT_BYTES;ArtifactDigest=$env:ARTIFACT_DIGEST}
+          switch -CaseSensitive ($env:CHECK) {
+            'expanded-page-tools' { ./scripts/verify-default-expanded-page-tools.ps1 @common }
+            'comments-forms' { ./scripts/verify-default-comments-forms.ps1 @common }
+            'recovery' { ./scripts/verify-default-recovery.ps1 @common }
+            default { throw 'Unknown rehearsal check.' }
+          }
+      - name: Recheck clean tracked sources
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          git diff --quiet --;if($LASTEXITCODE-ne0){throw 'Workflow source changed.'};git diff --cached --quiet --;if($LASTEXITCODE-ne0){throw 'Workflow index changed.'}
+          git -C target-source diff --quiet --;if($LASTEXITCODE-ne0){throw 'Target source changed.'};git -C target-source diff --cached --quiet --;if($LASTEXITCODE-ne0){throw 'Target index changed.'}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() }}
+        with:
+          name: default-rehearsal-${{ inputs.check }}-${{ inputs.target_source_revision }}
+          path: |
+            ${{ env.EXTRACTION_PROOF_ROOT }}/default-artifact-verification.json
+            ${{ env.REHEARSAL_OUTPUT_ROOT }}/*-rehearsal.json
+          if-no-files-found: ignore

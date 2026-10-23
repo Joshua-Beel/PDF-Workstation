@@ -69,6 +69,7 @@ while ($queue.Count) {
             $null = $available.Add($name)
             $definition = @(Get-Definitions $sourceAst | Where-Object { $_.Name -ceq $name })
             if ($definition.Count -ne 1) { $problems.Add("$(Get-Relative $entry) imports $name, which $(Get-Relative $source) does not define exactly once"); continue }
+            foreach ($nested in Get-Definitions $definition[0].Body) { $null = $available.Add($nested.Name) }
             foreach ($called in Get-CommandNames $definition[0].Body) { $needed.Add([pscustomobject]@{ Name = $called; From = "$name in $(Get-Relative $source)" }) }
         }
     }

@@ -1,16 +1,16 @@
 [CmdletBinding()]
 param(
  [Parameter(Mandatory=$true)][string]$ProjectRoot,[Parameter(Mandatory=$true)][string]$TargetSourceRoot,[Parameter(Mandatory=$true)][string]$DraftProofRoot,
- [Parameter(Mandatory=$true)][string]$AssetRoot,[Parameter(Mandatory=$true)][string]$WorkRoot,[Parameter(Mandatory=$true)][string]$OutputRoot,[Parameter(Mandatory=$true)][string]$WebDriverRoot,
- [Parameter(Mandatory=$true)][string]$WorkflowSourceRevision,[Parameter(Mandatory=$true)][string]$DraftProofWorkflowRevision,[Parameter(Mandatory=$true)][string]$DraftProofRunId,
- [Parameter(Mandatory=$true)][string]$DraftProofWorkflowId,[Parameter(Mandatory=$true)][string]$DraftProofArtifactId,[Parameter(Mandatory=$true)][string]$DraftProofArtifactName,
- [Parameter(Mandatory=$true)][string]$DraftProofArtifactBytes,[Parameter(Mandatory=$true)][string]$DraftProofArtifactDigest,[Parameter(Mandatory=$true)][string]$DraftProofReceiptBytes,
- [Parameter(Mandatory=$true)][string]$DraftProofReceiptSha256,[Parameter(Mandatory=$true)][string]$TargetVersion,[Parameter(Mandatory=$true)][string]$TargetTag,
- [Parameter(Mandatory=$true)][string]$TargetSourceRevision,[Parameter(Mandatory=$true)][string]$TargetReleaseId,[Parameter(Mandatory=$true)][string]$InstallerAssetId,
+ [string]$AssetRoot,[Parameter(Mandatory=$true)][string]$WorkRoot,[Parameter(Mandatory=$true)][string]$OutputRoot,[Parameter(Mandatory=$true)][string]$WebDriverRoot,
+ [Parameter(Mandatory=$true)][string]$WorkflowSourceRevision,[string]$DraftProofWorkflowRevision,[string]$DraftProofRunId,
+ [string]$DraftProofWorkflowId,[string]$DraftProofArtifactId,[string]$DraftProofArtifactName,
+ [string]$DraftProofArtifactBytes,[string]$DraftProofArtifactDigest,[string]$DraftProofReceiptBytes,
+ [string]$DraftProofReceiptSha256,[Parameter(Mandatory=$true)][string]$TargetVersion,[string]$TargetTag,
+ [Parameter(Mandatory=$true)][string]$TargetSourceRevision,[string]$TargetReleaseId,[string]$InstallerAssetId,
  [Parameter(Mandatory=$true)][string]$InstallerName,[Parameter(Mandatory=$true)][string]$InstallerBytes,[Parameter(Mandatory=$true)][string]$InstallerSha256,
- [Parameter(Mandatory=$true)][string]$SignatureAssetId,[Parameter(Mandatory=$true)][string]$SignatureBytes,[Parameter(Mandatory=$true)][string]$SignatureSha256,
- [Parameter(Mandatory=$true)][string]$ManifestAssetId,[Parameter(Mandatory=$true)][string]$ManifestBytes,[Parameter(Mandatory=$true)][string]$ManifestSha256,
- [Parameter(Mandatory=$true)][string]$ExpectedPublisher,[scriptblock]$RuntimeProvider
+ [string]$SignatureAssetId,[string]$SignatureBytes,[string]$SignatureSha256,
+ [string]$ManifestAssetId,[string]$ManifestBytes,[string]$ManifestSha256,
+ [Parameter(Mandatory=$true)][string]$ExpectedPublisher,[scriptblock]$RuntimeProvider,[ValidateSet('draft','artifact')][string]$ProofSource='draft',[string]$ArtifactRoot,[string]$ArtifactRunId,[string]$ArtifactId,[string]$ArtifactName,[string]$ArtifactBytes,[string]$ArtifactDigest
 )
 $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
 
@@ -18,7 +18,7 @@ function Import-RecoveryFunctions { param([string]$Path,[string[]]$Names)
  $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($Path,[ref]$tokens,[ref]$errors);if($errors.Count){throw 'A trusted recovery helper did not parse.'}
  foreach($name in $Names){$node=$ast.Find({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]-and$n.Name-ceq$name},$true);if(-not$node){throw "Missing trusted helper: $name"};Set-Item -Path ("Function:script:"+$name) -Value $node.Body.GetScriptBlock()}
 }
-Import-RecoveryFunctions (Join-Path $PSScriptRoot 'verify-default-expanded-page-tools.ps1') @('Assert-DefaultDraftReceipt','Assert-IndependentReceiptParity','Assert-Step1ArtifactMetadata','Assert-InstalledDefaultResources')
+Import-RecoveryFunctions (Join-Path $PSScriptRoot 'verify-default-expanded-page-tools.ps1') @('Assert-DefaultDraftReceipt','Assert-IndependentReceiptParity','Assert-Step1ArtifactMetadata','Assert-InstalledDefaultResources','Assert-ProofSourceParameters','Assert-DefaultArtifactReceipt','Read-DefaultArtifactRehearsal')
 Import-RecoveryFunctions (Join-Path $PSScriptRoot 'verify-signed-ocr-upgrade.ps1') @('Assert-ExactProperties','Assert-FileReceipt','Resolve-RunnerPath','Get-FreshInstallFacts','Assert-FreshInstallFacts','Get-ConflictingProcessFacts','Invoke-BoundedSilentInstaller','Get-InstallFacts','Assert-InstallFacts','Assert-ReceiptValue','Assert-ReceiptFileObject','Get-UniqueResource','Convert-RegistryFilePath')
 Import-RecoveryFunctions (Join-Path $PSScriptRoot 'verify-default-draft.ps1') @('New-GitHubGetRequest','Assert-GitHubResponseSuccess','Invoke-GitHubJson','ConvertTo-ExactUInt64')
 . (Join-Path $PSScriptRoot 'installed-image-page-tools.ps1')
@@ -110,6 +110,8 @@ function Assert-RecoveryRuntimeReceipt { param($v)
  if(-not$v.a.editAcknowledged-or$v.a.revision-ne1-or$v.a.currentPage-ne2-or-not$v.a.abruptTermination-or$v.a.closeActionInvoked-or$v.b.offerRevision-ne1-or-not$v.b.keepChosen-or$v.b.recoveredCurrentPage-ne2-or-not$v.b.renderedRotationVerified-or-not$v.b.undoToClean-or-not$v.b.cleanTabClosed-or-not$v.c.staleOfferAbsent-or-not$v.c.cleanOriginal-or-not$v.c.cleanTabClosed-or-not$v.profilesRetained){throw 'Recovery runtime receipt is incomplete.'}
 }
 
+Assert-ProofSourceParameters
+if($ProofSource-ceq'draft'){
 if($TargetVersion-cnotmatch'^\d+\.\d+\.\d+$'-or$TargetTag-cne('v'+$TargetVersion)){throw 'Target identity is malformed.'}
 $token=$env:GITHUB_TOKEN;if([string]::IsNullOrWhiteSpace($token)){throw 'GitHub token is unavailable.'};Assert-Step1ArtifactMetadata $token
 $proof=Resolve-RunnerPath $DraftProofRoot $env:RUNNER_TEMP -MustExist;$assets=Resolve-RunnerPath $AssetRoot $env:RUNNER_TEMP -MustBeFresh;$work=Resolve-RunnerPath $WorkRoot $env:RUNNER_TEMP -MustBeFresh;$output=Resolve-RunnerPath $OutputRoot $env:RUNNER_TEMP -MustBeFresh;$drivers=Resolve-RunnerPath $WebDriverRoot $env:RUNNER_TEMP -MustExist
@@ -119,6 +121,14 @@ $sourceBinding=Assert-RecoverySourceBinding
 & (Join-Path $PSScriptRoot 'verify-default-draft.ps1') -ProjectRoot $ProjectRoot -TargetSourceRoot $TargetSourceRoot -AssetRoot $assets -WorkRoot (Join-Path $work 'draft-work') -OutputRoot (Join-Path $work 'draft-output') -WorkflowSourceRevision $WorkflowSourceRevision -TargetVersion $TargetVersion -TargetTag $TargetTag -TargetSourceRevision $TargetSourceRevision -TargetReleaseId $TargetReleaseId -InstallerAssetId $InstallerAssetId -InstallerName $InstallerName -InstallerBytes $InstallerBytes -InstallerSha256 $InstallerSha256 -SignatureAssetId $SignatureAssetId -SignatureBytes $SignatureBytes -SignatureSha256 $SignatureSha256 -ManifestAssetId $ManifestAssetId -ManifestBytes $ManifestBytes -ManifestSha256 $ManifestSha256 -ExpectedPublisher $ExpectedPublisher
 $independent=Get-Content (Join-Path $work 'draft-output/default-draft-verification.json') -Raw -Encoding UTF8|ConvertFrom-Json;Assert-IndependentReceiptParity $receipt $independent
 $env:GITHUB_TOKEN=$null;$env:GH_TOKEN=$null;$token=$null
+}else{
+if($TargetVersion-cnotmatch'^\d+\.\d+\.\d+$'-or$WorkflowSourceRevision-cnotmatch'^[a-f0-9]{40}$'-or$TargetSourceRevision-cnotmatch'^[a-f0-9]{40}$'){throw 'Rehearsal target identity is malformed.'}
+$env:GITHUB_TOKEN=$null;$env:GH_TOKEN=$null
+$proof=Resolve-RunnerPath $DraftProofRoot $env:RUNNER_TEMP -MustExist;$assets=Resolve-RunnerPath $ArtifactRoot $env:RUNNER_TEMP -MustExist;$work=Resolve-RunnerPath $WorkRoot $env:RUNNER_TEMP -MustBeFresh;$output=Resolve-RunnerPath $OutputRoot $env:RUNNER_TEMP -MustBeFresh;$drivers=Resolve-RunnerPath $WebDriverRoot $env:RUNNER_TEMP -MustExist
+Initialize-OwnedRecoveryRoot $work
+$rehearsal=Read-DefaultArtifactRehearsal $proof $assets;$receipt=$rehearsal.Receipt;$sets=$rehearsal.Sets
+$sourceBinding=Assert-RecoverySourceBinding
+}
 $installer=Join-Path $assets $InstallerName;$installRoot=[IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'PDF Workstation')).TrimEnd('\');$settings=[IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'local.pdfworkstation.desktop')).TrimEnd('\');$registry='Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\PDF Workstation'
 $fresh=Get-FreshInstallFacts $installRoot $settings $registry @($installer);Assert-FreshInstallFacts $fresh;$baseline=Get-ConflictingProcessFacts @($installer);if($baseline.applicationProcessPresent-or$baseline.installerProcessPresent){throw 'Recovery baseline is not fresh.'}
 Invoke-BoundedSilentInstaller $installer;$facts=Get-InstallFacts $registry $installRoot;Assert-InstallFacts $facts $TargetVersion $installRoot $receipt.packagedApplication 'Valid' $ExpectedPublisher $true;$resources=Assert-InstalledDefaultResources $installRoot $receipt $sets
@@ -126,4 +136,5 @@ Invoke-BoundedSilentInstaller $installer;$facts=Get-InstallFacts $registry $inst
 $runtime=if($RuntimeProvider){&$RuntimeProvider $resources $drivers $settings $work $fixture}else{Invoke-InstalledRecoveryRuntime $resources.Application.FullName (Join-Path $drivers 'tauri-driver-install/bin/tauri-driver.exe') (Join-Path $drivers 'edge-driver/msedgedriver.exe') $settings $work $fixture ([string]$driverReceipt.edgeDriver.version)}
 Assert-RecoveryRuntimeReceipt $runtime;Assert-FileReceipt $fixture $fixtureReceipt.bytes $fixtureReceipt.sha256 'Preserved recovery source'
 [IO.Directory]::CreateDirectory($output)|Out-Null;$record=[ordered]@{schemaVersion=1;scope='Controlled installed recovery reconstruction after exact owned-process termination; no arbitrary-PDF, power-loss, parent-directory-sync, or rollback-attack claim.';workflowSourceRevision=$WorkflowSourceRevision;targetSourceRevision=$TargetSourceRevision;targetVersion=$TargetVersion;sourceBinding=$sourceBinding;fixture=$fixtureReceipt;a=[ordered]@{editAcknowledged=$true;currentPage=2;abruptTermination=$true;sourcePreserved=$true};b=[ordered]@{offerRevision=1;keepChosen=$true;recoveredCurrentPage=2;recoveredDirty=$true;renderedRotationVerified=$true;undoToClean=$true;sourcePreserved=$true};c=[ordered]@{staleOfferAbsent=$true;cleanOriginal=$true;sourcePreserved=$true};retained=[ordered]@{profiles=$true;settings=$true;fixtures=$true;results=$true};limits=[ordered]@{controlledFixture=$true;powerLoss=$false;parentDirectorySync=$false;rollbackAttackResistance=$false;arbitraryPdf=$false}}
-$json=$record|ConvertTo-Json -Depth 12;if([Text.Encoding]::UTF8.GetByteCount($json)-gt65536-or$json-match'(?i)([A-Z]:\\|\\Users\\|runneradmin|RUNNER_TEMP|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|\.smacrec|raw\.log)'){throw 'Recovery receipt is unsafe.'};[IO.File]::WriteAllText((Join-Path $output 'default-recovery-verification.json'),$json,[Text.UTF8Encoding]::new($false))
+if($ProofSource-ceq'artifact'){$record.scope='Pre-tag rehearsal on a signed release-candidate artifact rather than a release draft; no release, draft or updater claim. '+$record.scope;$record.rehearsal=$rehearsal.Binding}
+$json=$record|ConvertTo-Json -Depth 12;if([Text.Encoding]::UTF8.GetByteCount($json)-gt65536-or$json-match'(?i)([A-Z]:\\|\\Users\\|runneradmin|RUNNER_TEMP|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|\.smacrec|raw\.log)'){throw 'Recovery receipt is unsafe.'};[IO.File]::WriteAllText((Join-Path $output $(if($ProofSource-ceq'draft'){'default-recovery-verification.json'}else{'default-recovery-rehearsal.json'})),$json,[Text.UTF8Encoding]::new($false))
