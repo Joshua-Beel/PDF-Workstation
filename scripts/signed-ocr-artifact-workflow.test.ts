@@ -29,6 +29,7 @@ describe('manual signed OCR artifact workflow', () => {
     expect(workflow).toContain('contents: read');
     expect(workflow).toContain("$env:GITHUB_REF -cne 'refs/heads/master'");
     expect(workflow).toContain('ref: ${{ github.sha }}');
+    expect(workflow, 'signed-artifact workflow tests read pinned commits from git history').toContain('        with:\n          ref: ${{ github.sha }}\n          fetch-depth: 0\n          persist-credentials: false\n');
     expect(workflow).toContain('persist-credentials: false');
     expect(workflow).toContain('$headRevision -cne $env:GITHUB_SHA');
     expect(workflow.indexOf('Require a manual master dispatch')).toBeLessThan(workflow.indexOf('AZURE_TENANT_ID'));
