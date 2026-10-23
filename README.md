@@ -32,7 +32,7 @@ Version 0.2.0 is the current published release, with a signed update package but
 - On-page text selection (source build): select supported embedded text directly on the page.
 - Search (source build): Ctrl+F across embedded text, with case matching, one excerpt per matching page (up to 500 pages) and on-page highlights where text geometry is supported.
 
-**[OCR](docs/features.md#ocr)** (source build; planned for the default installer from 0.3.0, not yet verified in an installed build)
+**[OCR](docs/features.md#ocr)** (source build; planned for the default installer from 0.3.1, not yet verified in an installed build)
 - Current-page OCR: recognize one page into a copyable dialog with a local English engine; accuracy and real-document use unverified.
 - Searchable OCR copy: save a new 150-DPI raster PDF with an invisible text layer; real-scan accuracy unverified.
 
@@ -70,7 +70,7 @@ Version 0.2.0 is the current published release, with a signed update package but
 
 ## What's still missing
 
-- Not ready yet: general image conversion, arbitrary text and image editing, OCR in a published release (planned for 0.3.0), signatures, form preparation, content-preserving or multi-page redaction, replies, author identity, and foreign-annotation interchange.
+- Not ready yet: general image conversion, arbitrary text and image editing, OCR in a published release (planned for 0.3.1), signatures, form preparation, content-preserving or multi-page redaction, replies, author identity, and foreign-annotation interchange.
 - Saving always writes a new copy; some page operations are blocked on signed, form, tagged, bookmarked or annotated files ([Organize Pages guide](docs/tools/organize-pages.md)).
 - Printing is unverified on physical paper and non-Microsoft drivers; more real-document testing is needed.
 - Per-tool limits: [Known limits](docs/features.md#known-limits). Priorities: [Known gaps](docs/gaps.md) and the [development roadmap](docs/development-roadmap.md).
@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- Version 0.3.1 prepared as the first public update (0.3.0 was tagged and drafted but withdrawn): version bump, 0.3.1 notes with the new Fill forms controls, key-rotation docs moved to 0.3.1 (SM6). Not tagged or built.
 - Installed-app verifiers: typed Save-dialog filenames are re-checked after the dialog settles and re-typed if the dialog replaced them with its suggested name (SM6; scripts and tests only).
 - Recovery: after "Keep recovered edits", a page rendered while the recovery offer was showing is no longer served stale; the render cache key now includes the document revision (SM5).
 - Step 2 verifiers, third round: the recovery rotation check now accepts the default fit-width layout, failed recovery checks report what they saw, and image-output timeouts log file and dialog diagnostics (SM6; scripts and tests only).
