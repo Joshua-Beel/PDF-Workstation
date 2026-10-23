@@ -348,6 +348,18 @@ namespace Smacrobat.PrintVerification {
             return true;
         }
 
+        public static string ReadSaveFileNameBounded(int processId, long processStartUtcTicks, long rootHandleValue, long editHandleValue, long deadline) {
+            if (processId <= 0 || processStartUtcTicks <= 0 || rootHandleValue == 0 || editHandleValue == 0 || deadline <= Environment.TickCount64 || deadline - Environment.TickCount64 > 120000) throw new ArgumentOutOfRangeException();
+            ValidateProcessStart(processId, processStartUtcTicks);
+            var root = new IntPtr(rootHandleValue); var edit = new IntPtr(editHandleValue);
+            ValidateSaveFileNameEdit(processId, root, edit);
+            string text = ReadWindowTextBounded(edit, deadline);
+            ValidateProcessStart(processId, processStartUtcTicks);
+            ValidateSaveFileNameEdit(processId, root, edit);
+            if (Environment.TickCount64 >= deadline) throw new TimeoutException("Native save filename read deadline expired.");
+            return text;
+        }
+
         public static bool SaveFileNameEqualsExact(int processId, long processStartUtcTicks, long rootHandleValue, long editHandleValue, string value, long deadline) {
             if (processId <= 0 || processStartUtcTicks <= 0 || rootHandleValue == 0 || editHandleValue == 0 || String.IsNullOrEmpty(value) || value.Length > 32767 || deadline <= Environment.TickCount64 || deadline - Environment.TickCount64 > 120000) throw new ArgumentOutOfRangeException();
             ValidateProcessStart(processId, processStartUtcTicks);
@@ -1992,17 +2004,42 @@ function Set-BoundNativeSaveFileNameExact {
         [Parameter(Mandatory = $true)][string]$Value,
         [Parameter(Mandatory = $true)][long]$DeadlineTickCount,
         [scriptblock]$NativeWindowProvider,
-        [scriptblock]$SetProvider
+        [scriptblock]$SetProvider,
+        [scriptblock]$ReadProvider,
+        [ValidateRange(1,2000)][int]$SettleMilliseconds = 250
     )
     $record = Get-BoundNativeSaveRoleRecord -ProcessId $ProcessId -Binding $Binding -Role 'filenameEdit' -DeadlineTickCount $DeadlineTickCount -NativeWindowProvider $NativeWindowProvider
     $rootHandleValue = Get-NativeSurfaceHandleValue -Identity ([string]$Binding.surfaceRootIdentity)
     $editHandleValue = [long]$record.HandleValue
     if ([Environment]::TickCount64 -ge $DeadlineTickCount) { throw 'Native save filename deadline expired.' }
-    if ($null -eq $SetProvider) { Initialize-PrintNativeWindowInterop }
-    $set = if ($SetProvider) { & $SetProvider $ProcessId $ProcessStartUtcTicks $rootHandleValue $editHandleValue $Value $DeadlineTickCount } else {
-        [Smacrobat.PrintVerification.NativeWindows]::SetSaveFileNameExact($ProcessId,$ProcessStartUtcTicks,$rootHandleValue,$editHandleValue,$Value,$DeadlineTickCount)
+    if ($null -eq $SetProvider -or $null -eq $ReadProvider) { Initialize-PrintNativeWindowInterop }
+    $settles = ($null -eq $SetProvider) -or ($null -ne $ReadProvider)
+    $readName = {
+        if ($ReadProvider) { [string](& $ReadProvider $ProcessId $ProcessStartUtcTicks $rootHandleValue $editHandleValue $DeadlineTickCount) }
+        else { [string][Smacrobat.PrintVerification.NativeWindows]::ReadSaveFileNameBounded($ProcessId,$ProcessStartUtcTicks,$rootHandleValue,$editHandleValue,$DeadlineTickCount) }
     }
-    if ($set -isnot [bool] -or -not $set -or [Environment]::TickCount64 -ge $DeadlineTickCount) { throw 'Native save filename action was not exactly accepted before its deadline.' }
+    $pause = { if ([Environment]::TickCount64 + $SettleMilliseconds -ge $DeadlineTickCount) { throw 'Native save filename deadline expired.' }; Start-Sleep -Milliseconds $SettleMilliseconds }
+    if ($settles) {
+        $settleEnd = [Math]::Min([Environment]::TickCount64 + 3000, $DeadlineTickCount)
+        $previous = $null
+        while ([Environment]::TickCount64 -lt $settleEnd) {
+            $current = & $readName
+            if ($null -ne $previous -and $current -ceq $previous) { break }
+            $previous = $current
+            & $pause
+        }
+    }
+    for ($attempt = 1; $attempt -le 4; $attempt++) {
+        $set = if ($SetProvider) { & $SetProvider $ProcessId $ProcessStartUtcTicks $rootHandleValue $editHandleValue $Value $DeadlineTickCount } else {
+            [Smacrobat.PrintVerification.NativeWindows]::SetSaveFileNameExact($ProcessId,$ProcessStartUtcTicks,$rootHandleValue,$editHandleValue,$Value,$DeadlineTickCount)
+        }
+        if ($set -isnot [bool] -or -not $set -or [Environment]::TickCount64 -ge $DeadlineTickCount) { throw 'Native save filename action was not exactly accepted before its deadline.' }
+        if (-not $settles) { return }
+        $stable = $true
+        foreach ($check in 1..2) { & $pause; if ((& $readName) -cne $Value) { $stable = $false; break } }
+        if ($stable) { return }
+    }
+    throw 'Native save filename did not stay set; the dialog replaced it after it was typed.'
 }
 
 function Invoke-BoundNativeSaveButtonExact {

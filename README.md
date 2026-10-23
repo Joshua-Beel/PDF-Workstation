@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- Installed-app verifiers: typed Save-dialog filenames are re-checked after the dialog settles and re-typed if the dialog replaced them with its suggested name (SM6; scripts and tests only).
 - Step 2 verifiers, third round: the recovery rotation check now accepts the default fit-width layout, failed recovery checks report what they saw, and image-output timeouts log file and dialog diagnostics (SM6; scripts and tests only).
 - Step 2 verifiers, second round: closure callbacks that could not see helper functions on the hosted runner removed, transitive helper analysis for everything the default verifier workflows reach, recovery stage markers and abrupt-termination cleanup (SM6; scripts and tests only).
 - Installed-app Step 2 verifiers: missing helper imports added, the recovery check clicks only the toolbar Open button, and a static test checks every verifier helper resolves (SM6; scripts and tests only).

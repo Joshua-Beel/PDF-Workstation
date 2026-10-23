@@ -59,6 +59,28 @@ describe('default Step 2 oracles', () => {
     expect(tools).toContain("catch { Write-ImagePageOutputDiagnostics -Path $ExportedPngPath -Stage 'export-output' -SessionId $sessionId -Deadline $deadline; throw }");
   });
 
+  it('waits for the Save dialog to settle its suggested name, then re-types the filename if the dialog replaces it', () => {
+    const stubs = [
+      "function Get-BoundNativeSaveRoleRecord { [pscustomobject]@{ HandleValue = 505 } }",
+      "function Get-NativeSurfaceHandleValue { 500 }",
+      "function Initialize-PrintNativeWindowInterop { throw 'real interop must not load in this test' }",
+      "$binding = [pscustomobject]@{ surfaceRootIdentity = 'hwnd:500|native' }",
+      "$value = 'D:\\proof\\created.pdf'",
+      "function Run-Case([int]$OverwriteAfterSets) {",
+      "  $script:edit = 'image'; $script:sets = 0; $script:reads = 0; $script:initial = @('image', 'image-source.pdf', 'image-source.pdf')",
+      "  $set = { param($p, $t, $r, $e, $v, $d) $script:sets++; $script:edit = $v; $true }",
+      "  $read = { param($p, $t, $r, $e, $d) $script:reads++; if ($script:sets -eq 0) { if ($script:initial.Count) { $script:edit = $script:initial[0]; $script:initial = @($script:initial | Select-Object -Skip 1) } } elseif ($script:sets -le $OverwriteAfterSets) { $script:edit = 'image-source.pdf' }; $script:edit }",
+      "  Set-BoundNativeSaveFileNameExact -ProcessId 7319 -ProcessStartUtcTicks 638500000000000000L -Binding $binding -Value $value -DeadlineTickCount ([Environment]::TickCount64 + 20000) -SetProvider $set -ReadProvider $read -SettleMilliseconds 5",
+      "}",
+      "Run-Case 0; if ($script:sets -ne 1 -or $script:edit -cne $value) { throw ('settled case: sets=' + $script:sets) }",
+      "Run-Case 1; if ($script:sets -ne 2 -or $script:edit -cne $value) { throw ('replaced-once case: sets=' + $script:sets) }",
+      "$message = $null; try { Run-Case 99 } catch { $message = $_.Exception.Message }; if ($message -notlike '*did not stay set*' -or $script:sets -ne 4) { throw ('always-replaced case: ' + $message + ' sets=' + $script:sets) }",
+    ].join('\n');
+    const result = runWithFunctions('installed-print-dialog.ps1', ['Set-BoundNativeSaveFileNameExact'], stubs);
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(result.stdout).toContain('PASS');
+  }, 90_000);
+
   it('writes bounded file diagnostics for a missing image output without a session', () => {
     const root = join(process.cwd(), 'target', `image-diag-${randomUUID()}`);
     mkdirSync(root, { recursive: true });
