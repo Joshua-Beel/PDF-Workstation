@@ -118,7 +118,10 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 - Pre-tag rehearsal: the three default installed checks can now run on a signed release-candidate artifact before tagging (`default-rehearsal-verification.yml`, read-only, no secrets); the draft checks are unchanged (SM6; scripts, workflows, tests and docs only).
 - Installed-app verifiers: typed Save-dialog filenames are re-checked after the dialog settles and re-typed if the dialog replaced them with its suggested name (SM6; scripts and tests only).
+- Recovery: after "Keep recovered edits", a page rendered while the recovery offer was showing is no longer served stale; the render cache key now includes the document revision (SM5).
 - Step 2 verifiers, third round: the recovery rotation check now accepts the default fit-width layout, failed recovery checks report what they saw, and image-output timeouts log file and dialog diagnostics (SM6; scripts and tests only).
+- Review fixes for the signed-check re-pin: the reading-tools drift test now has negative controls (wrong feature blob, wrong app-shell blob), and releases.md, ocr-feasibility.md and license-inventory.md name the new pin (SM6b).
+- The five signed installed checks (expanded page tools, OCR upgrade, persistence, print dialog, reading tools) are re-pinned to a fresh signed 0.3.0 OCR artifact (artifact 12510717103, run 39969839829, source `4a0f89c`); none has been run hosted against it yet (SM6b).
 - Step 2 verifiers, second round: closure callbacks that could not see helper functions on the hosted runner removed, transitive helper analysis for everything the default verifier workflows reach, recovery stage markers and abrupt-termination cleanup (SM6; scripts and tests only).
 - Installed-app Step 2 verifiers: missing helper imports added, the recovery check clicks only the toolbar Open button, and a static test checks every verifier helper resolves (SM6; scripts and tests only).
 - `ocr-signed-artifact.yml` checks out full history (`fetch-depth: 0`) so its vitest step can read pinned commit 67d2382; run 39967979362 failed 3 tests on the shallow clone (SM6b).
@@ -135,6 +138,8 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 - Dev tooling: vite 6.4.3 to 6.4.4 for a dev-server advisory; `npm audit` reports 0 and the built frontend is byte-identical (SM6).
 - Release notes always check out with LF line endings, so the update text in `latest.json` carries no CRLF (SM6).
 - Version 0.3.0 prepared: six version sources bumped, 0.3.0-only release notes, notices regenerated, release steps rewritten (SM6). Not tagged or built; unverified in an installed build.
+- Fill forms review fixes (SM3; source tests only): the PDFium check reads choice values from the engine, and a typed combo value matches option labels only.
+- Fill forms: multi-select list boxes (checkbox list, several option ids per patch) and editable combo boxes (typed Latin-1 text or a listed option) (SM3; source tests only).
 - Forms breadth follow-ups (SM3; source tests only): U+00A0 refused, overflow-safe encoding differences, list-box labels encoded like other text, full Latin-1 width table and more tests.
 - Fill forms list boxes may have more options than visible rows (SM3; source tests only): the scroll position (`/TI`) is validated and an out-of-view choice scrolls into view.
 - Fill forms text values accept printable ASCII plus Latin-1 letters and symbols (SM3; source tests only): WinAnsi appearance bytes, UTF-16 value, Latin-1 Helvetica widths. Not Unicode beyond Latin-1.

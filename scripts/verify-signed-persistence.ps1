@@ -15,13 +15,13 @@ Set-StrictMode -Version Latest
 
 $script:PersistenceArtifactPins = [ordered]@{
     Repository = 'Joshua-Beel/PDF-Workstation'
-    SourceRevision = '67d238218f4796ba7b8505d072868da0f397174a'
-    InstallerName = 'PDF Workstation_0.2.6_x64-setup.exe'
-    InstallerBytes = [uint64]10456616
-    InstallerSha256 = '8F7A167D1AED369D1A28B7C91692BAD8770E774FE9D8AFBBED970654144E428C'
+    SourceRevision = '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'
+    InstallerName = 'PDF Workstation_0.3.0_x64-setup.exe'
+    InstallerBytes = [uint64]11201296
+    InstallerSha256 = '3DE99F111652727BB59F9C17FF4E3CCA42ED48E9DE5E0614920280FFB0BA9FE5'
     RecordName = 'artifact-verification.json'
-    RecordBytes = [uint64]7386
-    RecordSha256 = '4ED82057155877F2677262479FF4F2B00398CF5F524C51302DB50275D315E205'
+    RecordBytes = [uint64]7715
+    RecordSha256 = '0383DAE8FA04705FA26F63CB3CC4EDE16442129D87F99E7900BD1EF301C4FB5C'
     Publisher = 'Joshua Beel'
 }
 
@@ -130,7 +130,7 @@ function Get-PersistenceInstalledApplication {
     $registeredRoot = [IO.Path]::GetFullPath(([string]$registry.InstallLocation).Trim().Trim('"')).TrimEnd('\')
     $uninstall = [IO.Path]::GetFullPath(([string]$registry.UninstallString).Trim().Trim('"')).TrimEnd('\')
     $application = Join-Path $InstallRoot 'pdf-workstation.exe'
-    if ([string]$registry.DisplayName -cne 'PDF Workstation' -or [string]$registry.DisplayVersion -cne '0.2.6' -or
+    if ([string]$registry.DisplayName -cne 'PDF Workstation' -or [string]$registry.DisplayVersion -cne '0.3.0' -or
         -not $registeredRoot.Equals($InstallRoot,[StringComparison]::OrdinalIgnoreCase) -or -not $uninstall.Equals((Join-Path $InstallRoot 'uninstall.exe'),[StringComparison]::OrdinalIgnoreCase)) {
         throw 'Installed application registry facts do not match the exact signed version.'
     }
@@ -180,7 +180,7 @@ function Write-SanitizedPersistenceRecord {
         }
     }
     $json = $record | ConvertTo-Json -Depth 12
-    if ($json -match '(?i)([A-Z]:\\|\\Users\\|runneradmin|RUNNER_TEMP|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|11005152678|36499724415|raw\.log)') { throw 'Sanitized persistence record contains a path, credential name, artifact identifier, or raw log reference.' }
+    if ($json -match '(?i)([A-Z]:\\|\\Users\\|runneradmin|RUNNER_TEMP|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|12510717103|39969839829|raw\.log)') { throw 'Sanitized persistence record contains a path, credential name, artifact identifier, or raw log reference.' }
     $path = Join-Path $OutputRoot 'persistence-verification.json'
     [IO.File]::WriteAllText($path,$json,[Text.UTF8Encoding]::new($false))
     $files = @(Get-ChildItem -LiteralPath $OutputRoot -File -Force)

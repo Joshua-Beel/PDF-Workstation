@@ -533,7 +533,7 @@ public static class ReadingNativePickerApi {
     expect(verify).toContain('uiReentryRequiredAfterCloseAndReopen');
     expect(verify).toContain('passwordStoragePersistenceInspected=$false');
     expect(verify).toContain('artifactIdentifierIncluded = $false');
-    expect(verify).toContain('11005152678|36499724415');
+    expect(verify).toContain('12510717103|39969839829');
     expect(verify).toContain('The reading-tools record contains a raw path, text fixture value, password');
     expect(installed).toContain('Invoke-ReadingClipboardSta -Operation clear');
     expect(installed).toContain('$clipboardCleared');

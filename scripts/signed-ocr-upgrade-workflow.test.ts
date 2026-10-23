@@ -83,10 +83,10 @@ function functionHarness(names: string[], body: string, loadDependencies = true)
       BaselineName = 'PDF.Workstation_0.2.0_x64-setup.exe'
       BaselineBytes = [uint64]6418229
       BaselineSha256 = '17788CB82BB42DEAC35EA197A385A9BAFC8CD331422446A2B834E115A90C4D2E'
-      SignedSourceRevision = '67d238218f4796ba7b8505d072868da0f397174a'
-      SignedInstallerName = 'PDF Workstation_0.2.6_x64-setup.exe'
-      SignedInstallerBytes = [uint64]10456616
-      SignedInstallerSha256 = '8F7A167D1AED369D1A28B7C91692BAD8770E774FE9D8AFBBED970654144E428C'
+      SignedSourceRevision = '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'
+      SignedInstallerName = 'PDF Workstation_0.3.0_x64-setup.exe'
+      SignedInstallerBytes = [uint64]11201296
+      SignedInstallerSha256 = '3DE99F111652727BB59F9C17FF4E3CCA42ED48E9DE5E0614920280FFB0BA9FE5'
       ExpectedPublisher = 'Joshua Beel'
       SmokeWidth = 1200
       SmokeHeight = 240
@@ -137,12 +137,12 @@ describe('manual signed OCR installer upgrade workflow', () => {
     expect(workflow).toContain('git diff --quiet --');
     expect(workflow).toContain('git diff --cached --quiet --');
     expect(workflow).toContain("Test-Path -LiteralPath $env:SIGNED_ARTIFACT_ROOT");
-    expect(workflow).toContain('artifact-ids: \'11005152678\'');
-    expect(workflow).toContain('run-id: \'36499724415\'');
+    expect(workflow).toContain('artifact-ids: \'12510717103\'');
+    expect(workflow).toContain('run-id: \'39969839829\'');
     expect(workflow).toContain('merge-multiple: true');
-    expect(workflow).toContain('[uint64]$artifact.size_in_bytes -ne 10437483');
-    expect(workflow).toContain("digest -cne 'sha256:c0e89b5ae821d5875c31855c6596a7d47b7ca052468a026745a5d638e50ca569'");
-    expect(workflow).toContain("head_sha -cne '67d238218f4796ba7b8505d072868da0f397174a'");
+    expect(workflow).toContain('[uint64]$artifact.size_in_bytes -ne 11182480');
+    expect(workflow).toContain("digest -cne 'sha256:3e5c1003b553e3ed6d2f14bdd8f0b7b6baf56c7aacf55856e875f19ba270a689'");
+    expect(workflow).toContain("head_sha -cne '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'");
     expect(workflow).toContain("digest -cne 'sha256:17788cb82bb42deac35ea197a385a9bafc8cd331422446a2b834e115a90c4d2e'");
     expect(workflow).toContain("[uint64]$asset.size -ne 6418229");
     expect(workflow).not.toMatch(/secrets\.|AZURE_|TAURI_SIGNING|gh release|create.*release/i);
@@ -274,7 +274,7 @@ describe('manual signed OCR installer upgrade workflow', () => {
       String.raw`
         function New-Value { param([string]$Sha=('A'*64)); [pscustomobject]@{bytes=[uint64]1;sha256=$Sha} }
         $base=@()
-        for($i=0;$i -lt 25;$i++){$base += [pscustomobject]@{target=('resources/base/file-'+$i+'.txt');bytes=[uint64]1;sha256=('A'*64)}}
+        for($i=0;$i -lt 27;$i++){$base += [pscustomobject]@{target=('resources/base/file-'+$i+'.txt');bytes=[uint64]1;sha256=('A'*64)}}
         $base += [pscustomobject]@{target='resources/pdfium/bin/pdfium.dll';bytes=[uint64]2;sha256=('B'*64);unsignedBytes=[uint64]1;unsignedSha256=('C'*64)}
         $ocr=@(
           [pscustomobject]@{suffix='bin/tesseract.exe';role='engine';bytes=[uint64]1;sha256=('D'*64)},
@@ -293,7 +293,7 @@ describe('manual signed OCR installer upgrade workflow', () => {
           verification=[pscustomobject]@{archiveInventory=(New-Value);extractedResourcesMatched=$true;bundleContainsOnlyInstaller=$true;updaterArtifacts=@();ephemeralSigningConfigurationRetained=$false}
         }
         $sets=Assert-SignedArtifactReceipt -Receipt $receipt
-        if($sets.Base.Count -ne 26 -or $sets.Ocr.Count -ne 5){throw 'Valid exact receipt failed.'}
+        if($sets.Base.Count -ne 28 -or $sets.Ocr.Count -ne 5){throw 'Valid exact receipt failed.'}
         $wrong=$receipt.PSObject.Copy();$wrong.sourceRevision=('9'*40)
         $rejected=$false;try{Assert-SignedArtifactReceipt -Receipt $wrong}catch{$rejected=$true};if(-not $rejected){throw 'Wrong source revision accepted.'}
         $wrong=$receipt.PSObject.Copy();$wrong.ocr=$receipt.ocr.PSObject.Copy();$wrong.ocr.packagedResources=@($ocr[0..3])
@@ -588,11 +588,11 @@ describe('manual signed OCR installer upgrade workflow', () => {
           $rejected=$false;try{Invoke-BoundedSilentInstaller -Path 'fixture.exe' -ProcessProvider {param($p,$a,$t)$bad}.GetNewClosure()}catch{$rejected=$true};if(-not $rejected){throw 'Unsafe process result accepted.'}
         }
         $root=[IO.Path]::GetFullPath((Join-Path (Resolve-Path target) 'mock-install'))
-        $facts=[pscustomobject]@{displayName='PDF Workstation';displayVersion='0.2.6';installLocation=$root;uninstallPath=(Join-Path $root 'uninstall.exe');appBytes=[uint64]10;appSha256=('A'*64);fileVersion='0.2.6';productVersion='0.2.6';signatureStatus='Valid';publisher='Joshua Beel';hasTimestamp=$true}
+        $facts=[pscustomobject]@{displayName='PDF Workstation';displayVersion='0.3.0';installLocation=$root;uninstallPath=(Join-Path $root 'uninstall.exe');appBytes=[uint64]10;appSha256=('A'*64);fileVersion='0.3.0';productVersion='0.3.0';signatureStatus='Valid';publisher='Joshua Beel';hasTimestamp=$true}
         $app=[pscustomobject]@{bytes=[uint64]10;sha256=('A'*64)}
-        Assert-InstallFacts -Facts $facts -ExpectedVersion '0.2.6' -ExpectedInstallRoot $root -ExpectedApplication $app -ExpectedSignatureStatus 'Valid' -ExpectedPublisher 'Joshua Beel' -ExpectedTimestamp $true
+        Assert-InstallFacts -Facts $facts -ExpectedVersion '0.3.0' -ExpectedInstallRoot $root -ExpectedApplication $app -ExpectedSignatureStatus 'Valid' -ExpectedPublisher 'Joshua Beel' -ExpectedTimestamp $true
         $wrong=$facts.PSObject.Copy();$wrong.uninstallPath=(Join-Path $root 'other.exe')
-        $rejected=$false;try{Assert-InstallFacts -Facts $wrong -ExpectedVersion '0.2.6' -ExpectedInstallRoot $root -ExpectedApplication $app -ExpectedSignatureStatus 'Valid' -ExpectedPublisher 'Joshua Beel' -ExpectedTimestamp $true}catch{$rejected=$true};if(-not $rejected){throw 'Wrong uninstall registry value accepted.'}
+        $rejected=$false;try{Assert-InstallFacts -Facts $wrong -ExpectedVersion '0.3.0' -ExpectedInstallRoot $root -ExpectedApplication $app -ExpectedSignatureStatus 'Valid' -ExpectedPublisher 'Joshua Beel' -ExpectedTimestamp $true}catch{$rejected=$true};if(-not $rejected){throw 'Wrong uninstall registry value accepted.'}
         $evidencePath=Join-Path (Resolve-Path target) ('hosted-publisher-'+[Guid]::NewGuid().ToString('N')+'.exe')
         [IO.File]::WriteAllText($evidencePath,'signed fixture',[Text.UTF8Encoding]::new($false))
         $evidenceItem=Get-Item -LiteralPath $evidencePath
@@ -616,7 +616,7 @@ describe('manual signed OCR installer upgrade workflow', () => {
         $ocrProperties=@('accuracyVerified','dialogTitle','language','physicalPage','sampleName','sourceFileReceiptPreserved','sourceUiPreserved','status','textSha256','textUtf8Bytes');$actualOcr=@($value.upgrade.installedApplicationLaunch.currentPageOcr.PSObject.Properties.Name|Sort-Object -CaseSensitive);$expectedOcr=@($ocrProperties|Sort-Object -CaseSensitive);if($actualOcr.Count-ne$expectedOcr.Count-or(Compare-Object $expectedOcr $actualOcr -CaseSensitive)){throw 'Sanitized current-page OCR receipt set changed.'}
         if($value.schemaVersion-ne6-or@(Get-ChildItem -LiteralPath $output -File -Force).Count -ne 1 -or-not$value.verification.installedEngineOcrSmokeVerified -or-not$value.verification.applicationLaunchVerified -or-not$value.verification.webViewDomVerified -or-not$value.verification.nativeOcrCapabilityVerified -or-not$value.verification.applicationOcrIntegrationVerified -or-not$value.verification.applicationCurrentPageOcrCompleted -or-not$value.verification.applicationOcrRecognitionVerified -or$value.verification.applicationOcrAccuracyVerified -ne $false -or$value.verification.publisherUiMode-cne'hosted-noninteractive'-or$value.verification.publisherUiAttempted-ne$false-or$value.verification.installerShellPublisherUiVerified-ne$false-or$value.verification.installedApplicationShellPublisherUiVerified-ne$false-or$value.verification.publisherUiScreenshotsUsed-ne$false-or$value.verification.uacPublisherPromptVerified-ne$false-or$value.verification.smartScreenPublisherPromptVerified-ne$false-or$value.verification.nativeWindowVisualVerified-ne$false-or$value.verification.nativeFilePickerVerified-ne$false-or$value.verification.userPdfVerified-ne$false-or$value.verification.printingVerified-ne$false-or$value.verification.nativeDragDropVerified-ne$false-or$value.verification.realPreferencesVerified-ne$false-or$value.verification.inAppUpdaterVerified-ne$false-or-not$value.upgrade.installedEngineOcrSmoke.matched-or$value.upgrade.publisherUi.mode-cne'hosted-noninteractive'-or$value.upgrade.publisherUi.attempted-ne$false-or$value.upgrade.publisherUi.verified-ne$false-or$value.upgrade.publisherUi.reason-cne'github-hosted-noninteractive-session'-or$value.upgrade.publisherUi.installer.kind-cne'installer'-or$value.upgrade.publisherUi.installedApplication.kind-cne'installed-application'-or$value.upgrade.publisherUi.installer.authenticodeStatus-cne'Valid'-or-not$value.upgrade.publisherUi.installer.trustedTimestampVerified-or$value.upgrade.publisherUi.installer.shellPublisherUiAttempted-ne$false-or$value.upgrade.publisherUi.installer.shellPublisherUiVerified-ne$false-or$value.upgrade.publisherUi.installer.screenshotsUsed-ne$false-or$value.upgrade.installedApplicationLaunch.sample.pages-ne6-or$value.upgrade.installedApplicationLaunch.currentPageOcr.physicalPage-ne1-or$value.upgrade.installedApplicationLaunch.currentPageOcr.accuracyVerified-ne$false){throw 'Sanitized output contract failed.'}
         if($json -match 'fixed private OCR output|recognized text sample'){throw 'Sanitized output included raw OCR text.'}
-        if($json -match '(?i)([A-Z]:\\|\\Users\\|11005152678|36499724415|569181842|GITHUB_TOKEN|AZURE_|codesigning\.azure\.net|signingAccount|signingProfile|tenantId|clientId)'){throw 'Sanitized output leaked restricted evidence.'}
+        if($json -match '(?i)([A-Z]:\\|\\Users\\|12510717103|39969839829|569181842|GITHUB_TOKEN|AZURE_|codesigning\.azure\.net|signingAccount|signingProfile|tenantId|clientId)'){throw 'Sanitized output leaked restricted evidence.'}
       `,
     );
     const result = runPowerShell(check);

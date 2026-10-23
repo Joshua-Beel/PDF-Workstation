@@ -20,34 +20,34 @@ foreach ($definition in @($trustedAst.FindAll({ param($node) $node -is [Manageme
 
 $script:ExpandedPins = [ordered]@{
     Repository = 'Joshua-Beel/PDF-Workstation'
-    SignedArtifactId = [uint64]11005152678
-    SignedRunId = [uint64]36499724415
-    SignedSourceRevision = '67d238218f4796ba7b8505d072868da0f397174a'
-    SignedInstallerName = 'PDF Workstation_0.2.6_x64-setup.exe'
-    SignedInstallerBytes = [uint64]10456616
-    SignedInstallerSha256 = '8F7A167D1AED369D1A28B7C91692BAD8770E774FE9D8AFBBED970654144E428C'
+    SignedArtifactId = [uint64]12510717103
+    SignedRunId = [uint64]39969839829
+    SignedSourceRevision = '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'
+    SignedInstallerName = 'PDF Workstation_0.3.0_x64-setup.exe'
+    SignedInstallerBytes = [uint64]11201296
+    SignedInstallerSha256 = '3DE99F111652727BB59F9C17FF4E3CCA42ED48E9DE5E0614920280FFB0BA9FE5'
     SignedRecordName = 'artifact-verification.json'
-    SignedRecordBytes = [uint64]7386
-    SignedRecordSha256 = '4ED82057155877F2677262479FF4F2B00398CF5F524C51302DB50275D315E205'
+    SignedRecordBytes = [uint64]7715
+    SignedRecordSha256 = '0383DAE8FA04705FA26F63CB3CC4EDE16442129D87F99E7900BD1EF301C4FB5C'
     ExpectedPublisher = 'Joshua Beel'
-    SignedApplicationShellBlob = '35a6d3b5c2dadecf378386f41ffe405da15c8c4c'
+    SignedApplicationShellBlob = '2af97705343967869b4174e2037fec6619b68fe5'
     FeatureBlobs = [ordered]@{
         'src/CreatePdfDialog.tsx' = '094eed6e8e90b8d413751159f7bc139c5b12b5ec'
         'src/ExportPageImageDialog.tsx' = '9ad67008c197dad8906afed0e17b0e9b8c8ac4f1'
-        'src/Organizer.tsx' = '618fa8637091e90393f8bcba5da525d8ebe1a1df'
-        'src/SplitDialog.tsx' = '61411e6119a706e0463d8e517daf911038297a57'
+        'src/Organizer.tsx' = '29ae74a5a459c9620cab4150e36634c9625a2de1'
+        'src/SplitDialog.tsx' = 'eb1d8440ad6202e27b9db161689c7c55475cfdca'
         'src/CropDialog.tsx' = 'd50889285bb6c79b28e9d94cda86457118ec855c'
         'src/CombineDialog.tsx' = '2c554b40b3285029cba574eb813672ae0cc2db1e'
         'src/InsertPagesDialog.tsx' = 'f2455638c20815ef37453f60fcfc7788ca0b497b'
         'src/ReplacePagesDialog.tsx' = '45a48cb68d7b7477b3bd5b566e88a8637b48c9fb'
-        'src/bridge.ts' = 'f05fd937ecd72c82cb25c61f62687aebff98f3a3'
-        'src-tauri/src/image_pdf.rs' = 'faff3d5aa4df5e741442c05c01fcf1976c5ef3a7'
-        'src-tauri/src/page_image.rs' = '999e5340bd365295f3da45605c0faa45033aaf32'
-        'src-tauri/src/split.rs' = '54b129b73bf7a819611a663ead2ca52477ca2b09'
-        'src-tauri/src/combine.rs' = '81e3594d5ae2a5eb3dcc83b1cfb643e52839e521'
-        'src-tauri/src/service.rs' = 'e65e890bfbc57cda8b99787a0f7d909d5a445bf0'
-        'src-tauri/src/main.rs' = 'aff583c81b8fdeff897e4b87e341a31649a3e452'
-        'src-tauri/tauri.conf.json' = 'e7456dc8382744839633fc036c3b1b8050ba1d7f'
+        'src/bridge.ts' = '88707e0cf6b140002845044be3016cb832d78d24'
+        'src-tauri/src/image_pdf.rs' = '3f317138a9ff6b66726eb52b5b74e6864385aa1e'
+        'src-tauri/src/page_image.rs' = '56f6ff2e46a4bd5c2ff0bdc648a0e07f29967ca0'
+        'src-tauri/src/split.rs' = '5ef00a279b212f33ea1486fd36b7f6c2a0b75720'
+        'src-tauri/src/combine.rs' = '71da1cd009b9056ce01f41bbf76ac45032962e8f'
+        'src-tauri/src/service.rs' = '737a4492b4006eb6272c1b9084dc54f508309037'
+        'src-tauri/src/main.rs' = 'd9aa9862c286913108d75ca2cac0d1305f11c002'
+        'src-tauri/tauri.conf.json' = 'd9ba91cdc141ea3e7ac57e94d159cbfdd7724ca3'
     }
 }
 $script:Pins = [ordered]@{
@@ -194,7 +194,7 @@ function Write-SanitizedExpandedRecord {
         imagePageTools=$Image;organizerTools=$Organizer;structuralPageTools=$Structural
     }
     $json = $record | ConvertTo-Json -Depth 14
-    if ($json -match '(?i)([A-Z]:\\|\\Users\\|runneradmin|RUNNER_TEMP|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|11005152678|36499724415|raw\.log|\.pdf-workstation)') { throw 'Sanitized expanded page-tools record contains a host path, credential identifier, artifact identifier, or raw evidence reference.' }
+    if ($json -match '(?i)([A-Z]:\\|\\Users\\|runneradmin|RUNNER_TEMP|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|12510717103|39969839829|raw\.log|\.pdf-workstation)') { throw 'Sanitized expanded page-tools record contains a host path, credential identifier, artifact identifier, or raw evidence reference.' }
     $path = Join-Path $Root 'expanded-page-tools-verification.json'; [IO.File]::WriteAllText($path,$json,[Text.UTF8Encoding]::new($false))
     $files = @(Get-ChildItem -LiteralPath $Root -File -Force); if ($files.Count -ne 1 -or -not $files[0].FullName.Equals($path,[StringComparison]::OrdinalIgnoreCase)) { throw 'Expanded page-tools output root must contain exactly one sanitized JSON record.' }
     return $path
@@ -222,7 +222,7 @@ $fresh = Get-FreshInstallFacts -InstallRoot $installRoot -SettingsRoot $settings
 [IO.Directory]::CreateDirectory($work) | Out-Null; Assert-NoReparseAncestors -Path $work
 Invoke-BoundedSilentInstaller -Path $installer
 $installed = Get-InstallFacts -RegistryPath $registryPath -ExpectedInstallRoot $installRoot
-Assert-InstallFacts -Facts $installed -ExpectedVersion '0.2.6' -ExpectedInstallRoot $installRoot -ExpectedApplication $receipt.packagedApplication -ExpectedSignatureStatus 'Valid' -ExpectedPublisher $script:ExpandedPins.ExpectedPublisher -ExpectedTimestamp $true
+Assert-InstallFacts -Facts $installed -ExpectedVersion '0.3.0' -ExpectedInstallRoot $installRoot -ExpectedApplication $receipt.packagedApplication -ExpectedSignatureStatus 'Valid' -ExpectedPublisher $script:ExpandedPins.ExpectedPublisher -ExpectedTimestamp $true
 $resources = Assert-InstalledSignedResources -InstallRoot $installRoot -Receipt $receipt -ReceiptSets $receiptSets
 if (Test-Path -LiteralPath $settingsRoot) { throw 'Silent install unexpectedly created the application settings root.' }
 [IO.Directory]::CreateDirectory($settingsRoot) | Out-Null
