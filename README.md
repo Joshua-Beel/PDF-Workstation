@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- `ocr-signed-artifact.yml` checks out full history (`fetch-depth: 0`) so its vitest step can read pinned commit 67d2382; run 39967979362 failed 3 tests on the shallow clone (SM6b).
 - 0.3.0 trusts the new updater public key `3E6DD54916A4E5E8`; it is still signed with the old key `85970C34AEABD775` that 0.2.0 trusts (SM6).
 - Key rotation follow-up: release docs match the rotation order, a 0.3.0 run stops before building if the app would still trust the old key, and the updater signature is verified before upload (SM6).
 - Updater key rotation prepared: release and draft checks require the release signature to come from the key installed apps trust, and the app to embed the configured key; new public key still pending (SM6).
