@@ -4,7 +4,19 @@ param(
     [Parameter(Mandatory = $true)][string]$WorkRoot,
     [Parameter(Mandatory = $true)][string]$OutputRoot,
     [Parameter(Mandatory = $true)][string]$WebDriverRoot,
-    [Parameter(Mandatory = $true)][string]$WebViewProfileRoot
+    [Parameter(Mandatory = $true)][string]$WebViewProfileRoot,
+    [Parameter(Mandatory = $true)][string]$TargetVersion,
+    [Parameter(Mandatory = $true)][string]$SourceRevision,
+    [Parameter(Mandatory = $true)][string]$ArtifactRunId,
+    [Parameter(Mandatory = $true)][string]$ArtifactId,
+    [Parameter(Mandatory = $true)][string]$ArtifactName,
+    [Parameter(Mandatory = $true)][string]$ArtifactBytes,
+    [Parameter(Mandatory = $true)][string]$ArtifactDigest,
+    [Parameter(Mandatory = $true)][string]$InstallerName,
+    [Parameter(Mandatory = $true)][string]$InstallerBytes,
+    [Parameter(Mandatory = $true)][string]$InstallerSha256,
+    [Parameter(Mandatory = $true)][string]$RecordBytes,
+    [Parameter(Mandatory = $true)][string]$RecordSha256
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -12,17 +24,24 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'ocr/installer-package.ps1')
 . (Join-Path $PSScriptRoot 'ocr/windows-signing.ps1')
 . (Join-Path $PSScriptRoot 'installed-persistence.ps1')
+. (Join-Path $PSScriptRoot 'signed-check-inputs.ps1')
 
 $script:PersistenceArtifactPins = [ordered]@{
     Repository = 'Joshua-Beel/PDF-Workstation'
-    SourceRevision = '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'
-    InstallerName = 'PDF Workstation_0.3.0_x64-setup.exe'
-    InstallerBytes = [uint64]11201296
-    InstallerSha256 = '3DE99F111652727BB59F9C17FF4E3CCA42ED48E9DE5E0614920280FFB0BA9FE5'
     RecordName = 'artifact-verification.json'
-    RecordBytes = [uint64]7715
-    RecordSha256 = '0383DAE8FA04705FA26F63CB3CC4EDE16442129D87F99E7900BD1EF301C4FB5C'
     Publisher = 'Joshua Beel'
+}
+
+function Initialize-PersistencePins {
+    param($Inputs)
+    $script:PersistenceArtifactPins['TargetVersion'] = $Inputs.TargetVersion
+    $script:PersistenceArtifactPins['SourceRevision'] = $Inputs.SourceRevision
+    $script:PersistenceArtifactPins['InstallerName'] = $Inputs.InstallerName
+    $script:PersistenceArtifactPins['InstallerBytes'] = $Inputs.InstallerBytes
+    $script:PersistenceArtifactPins['InstallerSha256'] = $Inputs.InstallerSha256
+    $script:PersistenceArtifactPins['RecordBytes'] = $Inputs.RecordBytes
+    $script:PersistenceArtifactPins['RecordSha256'] = $Inputs.RecordSha256
+    $script:PersistenceArtifactPins['LeakIds'] = "$($Inputs.ArtifactId)|$($Inputs.ArtifactRunId)"
 }
 
 function Assert-PersistenceFileReceipt {
@@ -130,7 +149,7 @@ function Get-PersistenceInstalledApplication {
     $registeredRoot = [IO.Path]::GetFullPath(([string]$registry.InstallLocation).Trim().Trim('"')).TrimEnd('\')
     $uninstall = [IO.Path]::GetFullPath(([string]$registry.UninstallString).Trim().Trim('"')).TrimEnd('\')
     $application = Join-Path $InstallRoot 'pdf-workstation.exe'
-    if ([string]$registry.DisplayName -cne 'PDF Workstation' -or [string]$registry.DisplayVersion -cne '0.3.0' -or
+    if ([string]$registry.DisplayName -cne 'PDF Workstation' -or [string]$registry.DisplayVersion -cne $script:PersistenceArtifactPins.TargetVersion -or
         -not $registeredRoot.Equals($InstallRoot,[StringComparison]::OrdinalIgnoreCase) -or -not $uninstall.Equals((Join-Path $InstallRoot 'uninstall.exe'),[StringComparison]::OrdinalIgnoreCase)) {
         throw 'Installed application registry facts do not match the exact signed version.'
     }
@@ -180,7 +199,7 @@ function Write-SanitizedPersistenceRecord {
         }
     }
     $json = $record | ConvertTo-Json -Depth 12
-    if ($json -match '(?i)([A-Z]:\\|\\Users\\|runneradmin|RUNNER_TEMP|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|12510717103|39969839829|raw\.log)') { throw 'Sanitized persistence record contains a path, credential name, artifact identifier, or raw log reference.' }
+    if ($json -match ('(?i)([A-Z]:\\|\\Users\\|runneradmin|RUNNER_TEMP|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|' + [string]$script:PersistenceArtifactPins.LeakIds + '|raw\.log)')) { throw 'Sanitized persistence record contains a path, credential name, artifact identifier, or raw log reference.' }
     $path = Join-Path $OutputRoot 'persistence-verification.json'
     [IO.File]::WriteAllText($path,$json,[Text.UTF8Encoding]::new($false))
     $files = @(Get-ChildItem -LiteralPath $OutputRoot -File -Force)
@@ -189,6 +208,7 @@ function Write-SanitizedPersistenceRecord {
 }
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
+Initialize-PersistencePins -Inputs (Get-SignedCheckInputs -TargetVersion $TargetVersion -SourceRevision $SourceRevision -ArtifactRunId $ArtifactRunId -ArtifactId $ArtifactId -ArtifactName $ArtifactName -ArtifactBytes $ArtifactBytes -ArtifactDigest $ArtifactDigest -InstallerName $InstallerName -InstallerBytes $InstallerBytes -InstallerSha256 $InstallerSha256 -RecordBytes $RecordBytes -RecordSha256 $RecordSha256)
 $workflowRevision = Assert-PersistenceHostedRunner -ProjectRoot $projectRoot
 $sourceBinding = Assert-SignedPersistenceSource -ProjectRoot $projectRoot -WorkflowRevision $workflowRevision
 if ([int]$sourceBinding.matchedStorageBlobCount -ne 2 -or [int]$sourceBinding.signedSelectorMarkerCount -ne 18 -or -not [bool]$sourceBinding.selectorsBoundToSignedAppSource) { throw 'The signed persistence source binding is incomplete.' }

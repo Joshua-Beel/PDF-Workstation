@@ -4,39 +4,41 @@ param(
     [Parameter(Mandatory = $true)][string]$WorkRoot,
     [Parameter(Mandatory = $true)][string]$OutputRoot,
     [Parameter(Mandatory = $true)][string]$WebDriverRoot,
-    [Parameter(Mandatory = $true)][string]$WebViewProfileRoot
+    [Parameter(Mandatory = $true)][string]$WebViewProfileRoot,
+    [Parameter(Mandatory = $true)][string]$TargetVersion,
+    [Parameter(Mandatory = $true)][string]$SourceRevision,
+    [Parameter(Mandatory = $true)][string]$ArtifactRunId,
+    [Parameter(Mandatory = $true)][string]$ArtifactId,
+    [Parameter(Mandatory = $true)][string]$ArtifactName,
+    [Parameter(Mandatory = $true)][string]$ArtifactBytes,
+    [Parameter(Mandatory = $true)][string]$ArtifactDigest,
+    [Parameter(Mandatory = $true)][string]$InstallerName,
+    [Parameter(Mandatory = $true)][string]$InstallerBytes,
+    [Parameter(Mandatory = $true)][string]$InstallerSha256,
+    [Parameter(Mandatory = $true)][string]$RecordBytes,
+    [Parameter(Mandatory = $true)][string]$RecordSha256
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 . (Join-Path $PSScriptRoot 'installed-reading-tools.ps1')
+. (Join-Path $PSScriptRoot 'signed-check-inputs.ps1')
 
 $script:ReadingVerificationPins = [ordered]@{
     Repository = 'Joshua-Beel/PDF-Workstation'
-    SignedArtifactId = [uint64]12510717103
-    SignedRunId = [uint64]39969839829
-    SignedSourceRevision = '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'
-    SignedRecordName = 'artifact-verification.json'
-    SignedRecordBytes = [uint64]7715
-    SignedRecordSha256 = '0383DAE8FA04705FA26F63CB3CC4EDE16442129D87F99E7900BD1EF301C4FB5C'
     ExpectedPublisher = 'Joshua Beel'
-    FeatureBlobs = [ordered]@{
-        'src/Viewer.tsx' = '4e9e5464521d2a963eff84f71cc16453acda9940'
-        'src/TextLayer.tsx' = '9984131a916f911d48005979b070f653e4b37215'
-        'src/SearchPanel.tsx' = 'db36f2dd70795cf3f581f255d32eb7ae834c5c59'
-        'src/PasswordDialog.tsx' = '5a06bea211de4be9403f74c2739e2194ce264a77'
-        'src/PageText.tsx' = '2d0a8708a3d325f3d097717485ea625b6f1e18c3'
-        'src/bridge.ts' = '88707e0cf6b140002845044be3016cb832d78d24'
-        'src/searchHighlights.ts' = 'fc52f09167b694ff7870bd28696bb3eedd904ed1'
-        'src/textHighlightSelection.ts' = 'dad6f6b36924606de1728f8908acb03dea83126b'
-        'src-tauri/src/main.rs' = 'd9aa9862c286913108d75ca2cac0d1305f11c002'
-        'src-tauri/src/service.rs' = '737a4492b4006eb6272c1b9084dc54f508309037'
-        'src-tauri/src/text_geometry.rs' = '7d54d3fcac02ffd1d873b5fd6b265d9d42b25e4b'
-    }
-    SignedApplicationShellBlob = '2af97705343967869b4174e2037fec6619b68fe5'
+    FeaturePaths = @(
+        'src/Viewer.tsx','src/TextLayer.tsx','src/SearchPanel.tsx','src/PasswordDialog.tsx','src/PageText.tsx','src/bridge.ts',
+        'src/searchHighlights.ts','src/textHighlightSelection.ts','src-tauri/src/main.rs','src-tauri/src/service.rs','src-tauri/src/text_geometry.rs'
+    )
     MaximumFixtureBytes = 2MB
     ProtectedFixtureBytes = [uint64]912
     ProtectedFixtureSha256 = '9BE85022232671CFD796C711E0B8B06847E7020D49AA07FA20DBD6DADE168A37'
+}
+
+function Initialize-ReadingPins {
+    param($Inputs)
+    Add-SignedPinFields -Pins $script:ReadingVerificationPins -Inputs $Inputs
 }
 
 function Resolve-ReadingRunnerPath {
@@ -68,23 +70,19 @@ function Assert-ReadingHostedSource {
 }
 
 function Assert-SignedReadingSourceParity {
-    param([Parameter(Mandatory = $true)][string]$ProjectRoot)
-    & git -C $ProjectRoot cat-file -e "$($script:ReadingVerificationPins.SignedSourceRevision)^{commit}"
-    if ($LASTEXITCODE -ne 0) { throw 'The exact signed source commit is unavailable.' }
-    foreach ($path in $script:ReadingVerificationPins.FeatureBlobs.Keys) {
-        $signed = (& git -C $ProjectRoot rev-parse "$($script:ReadingVerificationPins.SignedSourceRevision):$path").Trim()
-        $current = (& git -C $ProjectRoot rev-parse "HEAD:$path").Trim()
-        $expected = [string]$script:ReadingVerificationPins.FeatureBlobs[$path]
-        if ($LASTEXITCODE -ne 0 -or $signed -cne $expected -or $current -cne $expected) { throw 'A reading feature source blob does not match the exact signed and dispatched source parity contract.' }
+    param([Parameter(Mandatory = $true)][string]$ProjectRoot,[string]$CurrentRevision = 'HEAD')
+    $signedBlobs = Get-SignedSourceBlobs -ProjectRoot $ProjectRoot -Revision $script:ReadingVerificationPins.SignedSourceRevision -Paths @($script:ReadingVerificationPins.FeaturePaths + 'src/App.tsx')
+    $matchedFeatureBlobs = 0
+    foreach ($path in $script:ReadingVerificationPins.FeaturePaths) {
+        $current = (& git -C $ProjectRoot rev-parse "${CurrentRevision}:$path").Trim()
+        if ($LASTEXITCODE -ne 0 -or $current -cne $signedBlobs[$path]) { throw 'A reading feature source blob does not match the exact signed and dispatched source parity contract.' }
+        $matchedFeatureBlobs++
     }
-    $signedShell = (& git -C $ProjectRoot rev-parse "$($script:ReadingVerificationPins.SignedSourceRevision):src/App.tsx").Trim()
-    $currentShell = (& git -C $ProjectRoot rev-parse 'HEAD:src/App.tsx').Trim()
-    if ($LASTEXITCODE -ne 0 -or $signedShell -cne $script:ReadingVerificationPins.SignedApplicationShellBlob) { throw 'The inspected signed application shell blob is not exact.' }
+    $signedShell = $signedBlobs['src/App.tsx']
+    $currentShell = (& git -C $ProjectRoot rev-parse "${CurrentRevision}:src/App.tsx").Trim()
     return [pscustomobject]@{
-        signedFeatureBlobsVerified = $true
-        currentFeatureParityVerified = $true
-        featureBlobCount = [int]$script:ReadingVerificationPins.FeatureBlobs.Count
-        signedApplicationShellBlobVerified = $true
+        currentFeatureParityVerified = [bool]($matchedFeatureBlobs -eq $script:ReadingVerificationPins.FeaturePaths.Count)
+        featureBlobCount = [int]$matchedFeatureBlobs
         currentApplicationShellMatchesSigned = [bool]($currentShell -ceq $signedShell)
     }
 }
@@ -257,7 +255,7 @@ function Write-SanitizedReadingRecord {
         cleanup = [ordered]@{ clipboardClearedAndVerified=$true;sessionDeleted=[bool]$UiResult.sessionDeleted;ownedProcessTreeStopped=[bool]$UiResult.ownedProcessTreeStopped;relevantProcessesRemaining=[int]$UiResult.relevantProcessesRemaining }
     }
     $json = $record | ConvertTo-Json -Depth 8
-    if ($json -match '(?i)([A-Z]:\\|\\Users\\|test password|wrong password|A place for your PDFs|Sample document|GITHUB_TOKEN|GH_TOKEN|12510717103|39969839829|raw\.log)') { throw 'The reading-tools record contains a raw path, text fixture value, password, token, artifact identifier, or raw log reference.' }
+    if ($json -match ('(?i)([A-Z]:\\|\\Users\\|test password|wrong password|A place for your PDFs|Sample document|GITHUB_TOKEN|GH_TOKEN|' + [string]$script:ReadingVerificationPins.LeakIds + '|raw\.log)')) { throw 'The reading-tools record contains a raw path, text fixture value, password, token, artifact identifier, or raw log reference.' }
     $path = Join-Path $OutputRoot 'reading-tools-verification.json'
     [IO.File]::WriteAllText($path,$json,[Text.UTF8Encoding]::new($false))
     return $path
@@ -265,6 +263,7 @@ function Write-SanitizedReadingRecord {
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Assert-ReadingHostedSource -ProjectRoot $projectRoot
+Initialize-ReadingPins -Inputs (Get-SignedCheckInputs -TargetVersion $TargetVersion -SourceRevision $SourceRevision -ArtifactRunId $ArtifactRunId -ArtifactId $ArtifactId -ArtifactName $ArtifactName -ArtifactBytes $ArtifactBytes -ArtifactDigest $ArtifactDigest -InstallerName $InstallerName -InstallerBytes $InstallerBytes -InstallerSha256 $InstallerSha256 -RecordBytes $RecordBytes -RecordSha256 $RecordSha256)
 $sourceParity = Assert-SignedReadingSourceParity -ProjectRoot $projectRoot
 $signedRoot = Resolve-ReadingRunnerPath -Path $SignedArtifactRoot -MustExist
 $work = Resolve-ReadingRunnerPath -Path $WorkRoot -MustBeFresh

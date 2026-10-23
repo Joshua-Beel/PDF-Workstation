@@ -5,7 +5,20 @@ param(
     [string]$WorkRoot,
     [string]$OutputRoot,
     [string]$WebDriverRoot,
-    [string]$WebViewProfileRoot
+    [string]$WebViewProfileRoot,
+    [string]$TargetSourceRoot,
+    [string]$TargetVersion,
+    [string]$SourceRevision,
+    [string]$ArtifactRunId,
+    [string]$ArtifactId,
+    [string]$ArtifactName,
+    [string]$ArtifactBytes,
+    [string]$ArtifactDigest,
+    [string]$InstallerName,
+    [string]$InstallerBytes,
+    [string]$InstallerSha256,
+    [string]$RecordBytes,
+    [string]$RecordSha256
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -24,18 +37,12 @@ foreach ($definition in @($trustedAst.FindAll({ param($node) $node -is [Manageme
     Invoke-Expression $definition.Extent.Text
 }
 
+. (Join-Path $PSScriptRoot 'signed-check-inputs.ps1')
+
 $script:Pins = [ordered]@{
     Repository = 'Joshua-Beel/PDF-Workstation'
-    SignedArtifactId = [uint64]12510717103
-    SignedRunId = [uint64]39969839829
-    SignedSourceRevision = '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'
-    SignedInstallerName = 'PDF Workstation_0.3.0_x64-setup.exe'
-    SignedInstallerBytes = [uint64]11201296
-    SignedInstallerSha256 = '3DE99F111652727BB59F9C17FF4E3CCA42ED48E9DE5E0614920280FFB0BA9FE5'
-    SignedRecordName = 'artifact-verification.json'
-    SignedRecordBytes = [uint64]7715
-    SignedRecordSha256 = '0383DAE8FA04705FA26F63CB3CC4EDE16442129D87F99E7900BD1EF301C4FB5C'
     ExpectedPublisher = 'Joshua Beel'
+    LeakIds = '(?!)'
 }
 
 function Write-PrintUnavailableRecord {
@@ -47,13 +54,13 @@ function Write-PrintUnavailableRecord {
         scope = 'Hosted signed installed Windows print-dialog verification.'
         status = 'explicit-unavailable'
         workflowSourceRevision = $WorkflowSourceRevision
-        signedSourceRevision = $script:Pins.SignedSourceRevision
+        signedSourceRevision = $(if ($script:Pins.Contains('SignedSourceRevision')) { [string]$script:Pins.SignedSourceRevision } else { '' })
         printerPreflight = [ordered]@{ printerCount=[int]$PrinterFacts.printerCount;anyPrinterAvailable=$false;microsoftPrintToPdfAvailable=$false;featureInstallationAttempted=$false }
         installationAttempted = $false
         reason = 'No Windows printer was available on the hosted runner before installation.'
     }
     $json = $record | ConvertTo-Json -Depth 8
-    if ($json -match '(?i)([A-Z]:\\|\\Users\\|runneradmin|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|12510717103|39969839829|raw\.log)') { throw 'Unavailable-print record contains restricted evidence.' }
+    if ($json -match ('(?i)([A-Z]:\\|\\Users\\|runneradmin|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|' + [string]$script:Pins.LeakIds + '|raw\.log)')) { throw 'Unavailable-print record contains restricted evidence.' }
     [IO.File]::WriteAllText((Join-Path $Root 'print-dialog-verification.json'),$json,[Text.UTF8Encoding]::new($false))
 }
 
@@ -66,8 +73,8 @@ function Assert-SignedPrintingSourceBlobs {
     foreach ($path in $exactPaths) {
         $workflowBlob = (& git -C $ProjectRoot rev-parse "${WorkflowRevision}:$path").Trim()
         if ($LASTEXITCODE -ne 0 -or $workflowBlob -cnotmatch '^[a-f0-9]{40,64}$') { throw 'Could not resolve a workflow printing source blob.' }
-        $signedBlob = (& git -C $ProjectRoot rev-parse "$($script:Pins.SignedSourceRevision):$path").Trim()
-        if ($LASTEXITCODE -ne 0 -or $signedBlob -cne $workflowBlob) { throw "Workflow printing source does not match the signed application: $path" }
+        $signedBlob = (Get-SignedSourceBlobs -ProjectRoot $ProjectRoot -Revision $script:Pins.SignedSourceRevision -Paths @($path))[$path]
+        if ($signedBlob -cne $workflowBlob) { throw "Workflow printing source does not match the signed application: $path" }
     }
     $workflowShellBlob = (& git -C $ProjectRoot rev-parse "${WorkflowRevision}:src/App.tsx").Trim()
     if ($LASTEXITCODE -ne 0 -or $workflowShellBlob -cnotmatch '^[a-f0-9]{40,64}$') { throw 'Could not resolve the workflow application shell blob.' }
@@ -115,7 +122,7 @@ function Write-SanitizedPrintRecord {
         cleanup = [ordered]@{ sessionDeleted=[bool]$PrintResult.sessionDeleted;ownedProcessTreeStopped=[bool]$PrintResult.ownedProcessTreeStopped;relevantProcessesRemaining=[int]$PrintResult.relevantProcessesRemaining;nativeDialogsRemaining=0 }
     }
     $json = $record | ConvertTo-Json -Depth 12
-    if ($json -match '(?i)([A-Z]:\\|\\Users\\|runneradmin|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|12510717103|39969839829|raw\.log|\.pdf-workstation)') { throw 'Sanitized print record contains a host path, credential identifier, artifact identifier, or raw evidence reference.' }
+    if ($json -match ('(?i)([A-Z]:\\|\\Users\\|runneradmin|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|' + [string]$script:Pins.LeakIds + '|raw\.log|\.pdf-workstation)')) { throw 'Sanitized print record contains a host path, credential identifier, artifact identifier, or raw evidence reference.' }
     $path = Join-Path $Root 'print-dialog-verification.json'
     [IO.File]::WriteAllText($path,$json,[Text.UTF8Encoding]::new($false))
     $files = @(Get-ChildItem -LiteralPath $Root -File -Force)
@@ -123,6 +130,15 @@ function Write-SanitizedPrintRecord {
     return $path
 }
 
+if (-not $PreflightOnly -or -not [string]::IsNullOrWhiteSpace($TargetVersion)) {
+    $signedInputs = Get-SignedCheckInputs -TargetVersion $TargetVersion -SourceRevision $SourceRevision -ArtifactRunId $ArtifactRunId -ArtifactId $ArtifactId -ArtifactName $ArtifactName -ArtifactBytes $ArtifactBytes -ArtifactDigest $ArtifactDigest -InstallerName $InstallerName -InstallerBytes $InstallerBytes -InstallerSha256 $InstallerSha256 -RecordBytes $RecordBytes -RecordSha256 $RecordSha256
+    $baseTargets = $null
+    if (-not $PreflightOnly) {
+        if ([string]::IsNullOrWhiteSpace($TargetSourceRoot)) { throw 'TargetSourceRoot is required for full verification.' }
+        $baseTargets = Get-SignedBaseResourceTargets -TargetSourceRoot $TargetSourceRoot -Inputs $signedInputs
+    }
+    Add-SignedPinFields -Pins $script:Pins -Inputs $signedInputs -BaseResourceTargets $baseTargets
+}
 $printerFacts = Get-PrintCapabilityFacts
 Assert-PrintCapabilityFacts -Facts $printerFacts
 $workflowRevision = if ($env:GITHUB_SHA) { [string]$env:GITHUB_SHA } else { '' }
@@ -158,7 +174,7 @@ $signedInstaller = Join-Path $signedRoot $script:Pins.SignedInstallerName
 $recordPath = Join-Path $signedRoot $script:Pins.SignedRecordName
 $signedFiles = @(Get-ChildItem -LiteralPath $signedRoot -Recurse -File -Force)
 if ($signedFiles.Count -ne 2 -or -not (Test-Path -LiteralPath $signedInstaller -PathType Leaf) -or -not (Test-Path -LiteralPath $recordPath -PathType Leaf)) { throw 'Downloaded signed artifact must contain exactly the installer and sanitized record.' }
-Assert-FileReceipt -Path $signedInstaller -Bytes $script:Pins.SignedInstallerBytes -Sha256 $script:Pins.SignedInstallerSha256 -Kind 'Signed 0.3.0 installer'
+Assert-FileReceipt -Path $signedInstaller -Bytes $script:Pins.SignedInstallerBytes -Sha256 $script:Pins.SignedInstallerSha256 -Kind 'Signed target-version installer'
 Assert-FileReceipt -Path $recordPath -Bytes $script:Pins.SignedRecordBytes -Sha256 $script:Pins.SignedRecordSha256 -Kind 'Signed artifact verification record'
 $null = Assert-TrustedWindowsSignature -Path $signedInstaller -ExpectedPublisher $script:Pins.ExpectedPublisher
 $recordText = Get-Content -LiteralPath $recordPath -Raw -Encoding UTF8
@@ -181,7 +197,7 @@ Invoke-BoundedSilentInstaller -Path $signedInstaller
 $processFacts = Get-ConflictingProcessFacts -InstallerPaths @($signedInstaller)
 if ($processFacts.applicationProcessPresent -or $processFacts.installerProcessPresent) { throw 'Signed silent install left an application or installer process running.' }
 $installed = Get-InstallFacts -RegistryPath $registryPath -ExpectedInstallRoot $installRoot
-Assert-InstallFacts -Facts $installed -ExpectedVersion '0.3.0' -ExpectedInstallRoot $installRoot -ExpectedApplication $receipt.packagedApplication -ExpectedSignatureStatus 'Valid' -ExpectedPublisher $script:Pins.ExpectedPublisher -ExpectedTimestamp $true
+Assert-InstallFacts -Facts $installed -ExpectedVersion $script:Pins.TargetVersion -ExpectedInstallRoot $installRoot -ExpectedApplication $receipt.packagedApplication -ExpectedSignatureStatus 'Valid' -ExpectedPublisher $script:Pins.ExpectedPublisher -ExpectedTimestamp $true
 $resources = Assert-InstalledSignedResources -InstallRoot $installRoot -Receipt $receipt -ReceiptSets $receiptSets
 if (Test-Path -LiteralPath $settingsRoot) { throw 'Silent install unexpectedly created the application settings root.' }
 [IO.Directory]::CreateDirectory($settingsRoot) | Out-Null
