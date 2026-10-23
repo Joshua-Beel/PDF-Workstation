@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
+import { REV_NEW, REV_PREFS_OLD, guarded, importFunctions, preamble, runBlocks, runPwsh, signedInputsSnippet } from './signed-check-test-support';
 
 const workflow = readFileSync('.github/workflows/persistence-verification.yml', 'utf8');
 const verifier = readFileSync('scripts/verify-signed-persistence.ps1', 'utf8');
@@ -21,9 +22,15 @@ describe('signed installed persistence workflow', () => {
     expect(workflow).toContain('fetch-depth: 0');
     expect(workflow).toContain('git diff --quiet --');
     expect(workflow).toContain('git diff --cached --quiet --');
-    expect(workflow).toContain('artifact-ids: \'12510717103\'');
-    expect(workflow).toContain("run-id: '39969839829'");
-    expect(workflow).toContain("[string]$artifact.workflow_run.head_sha -cne '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'");
+    expect(workflow).toContain('artifact-ids: ${{ inputs.artifact_id }}');
+    expect(workflow).toContain('run-id: ${{ inputs.artifact_run_id }}');
+    expect(workflow).toContain('./scripts/assert-signed-artifact-metadata.ps1');
+    for (const input of ['target_version', 'source_revision', 'artifact_run_id', 'artifact_id', 'artifact_name', 'artifact_bytes', 'artifact_digest', 'installer_name', 'installer_bytes', 'installer_sha256', 'record_bytes', 'record_sha256']) {
+      expect(workflow).toContain(`      ${input}: { required: true, type: string }`);
+    }
+    for (const run of runBlocks(workflow)) expect(run).not.toContain('${{');
+    expect(workflow).toMatch(/^permissions:\r?\n  contents: read\r?\n  actions: read\r?\n/m);
+    expect(workflow).not.toMatch(/secrets\./);
     expect(workflow).not.toContain('pull_request:');
     expect(workflow).not.toContain('push:');
   });
@@ -33,7 +40,7 @@ describe('signed installed persistence workflow', () => {
       expect(workflow).toContain(path);
       expect(verifier).toContain(path);
     }
-    expect(workflow).toContain("$signedRevision = '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'");
+    expect(workflow).toContain('$signedRevision = $env:SOURCE_REVISION');
     expect(workflow).toContain("$workflowBlob -cne $signedBlob");
     expect(verifier).toContain('Assert-SignedPersistenceSource');
     expect(verifier).toContain('exactSignedStorageModulesMatched = $true');
@@ -44,18 +51,21 @@ describe('signed installed persistence workflow', () => {
   });
 
   it('resolves the exact signed storage blobs and selector markers from git history', () => {
-    const check = String.raw`
-      $tokens=$null;$errors=$null
-      $ast=[Management.Automation.Language.Parser]::ParseFile('${process.cwd().replaceAll("'", "''")}\scripts\verify-signed-persistence.ps1',[ref]$tokens,[ref]$errors)
-      $function=$ast.Find({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Assert-SignedPersistenceSource'},$true)
-      Invoke-Expression $function.Extent.Text
-      $script:PersistenceArtifactPins=[ordered]@{SourceRevision='4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'}
-      $head=(& git rev-parse HEAD).Trim();$result=Assert-SignedPersistenceSource -ProjectRoot '${process.cwd().replaceAll("'", "''")}' -WorkflowRevision $head
+    const run = (workflowRevision: string) => runPwsh(String.raw`${preamble}
+      ${guarded(String.raw`
+      ${signedInputsSnippet(REV_NEW)}
+      ${importFunctions('verify-signed-persistence.ps1', '$script:PersistenceArtifactPins', ['Assert-SignedPersistenceSource', 'Initialize-PersistencePins'])}
+      Initialize-PersistencePins -Inputs $inputs
+      $result=Assert-SignedPersistenceSource -ProjectRoot '${process.cwd().replaceAll("'", "''")}' -WorkflowRevision '${workflowRevision}'
       if([int]$result.matchedStorageBlobCount-ne 2-or-not[bool]$result.selectorsBoundToSignedAppSource-or[int]$result.signedSelectorMarkerCount-ne 18){throw 'Signed persistence source binding was incomplete.'}
-    `;
-    const result = runPowerShell(check);
-    expect(result.status, result.stderr || result.stdout).toBe(0);
-  }, 15_000);
+      `)}
+    `);
+    const control = run(REV_NEW);
+    expect(control.status, control.stderr || control.stdout).toBe(0);
+    const drifted = run(REV_PREFS_OLD);
+    expect(drifted.status).toBe(1);
+    expect(drifted.stderr).toContain('Workflow persistence storage source does not match the signed application: src/preferences.ts');
+  }, 60_000);
 
   it('keeps download credentials out of the installer and persistence verifier step', () => {
     const verifierStep = workflow.slice(workflow.indexOf('- name: Verify signed installed persistence across restarts'), workflow.indexOf('- name: Upload only sanitized persistence verification'));
@@ -65,9 +75,10 @@ describe('signed installed persistence workflow', () => {
   });
 
   it('pins the signed bytes and source, verifies installed trust, and uploads one sanitized record', () => {
-    expect(verifier).toContain("SourceRevision = '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'");
-    expect(verifier).toContain("InstallerSha256 = '3DE99F111652727BB59F9C17FF4E3CCA42ED48E9DE5E0614920280FFB0BA9FE5'");
-    expect(verifier).toContain("RecordSha256 = '0383DAE8FA04705FA26F63CB3CC4EDE16442129D87F99E7900BD1EF301C4FB5C'");
+    expect(verifier).toContain("$script:PersistenceArtifactPins['SourceRevision'] = $Inputs.SourceRevision");
+    expect(verifier).toContain("$script:PersistenceArtifactPins['InstallerSha256'] = $Inputs.InstallerSha256");
+    expect(verifier).toContain("$script:PersistenceArtifactPins['RecordSha256'] = $Inputs.RecordSha256");
+    expect(verifier.match(/'[A-F0-9]{64}'/g)).toBeNull();
     expect(verifier).toContain('Assert-TrustedWindowsSignature -Path $installer');
     expect(verifier).toContain('Get-PersistenceInstalledApplication');
     expect(verifier).toContain('Assert-PersistenceFileReceipt -Path $welcome');
@@ -98,7 +109,7 @@ describe('signed installed persistence workflow', () => {
     for (const unverified of ['nativeWindowVisualVerified = $false', 'nativeFilePickerVerified = $false', 'userPdfVerified = $false']) {
       expect(verifier).toContain(unverified);
     }
-    expect(verifier).toContain('12510717103|39969839829');
+    expect(verifier).toContain("[string]$script:PersistenceArtifactPins.LeakIds");
     expect(verifier).toContain('Sanitized persistence record contains a path, credential name, artifact identifier, or raw log reference.');
   });
 });

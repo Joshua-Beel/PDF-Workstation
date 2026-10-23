@@ -16,7 +16,7 @@ function assertApprovedImmutableActionUses(workflow: string) {
     if (!/@[0-9a-f]{40}$/.test(actionUse)) throw new Error(`Action does not use an immutable full SHA: ${actionUse}`);
     if (!approvedActionUses.includes(actionUse)) throw new Error(`Action is not approved: ${actionUse}`);
   }
-  if (actionUses.length !== approvedActionUses.length) throw new Error('Workflow action count changed.');
+  if (actionUses.length !== approvedActionUses.length + 1) throw new Error('Workflow action count changed.');
   return actionUses;
 }
 
@@ -83,6 +83,8 @@ function functionHarness(names: string[], body: string, loadDependencies = true)
       BaselineName = 'PDF.Workstation_0.2.0_x64-setup.exe'
       BaselineBytes = [uint64]6418229
       BaselineSha256 = '17788CB82BB42DEAC35EA197A385A9BAFC8CD331422446A2B834E115A90C4D2E'
+      TargetVersion = '0.3.0'
+      LeakIds = '12510717103|39969839829'
       SignedSourceRevision = '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'
       SignedInstallerName = 'PDF Workstation_0.3.0_x64-setup.exe'
       SignedInstallerBytes = [uint64]11201296
@@ -112,11 +114,12 @@ describe('manual signed OCR installer upgrade workflow', () => {
     expect(workflow).toContain('actions: read');
     const jobHeader = workflow.slice(workflow.indexOf('jobs:'), workflow.indexOf('    steps:'));
     expect(jobHeader).not.toContain('${{ runner.temp }}');
-    expect(jobHeader).not.toMatch(/^\s{4}env:/m);
+    expect(jobHeader).toMatch(/^\s{4}env:/m);
+    expect(jobHeader).not.toMatch(/GITHUB_TOKEN|github\.token|secrets\./);
     expect(workflow).toContain('- name: Initialize fresh runner paths');
     expect(workflow).toContain('$env:RUNNER_TEMP');
     expect(workflow).toContain('[IO.StreamWriter]::new($env:GITHUB_ENV, $true, [Text.UTF8Encoding]::new($false))');
-    expect(assertApprovedImmutableActionUses(workflow)).toEqual(approvedActionUses);
+    expect(assertApprovedImmutableActionUses(workflow)).toEqual([approvedActionUses[0], approvedActionUses[0], approvedActionUses[1], approvedActionUses[2]]);
     const initStep = workflow.slice(workflow.indexOf('- name: Initialize fresh runner paths'), workflow.indexOf(`- uses: ${approvedActionUses[0]}`));
     expect(initStep).toContain('IsNullOrWhiteSpace($env:RUNNER_TEMP)');
     expect(initStep).toContain('IsNullOrWhiteSpace($env:GITHUB_ENV)');
@@ -137,12 +140,10 @@ describe('manual signed OCR installer upgrade workflow', () => {
     expect(workflow).toContain('git diff --quiet --');
     expect(workflow).toContain('git diff --cached --quiet --');
     expect(workflow).toContain("Test-Path -LiteralPath $env:SIGNED_ARTIFACT_ROOT");
-    expect(workflow).toContain('artifact-ids: \'12510717103\'');
-    expect(workflow).toContain('run-id: \'39969839829\'');
+    expect(workflow).toContain('artifact-ids: ${{ inputs.artifact_id }}');
+    expect(workflow).toContain('run-id: ${{ inputs.artifact_run_id }}');
     expect(workflow).toContain('merge-multiple: true');
-    expect(workflow).toContain('[uint64]$artifact.size_in_bytes -ne 11182480');
-    expect(workflow).toContain("digest -cne 'sha256:3e5c1003b553e3ed6d2f14bdd8f0b7b6baf56c7aacf55856e875f19ba270a689'");
-    expect(workflow).toContain("head_sha -cne '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'");
+    expect(workflow).toContain('./scripts/assert-signed-artifact-metadata.ps1');
     expect(workflow).toContain("digest -cne 'sha256:17788cb82bb42deac35ea197a385a9bafc8cd331422446a2b834e115a90c4d2e'");
     expect(workflow).toContain("[uint64]$asset.size -ne 6418229");
     expect(workflow).not.toMatch(/secrets\.|AZURE_|TAURI_SIGNING|gh release|create.*release/i);
@@ -292,8 +293,15 @@ describe('manual signed OCR installer upgrade workflow', () => {
           signatures=[pscustomobject]@{expectedPublisher=$script:Pins.ExpectedPublisher;installer='Valid';application='Valid';engine='Valid';pdfium='Valid';originalEngine='NotSigned';trustedTimestampsRequired=$true}
           verification=[pscustomobject]@{archiveInventory=(New-Value);extractedResourcesMatched=$true;bundleContainsOnlyInstaller=$true;updaterArtifacts=@();ephemeralSigningConfigurationRetained=$false}
         }
+        $script:Pins['BaseResourceTargets']=@($base|ForEach-Object{[string]$_.target}|Sort-Object -CaseSensitive)
         $sets=Assert-SignedArtifactReceipt -Receipt $receipt
         if($sets.Base.Count -ne 28 -or $sets.Ocr.Count -ne 5){throw 'Valid exact receipt failed.'}
+        $saved=$script:Pins['BaseResourceTargets']
+        $script:Pins['BaseResourceTargets']=@($saved[0..26])
+        $rejected=$false;try{Assert-SignedArtifactReceipt -Receipt $receipt}catch{$rejected=$true};if(-not $rejected){throw 'A base-resource count mismatch was accepted.'}
+        $script:Pins['BaseResourceTargets']=@($saved[0..26])+@('resources/base/other.txt')
+        $rejected=$false;try{Assert-SignedArtifactReceipt -Receipt $receipt}catch{$rejected=$true};if(-not $rejected){throw 'A base-resource target mismatch was accepted.'}
+        $script:Pins['BaseResourceTargets']=$saved
         $wrong=$receipt.PSObject.Copy();$wrong.sourceRevision=('9'*40)
         $rejected=$false;try{Assert-SignedArtifactReceipt -Receipt $wrong}catch{$rejected=$true};if(-not $rejected){throw 'Wrong source revision accepted.'}
         $wrong=$receipt.PSObject.Copy();$wrong.ocr=$receipt.ocr.PSObject.Copy();$wrong.ocr.packagedResources=@($ocr[0..3])

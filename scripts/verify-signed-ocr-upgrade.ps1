@@ -6,7 +6,20 @@ param(
     [Parameter(Mandatory = $true)][string]$OutputRoot,
     [Parameter(Mandatory = $true)][string]$WebDriverRoot,
     [Parameter(Mandatory = $true)][string]$WebViewProfileRoot,
-    [Parameter(Mandatory = $true)][ValidateSet('HostedNonInteractive')][string]$PublisherUiMode
+    [Parameter(Mandatory = $true)][ValidateSet('HostedNonInteractive')][string]$PublisherUiMode,
+    [Parameter(Mandatory = $true)][string]$TargetSourceRoot,
+    [Parameter(Mandatory = $true)][string]$TargetVersion,
+    [Parameter(Mandatory = $true)][string]$SourceRevision,
+    [Parameter(Mandatory = $true)][string]$ArtifactRunId,
+    [Parameter(Mandatory = $true)][string]$ArtifactId,
+    [Parameter(Mandatory = $true)][string]$ArtifactName,
+    [Parameter(Mandatory = $true)][string]$ArtifactBytes,
+    [Parameter(Mandatory = $true)][string]$ArtifactDigest,
+    [Parameter(Mandatory = $true)][string]$InstallerName,
+    [Parameter(Mandatory = $true)][string]$InstallerBytes,
+    [Parameter(Mandatory = $true)][string]$InstallerSha256,
+    [Parameter(Mandatory = $true)][string]$RecordBytes,
+    [Parameter(Mandatory = $true)][string]$RecordSha256
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -15,6 +28,7 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'ocr/windows-signing.ps1')
 . (Join-Path $PSScriptRoot 'installed-app-launch.ps1')
 . (Join-Path $PSScriptRoot 'installed-publisher-ui.ps1')
+. (Join-Path $PSScriptRoot 'signed-check-inputs.ps1')
 
 $script:Pins = [ordered]@{
     Repository = 'Joshua-Beel/PDF-Workstation'
@@ -22,15 +36,6 @@ $script:Pins = [ordered]@{
     BaselineName = 'PDF.Workstation_0.2.0_x64-setup.exe'
     BaselineBytes = [uint64]6418229
     BaselineSha256 = '17788CB82BB42DEAC35EA197A385A9BAFC8CD331422446A2B834E115A90C4D2E'
-    SignedArtifactId = [uint64]12510717103
-    SignedRunId = [uint64]39969839829
-    SignedSourceRevision = '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'
-    SignedInstallerName = 'PDF Workstation_0.3.0_x64-setup.exe'
-    SignedInstallerBytes = [uint64]11201296
-    SignedInstallerSha256 = '3DE99F111652727BB59F9C17FF4E3CCA42ED48E9DE5E0614920280FFB0BA9FE5'
-    SignedRecordName = 'artifact-verification.json'
-    SignedRecordBytes = [uint64]7715
-    SignedRecordSha256 = '0383DAE8FA04705FA26F63CB3CC4EDE16442129D87F99E7900BD1EF301C4FB5C'
     ExpectedPublisher = 'Joshua Beel'
     SmokeWidth = 1200
     SmokeHeight = 240
@@ -212,7 +217,10 @@ function Assert-SignedArtifactReceipt {
     Assert-ReceiptValue -Value $Receipt.packagedApplication -Kind 'Packaged application'
 
     $base = @($Receipt.baseResources)
-    if ($base.Count -ne 28) { throw 'Signed artifact record must contain exactly 28 base resources.' }
+    $expectedBaseTargets = if ($script:Pins.Contains('BaseResourceTargets')) { @($script:Pins.BaseResourceTargets) } else { @() }
+    if ($expectedBaseTargets.Count -eq 0 -or $base.Count -ne $expectedBaseTargets.Count) { throw 'Signed artifact record must contain exactly the base resources of the tagged tauri.conf.json.' }
+    $recordedBaseTargets = @($base | ForEach-Object { [string]$_.target } | Sort-Object -CaseSensitive)
+    if (Compare-Object $expectedBaseTargets $recordedBaseTargets -CaseSensitive) { throw 'Signed artifact record base resources differ from the tagged tauri.conf.json expansion.' }
     $baseTargets = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     $pdfium = @()
     foreach ($entry in $base) {
@@ -745,7 +753,7 @@ function Write-SanitizedUpgradeRecord {
             installer = [ordered]@{ fileName = $script:Pins.BaselineName; bytes = $script:Pins.BaselineBytes; sha256 = $script:Pins.BaselineSha256; signature = 'NotSigned' }
         }
         upgrade = [ordered]@{
-            version = '0.3.0'
+            version = $script:Pins.TargetVersion
             installer = [ordered]@{ fileName = $script:Pins.SignedInstallerName; bytes = $script:Pins.SignedInstallerBytes; sha256 = $script:Pins.SignedInstallerSha256 }
             installedApplication = [ordered]@{ bytes = [uint64]$Receipt.packagedApplication.bytes; sha256 = [string]$Receipt.packagedApplication.sha256 }
             installedEngineOcrSmoke = $InstalledEngineSmoke
@@ -801,7 +809,7 @@ function Write-SanitizedUpgradeRecord {
         }
     }
     $json = $record | ConvertTo-Json -Depth 12
-    if ($json -match '(?i)([A-Z]:\\|\\Users\\|runneradmin|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|codesigning\.azure\.net|signingAccount|signingProfile|tenantId|clientId|12510717103|39969839829|569181842|raw\.log)') {
+    if ($json -match ('(?i)([A-Z]:\\|\\Users\\|runneradmin|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|codesigning\.azure\.net|signingAccount|signingProfile|tenantId|clientId|' + [string]$script:Pins.LeakIds + '|569181842|raw\.log)')) {
         throw 'Sanitized upgrade record contains a host path, token, credential identifier, artifact identifier, or raw log reference.'
     }
     $path = Join-Path $OutputRoot 'upgrade-verification.json'
@@ -819,6 +827,9 @@ Assert-HostedRunnerFacts -Facts $runnerFacts
 if ($PublisherUiMode -cne 'HostedNonInteractive') {
     throw 'GitHub-hosted upgrade verification requires exact HostedNonInteractive publisher UI mode.'
 }
+
+$signedInputs = Get-SignedCheckInputs -TargetVersion $TargetVersion -SourceRevision $SourceRevision -ArtifactRunId $ArtifactRunId -ArtifactId $ArtifactId -ArtifactName $ArtifactName -ArtifactBytes $ArtifactBytes -ArtifactDigest $ArtifactDigest -InstallerName $InstallerName -InstallerBytes $InstallerBytes -InstallerSha256 $InstallerSha256 -RecordBytes $RecordBytes -RecordSha256 $RecordSha256
+Add-SignedPinFields -Pins $script:Pins -Inputs $signedInputs -BaseResourceTargets (Get-SignedBaseResourceTargets -TargetSourceRoot $TargetSourceRoot -Inputs $signedInputs)
 
 $runnerTemp = [string]$env:RUNNER_TEMP
 if ([string]::IsNullOrWhiteSpace($runnerTemp)) { throw 'RUNNER_TEMP is unavailable.' }
@@ -845,7 +856,7 @@ $recordPath = Join-Path $signedRoot $script:Pins.SignedRecordName
 if ($signedFiles.Count -ne 2 -or -not (Test-Path -LiteralPath $signedInstaller -PathType Leaf) -or -not (Test-Path -LiteralPath $recordPath -PathType Leaf)) {
     throw 'Downloaded signed artifact must contain exactly the installer and sanitized record.'
 }
-Assert-FileReceipt -Path $signedInstaller -Bytes $script:Pins.SignedInstallerBytes -Sha256 $script:Pins.SignedInstallerSha256 -Kind 'Signed 0.3.0 installer'
+Assert-FileReceipt -Path $signedInstaller -Bytes $script:Pins.SignedInstallerBytes -Sha256 $script:Pins.SignedInstallerSha256 -Kind 'Signed target-version installer'
 Assert-FileReceipt -Path $recordPath -Bytes $script:Pins.SignedRecordBytes -Sha256 $script:Pins.SignedRecordSha256 -Kind 'Signed artifact verification record'
 $null = Assert-TrustedWindowsSignature -Path $signedInstaller -ExpectedPublisher $script:Pins.ExpectedPublisher
 $recordText = Get-Content -LiteralPath $recordPath -Raw -Encoding UTF8
@@ -895,7 +906,7 @@ Invoke-BoundedSilentInstaller -Path $signedInstaller
 $processFacts = Get-ConflictingProcessFacts -InstallerPaths @($baselinePath,$signedInstaller)
 if ($processFacts.applicationProcessPresent -or $processFacts.installerProcessPresent) { throw 'Signed silent upgrade left an application or installer process running.' }
 $upgraded = Get-InstallFacts -RegistryPath $registryPath -ExpectedInstallRoot $installRoot
-Assert-InstallFacts -Facts $upgraded -ExpectedVersion '0.3.0' -ExpectedInstallRoot $installRoot -ExpectedApplication $receipt.packagedApplication -ExpectedSignatureStatus 'Valid' -ExpectedPublisher $script:Pins.ExpectedPublisher -ExpectedTimestamp $true
+Assert-InstallFacts -Facts $upgraded -ExpectedVersion $script:Pins.TargetVersion -ExpectedInstallRoot $installRoot -ExpectedApplication $receipt.packagedApplication -ExpectedSignatureStatus 'Valid' -ExpectedPublisher $script:Pins.ExpectedPublisher -ExpectedTimestamp $true
 $installedResources = Assert-InstalledSignedResources -InstallRoot $installRoot -Receipt $receipt -ReceiptSets $receiptSets
 $applicationPublisherEvidence = New-HostedPublisherUiNotAttemptedEvidence `
     -Path $installedResources.Application.FullName `

@@ -2,6 +2,19 @@ name: Manual signed OCR installer upgrade verification
 
 on:
   workflow_dispatch:
+    inputs:
+      target_version: { required: true, type: string }
+      source_revision: { required: true, type: string }
+      artifact_run_id: { required: true, type: string }
+      artifact_id: { required: true, type: string }
+      artifact_name: { required: true, type: string }
+      artifact_bytes: { required: true, type: string }
+      artifact_digest: { required: true, type: string }
+      installer_name: { required: true, type: string }
+      installer_bytes: { required: true, type: string }
+      installer_sha256: { required: true, type: string }
+      record_bytes: { required: true, type: string }
+      record_sha256: { required: true, type: string }
 
 permissions:
   contents: read
@@ -15,6 +28,19 @@ jobs:
   upgrade:
     runs-on: windows-2022
     timeout-minutes: 45
+    env:
+      TARGET_VERSION: ${{ inputs.target_version }}
+      SOURCE_REVISION: ${{ inputs.source_revision }}
+      ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
+      ARTIFACT_ID: ${{ inputs.artifact_id }}
+      ARTIFACT_NAME: ${{ inputs.artifact_name }}
+      ARTIFACT_BYTES: ${{ inputs.artifact_bytes }}
+      ARTIFACT_DIGEST: ${{ inputs.artifact_digest }}
+      INSTALLER_NAME: ${{ inputs.installer_name }}
+      INSTALLER_BYTES: ${{ inputs.installer_bytes }}
+      INSTALLER_SHA256: ${{ inputs.installer_sha256 }}
+      RECORD_BYTES: ${{ inputs.record_bytes }}
+      RECORD_SHA256: ${{ inputs.record_sha256 }}
     steps:
       - name: Require a manual master dispatch
         shell: pwsh
@@ -64,6 +90,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Tracked working-tree files changed after checkout.' }
           git diff --cached --quiet --
           if ($LASTEXITCODE -ne 0) { throw 'The tracked index changed after checkout.' }
+          . ./scripts/signed-check-inputs.ps1
+          $null = Get-SignedCheckInputs -TargetVersion $env:TARGET_VERSION -SourceRevision $env:SOURCE_REVISION -ArtifactRunId $env:ARTIFACT_RUN_ID -ArtifactId $env:ARTIFACT_ID -ArtifactName $env:ARTIFACT_NAME -ArtifactBytes $env:ARTIFACT_BYTES -ArtifactDigest $env:ARTIFACT_DIGEST -InstallerName $env:INSTALLER_NAME -InstallerBytes $env:INSTALLER_BYTES -InstallerSha256 $env:INSTALLER_SHA256 -RecordBytes $env:RECORD_BYTES -RecordSha256 $env:RECORD_SHA256
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.source_revision }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: target-source
+
+      - name: Prepare exact pinned PDFium resources in the signed source
+        shell: pwsh
+        run: ./scripts/prepare-default-draft-pdfium.ps1 -TargetSourceRoot (Resolve-Path target-source).Path -WorkRoot (Join-Path $env:RUNNER_TEMP 'upgrade-pdfium-prep')
 
       - name: Prepare exact hosted WebDriver inputs
         shell: pwsh
@@ -115,29 +154,15 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           if (Test-Path -LiteralPath $env:SIGNED_ARTIFACT_ROOT) { throw 'Signed artifact download root must be fresh.' }
-          $headers = @{
-            Authorization = "Bearer $env:GITHUB_TOKEN"
-            Accept = 'application/vnd.github+json'
-            'X-GitHub-Api-Version' = '2022-11-28'
-          }
-          $artifact = Invoke-RestMethod -Uri 'https://api.github.com/repos/Joshua-Beel/PDF-Workstation/actions/artifacts/12510717103' -Headers $headers
-          if ([uint64]$artifact.id -ne 12510717103 -or
-              [string]$artifact.name -cne 'signed-ocr-installer-4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d' -or
-              [uint64]$artifact.size_in_bytes -ne 11182480 -or
-              [string]$artifact.digest -cne 'sha256:3e5c1003b553e3ed6d2f14bdd8f0b7b6baf56c7aacf55856e875f19ba270a689' -or
-              [uint64]$artifact.workflow_run.id -ne 39969839829 -or
-              [string]$artifact.workflow_run.head_sha -cne '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d' -or
-              [bool]$artifact.expired) {
-            throw 'Signed OCR artifact metadata does not match the pinned successful run.'
-          }
+          ./scripts/assert-signed-artifact-metadata.ps1 -TargetSourceRevision $env:SOURCE_REVISION -ArtifactRunId $env:ARTIFACT_RUN_ID -ArtifactId $env:ARTIFACT_ID -ArtifactName $env:ARTIFACT_NAME -ArtifactBytes $env:ARTIFACT_BYTES -ArtifactDigest $env:ARTIFACT_DIGEST
 
       - name: Download the exact signed OCR artifact
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
-          artifact-ids: '12510717103'
+          artifact-ids: ${{ inputs.artifact_id }}
           github-token: ${{ github.token }}
           repository: Joshua-Beel/PDF-Workstation
-          run-id: '39969839829'
+          run-id: ${{ inputs.artifact_run_id }}
           merge-multiple: true
           path: ${{ env.SIGNED_ARTIFACT_ROOT }}
 
@@ -151,7 +176,13 @@ jobs:
             -OutputRoot $env:UPGRADE_OUTPUT_ROOT `
             -WebDriverRoot $env:WEBDRIVER_ROOT `
             -WebViewProfileRoot $env:WEBVIEW_PROFILE_ROOT `
-            -PublisherUiMode HostedNonInteractive
+            -PublisherUiMode HostedNonInteractive `
+            -TargetSourceRoot (Resolve-Path target-source).Path `
+            -TargetVersion $env:TARGET_VERSION -SourceRevision $env:SOURCE_REVISION `
+            -ArtifactRunId $env:ARTIFACT_RUN_ID -ArtifactId $env:ARTIFACT_ID -ArtifactName $env:ARTIFACT_NAME `
+            -ArtifactBytes $env:ARTIFACT_BYTES -ArtifactDigest $env:ARTIFACT_DIGEST `
+            -InstallerName $env:INSTALLER_NAME -InstallerBytes $env:INSTALLER_BYTES -InstallerSha256 $env:INSTALLER_SHA256 `
+            -RecordBytes $env:RECORD_BYTES -RecordSha256 $env:RECORD_SHA256
 
       - name: Upload only the sanitized upgrade verification record
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

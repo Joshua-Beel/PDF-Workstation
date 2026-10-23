@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { REV_NEW, REV_OLD, guarded, importFunctions, preamble, runBlocks, runPwsh, signedInputsSnippet } from './signed-check-test-support';
 
 describe('manual signed reading-tools workflow', () => {
   it('is a manual pinned Windows job and uploads only the sanitized record', () => {
@@ -11,10 +11,15 @@ describe('manual signed reading-tools workflow', () => {
     expect(workflow).toContain('timeout-minutes: 60');
     expect(workflow).toContain('fetch-depth: 0');
     expect(workflow).toContain('persist-credentials: false');
-    expect(workflow).toContain("artifact-ids: '12510717103'");
-    expect(workflow).toContain("run-id: '39969839829'");
-    expect(workflow).toContain("head_sha -cne '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'");
-    expect(workflow).toContain("digest -cne 'sha256:3e5c1003b553e3ed6d2f14bdd8f0b7b6baf56c7aacf55856e875f19ba270a689'");
+    expect(workflow).toContain('artifact-ids: ${{ inputs.artifact_id }}');
+    expect(workflow).toContain('run-id: ${{ inputs.artifact_run_id }}');
+    expect(workflow).toContain('./scripts/assert-signed-artifact-metadata.ps1');
+    expect(workflow).toContain('./scripts/prepare-default-draft-pdfium.ps1');
+    for (const input of ['target_version', 'source_revision', 'artifact_run_id', 'artifact_id', 'artifact_name', 'artifact_bytes', 'artifact_digest', 'installer_name', 'installer_bytes', 'installer_sha256', 'record_bytes', 'record_sha256']) {
+      expect(workflow).toContain(`      ${input}: { required: true, type: string }`);
+    }
+    for (const run of runBlocks(workflow)) expect(run).not.toContain('${{');
+    expect(workflow).toMatch(/^permissions:\r?\n  contents: read\r?\n  actions: read\r?\n/m);
     expect(workflow).toContain('./scripts/verify-signed-ocr-upgrade.ps1');
     expect(workflow).toContain('./scripts/verify-signed-reading-tools.ps1');
     const upload = workflow.slice(workflow.indexOf('- name: Upload only the sanitized reading-tools record'));
@@ -22,56 +27,31 @@ describe('manual signed reading-tools workflow', () => {
     expect(upload).not.toMatch(/\.exe|SIGNED_ARTIFACT_ROOT|READING_WORK_ROOT|UPGRADE_OUTPUT_ROOT/);
   });
 
-  it('pins the inspected signed blobs and detects current feature and application-shell drift', () => {
+  it('derives the eleven feature blobs and the application shell from the source revision at run time', () => {
     const verifier = readFileSync('scripts/verify-signed-reading-tools.ps1', 'utf8');
-    const pins = [
-      ['src/Viewer.tsx', '4e9e5464521d2a963eff84f71cc16453acda9940'],
-      ['src/TextLayer.tsx', '9984131a916f911d48005979b070f653e4b37215'],
-      ['src/SearchPanel.tsx', 'db36f2dd70795cf3f581f255d32eb7ae834c5c59'],
-      ['src/PasswordDialog.tsx', '5a06bea211de4be9403f74c2739e2194ce264a77'],
-      ['src/bridge.ts', '88707e0cf6b140002845044be3016cb832d78d24'],
-      ['src-tauri/src/service.rs', '737a4492b4006eb6272c1b9084dc54f508309037'],
-      ['src-tauri/src/text_geometry.rs', '7d54d3fcac02ffd1d873b5fd6b265d9d42b25e4b'],
-    ];
-    const changed: string[] = [];
-    for (const [path, blob] of pins) {
-      expect(verifier).toContain(`'${path}' = '${blob}'`);
-      const signed = spawnSync('git', ['rev-parse', `4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d:${path}`], { encoding: 'utf8' });
-      const current = spawnSync('git', ['rev-parse', `HEAD:${path}`], { encoding: 'utf8' });
-      expect(signed.status, signed.stderr).toBe(0);
-      expect(current.status, current.stderr).toBe(0);
-      expect(signed.stdout.trim()).toBe(blob);
-      if (current.stdout.trim() !== blob) changed.push(path);
-    }
-    expect(verifier).toContain("SignedApplicationShellBlob = '2af97705343967869b4174e2037fec6619b68fe5'");
+    expect(verifier.match(/'[a-f0-9]{40}'/g)).toBeNull();
+    expect(verifier.match(/'[A-F0-9]{64}'/g)).toHaveLength(1);
+    expect(verifier).not.toMatch(/\b(?:11005152678|12510717103|39969839829)\b/);
     expect(verifier).toContain('currentApplicationShellMatchesSigned = [bool]($currentShell -ceq $signedShell)');
-    const signedShell = spawnSync('git', ['rev-parse', '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d:src/App.tsx'], { encoding: 'utf8' });
-    const currentShell = spawnSync('git', ['rev-parse', 'HEAD:src/App.tsx'], { encoding: 'utf8' });
-    expect(signedShell.stdout.trim()).toBe('2af97705343967869b4174e2037fec6619b68fe5');
-    expect(currentShell.status, currentShell.stderr).toBe(0);
-  }, 30_000);
-
-  it('fails closed when a pinned feature blob or the pinned application-shell blob is wrong', () => {
-    const root = process.cwd().replaceAll("'", "''");
-    const run = (mutation: string) => spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', String.raw`
-      $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
-      $path='${root}\scripts\verify-signed-reading-tools.ps1';$tokens=$null;$errors=$null
-      $ast=[Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors);if($errors.Count){throw ($errors|Out-String)}
-      $assignment=$ast.Find({param($node)$node-is[Management.Automation.Language.AssignmentStatementAst]-and$node.Left.Extent.Text-ceq'$script:ReadingVerificationPins'},$true)
-      Invoke-Expression $assignment.Extent.Text
-      $definition=$ast.Find({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Assert-SignedReadingSourceParity'},$true);Invoke-Expression $definition.Extent.Text
-      ${mutation}
-      Assert-SignedReadingSourceParity -ProjectRoot '${root}' | Out-Null
-    `], { cwd: process.cwd(), encoding: 'utf8', timeout: 30_000 });
-    const control = run('');
-    expect(control.status, control.stderr).toBe(0);
-    const feature = run("$script:ReadingVerificationPins.FeatureBlobs['src/Viewer.tsx'] = ('0' * 40)");
-    expect(feature.status).toBe(1);
-    expect(feature.stderr).toContain('A reading feature source blob does not match the exact signed and dispatched source parity contract.');
-    const shell = run("$script:ReadingVerificationPins.SignedApplicationShellBlob = ('0' * 40)");
-    expect(shell.status).toBe(1);
-    expect(shell.stderr).toContain('The inspected signed application shell blob is not exact.');
-  }, 60_000);
+    expect(verifier).toContain("[string]$script:ReadingVerificationPins.LeakIds");
+    const run = (signed: string, current: string) => runPwsh(String.raw`${preamble}
+      ${guarded(String.raw`
+      ${signedInputsSnippet(signed)}
+      ${importFunctions('verify-signed-reading-tools.ps1', '$script:ReadingVerificationPins', ['Assert-SignedReadingSourceParity', 'Initialize-ReadingPins'])}
+      Initialize-ReadingPins -Inputs $inputs
+      $result = Assert-SignedReadingSourceParity -ProjectRoot '${process.cwd().replaceAll("'", "''")}' -CurrentRevision '${current}'
+      if ($result.featureBlobCount -ne 11 -or -not $result.currentApplicationShellMatchesSigned) { throw 'Unexpected parity result.' }
+      `)}
+    `);
+    const control = run(REV_NEW, REV_NEW);
+    expect(control.status, control.stderr || control.stdout).toBe(0);
+    const moved = run(REV_OLD, REV_NEW);
+    expect(moved.status).toBe(1);
+    expect(moved.stderr).toContain('A reading feature source blob does not match the exact signed and dispatched source parity contract.');
+    const unknown = run('2'.repeat(40), REV_NEW);
+    expect(unknown.status).toBe(1);
+    expect(unknown.stderr).toContain('The exact signed source commit is unavailable.');
+  }, 90_000);
 
   it('keeps artifact credentials step-scoped and the UI verification credential-free', () => {
     const workflow = readFileSync('.github/workflows/reading-tools-verification.yml', 'utf8');

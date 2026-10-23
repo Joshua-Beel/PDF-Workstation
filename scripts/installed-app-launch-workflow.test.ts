@@ -394,7 +394,8 @@ public sealed class NonCooperativeResponseStream : MemoryStream {
     expect(launch.match(/Invoke-BoundedLoopbackJson -Method POST -Path '\/session'/g)).toHaveLength(1);
     expect(launch).not.toMatch(/Start-Process|Remove-Item|\.Delete\(/);
     const verifier = readFileSync('scripts/verify-signed-ocr-upgrade.ps1', 'utf8');
-    expect(verifier).toContain("SignedSourceRevision = '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'");
+    expect(verifier).toContain('Get-SignedCheckInputs -TargetVersion $TargetVersion -SourceRevision $SourceRevision');
+    expect(verifier.match(/'[a-f0-9]{40}'/g)).toBeNull();
     expect(launch).toContain("sampleName = 'welcome.pdf'; physicalPage = 1; dialogTitle = 'Recognize text on page 1'; status = 'recognized'; language = 'eng'");
     expect(readFileSync('scripts/installed-app-launch-workflow.test.ts', 'utf8')).not.toMatch(/git\s+show|spawnSync\('git'/);
   });

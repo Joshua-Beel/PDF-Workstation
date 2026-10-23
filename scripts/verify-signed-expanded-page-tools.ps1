@@ -3,7 +3,20 @@ param(
     [Parameter(Mandatory = $true)][string]$SignedArtifactRoot,
     [Parameter(Mandatory = $true)][string]$WorkRoot,
     [Parameter(Mandatory = $true)][string]$OutputRoot,
-    [Parameter(Mandatory = $true)][string]$WebDriverRoot
+    [Parameter(Mandatory = $true)][string]$WebDriverRoot,
+    [Parameter(Mandatory = $true)][string]$TargetSourceRoot,
+    [Parameter(Mandatory = $true)][string]$TargetVersion,
+    [Parameter(Mandatory = $true)][string]$SourceRevision,
+    [Parameter(Mandatory = $true)][string]$ArtifactRunId,
+    [Parameter(Mandatory = $true)][string]$ArtifactId,
+    [Parameter(Mandatory = $true)][string]$ArtifactName,
+    [Parameter(Mandatory = $true)][string]$ArtifactBytes,
+    [Parameter(Mandatory = $true)][string]$ArtifactDigest,
+    [Parameter(Mandatory = $true)][string]$InstallerName,
+    [Parameter(Mandatory = $true)][string]$InstallerBytes,
+    [Parameter(Mandatory = $true)][string]$InstallerSha256,
+    [Parameter(Mandatory = $true)][string]$RecordBytes,
+    [Parameter(Mandatory = $true)][string]$RecordSha256
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -17,46 +30,26 @@ $tokens = $null; $parseErrors = $null
 $trustedAst = [Management.Automation.Language.Parser]::ParseFile($trustedVerifier,[ref]$tokens,[ref]$parseErrors)
 if ($parseErrors.Count -ne 0) { throw 'The trusted signed-installer verifier did not parse.' }
 foreach ($definition in @($trustedAst.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] },$true))) { Invoke-Expression $definition.Extent.Text }
+. (Join-Path $PSScriptRoot 'signed-check-inputs.ps1')
 
 $script:ExpandedPins = [ordered]@{
     Repository = 'Joshua-Beel/PDF-Workstation'
-    SignedArtifactId = [uint64]12510717103
-    SignedRunId = [uint64]39969839829
-    SignedSourceRevision = '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'
-    SignedInstallerName = 'PDF Workstation_0.3.0_x64-setup.exe'
-    SignedInstallerBytes = [uint64]11201296
-    SignedInstallerSha256 = '3DE99F111652727BB59F9C17FF4E3CCA42ED48E9DE5E0614920280FFB0BA9FE5'
-    SignedRecordName = 'artifact-verification.json'
-    SignedRecordBytes = [uint64]7715
-    SignedRecordSha256 = '0383DAE8FA04705FA26F63CB3CC4EDE16442129D87F99E7900BD1EF301C4FB5C'
     ExpectedPublisher = 'Joshua Beel'
-    SignedApplicationShellBlob = '2af97705343967869b4174e2037fec6619b68fe5'
-    FeatureBlobs = [ordered]@{
-        'src/CreatePdfDialog.tsx' = '094eed6e8e90b8d413751159f7bc139c5b12b5ec'
-        'src/ExportPageImageDialog.tsx' = '9ad67008c197dad8906afed0e17b0e9b8c8ac4f1'
-        'src/Organizer.tsx' = '29ae74a5a459c9620cab4150e36634c9625a2de1'
-        'src/SplitDialog.tsx' = 'eb1d8440ad6202e27b9db161689c7c55475cfdca'
-        'src/CropDialog.tsx' = 'd50889285bb6c79b28e9d94cda86457118ec855c'
-        'src/CombineDialog.tsx' = '2c554b40b3285029cba574eb813672ae0cc2db1e'
-        'src/InsertPagesDialog.tsx' = 'f2455638c20815ef37453f60fcfc7788ca0b497b'
-        'src/ReplacePagesDialog.tsx' = '45a48cb68d7b7477b3bd5b566e88a8637b48c9fb'
-        'src/bridge.ts' = '88707e0cf6b140002845044be3016cb832d78d24'
-        'src-tauri/src/image_pdf.rs' = '3f317138a9ff6b66726eb52b5b74e6864385aa1e'
-        'src-tauri/src/page_image.rs' = '56f6ff2e46a4bd5c2ff0bdc648a0e07f29967ca0'
-        'src-tauri/src/split.rs' = '5ef00a279b212f33ea1486fd36b7f6c2a0b75720'
-        'src-tauri/src/combine.rs' = '71da1cd009b9056ce01f41bbf76ac45032962e8f'
-        'src-tauri/src/service.rs' = '737a4492b4006eb6272c1b9084dc54f508309037'
-        'src-tauri/src/main.rs' = 'd9aa9862c286913108d75ca2cac0d1305f11c002'
-        'src-tauri/tauri.conf.json' = 'd9ba91cdc141ea3e7ac57e94d159cbfdd7724ca3'
-    }
+    FeaturePaths = @(
+        'src/CreatePdfDialog.tsx','src/ExportPageImageDialog.tsx','src/Organizer.tsx','src/SplitDialog.tsx','src/CropDialog.tsx','src/CombineDialog.tsx',
+        'src/InsertPagesDialog.tsx','src/ReplacePagesDialog.tsx','src/bridge.ts','src-tauri/src/image_pdf.rs','src-tauri/src/page_image.rs','src-tauri/src/split.rs',
+        'src-tauri/src/combine.rs','src-tauri/src/service.rs','src-tauri/src/main.rs','src-tauri/tauri.conf.json'
+    )
 }
 $script:Pins = [ordered]@{
     Repository = $script:ExpandedPins.Repository
-    SignedSourceRevision = $script:ExpandedPins.SignedSourceRevision
-    SignedInstallerName = $script:ExpandedPins.SignedInstallerName
-    SignedInstallerBytes = $script:ExpandedPins.SignedInstallerBytes
-    SignedInstallerSha256 = $script:ExpandedPins.SignedInstallerSha256
     ExpectedPublisher = $script:ExpandedPins.ExpectedPublisher
+}
+
+function Initialize-ExpandedPins {
+    param($Inputs,[string[]]$BaseResourceTargets)
+    Add-SignedPinFields -Pins $script:ExpandedPins -Inputs $Inputs -BaseResourceTargets $BaseResourceTargets
+    Add-SignedPinFields -Pins $script:Pins -Inputs $Inputs -BaseResourceTargets $BaseResourceTargets
 }
 
 function Assert-ExpandedExactProperties {
@@ -88,20 +81,17 @@ function Assert-ExpandedHostedSource {
 }
 
 function Assert-SignedExpandedSourceParity {
-    param([string]$ProjectRoot)
-    & git -C $ProjectRoot cat-file -e "$($script:ExpandedPins.SignedSourceRevision)^{commit}"
-    if ($LASTEXITCODE -ne 0) { throw 'The exact signed source commit is unavailable.' }
-    foreach ($path in $script:ExpandedPins.FeatureBlobs.Keys) {
-        $signed = (& git -C $ProjectRoot rev-parse "$($script:ExpandedPins.SignedSourceRevision):$path").Trim(); $current = (& git -C $ProjectRoot rev-parse "HEAD:$path").Trim()
-        $expected = [string]$script:ExpandedPins.FeatureBlobs[$path]
-        if ($LASTEXITCODE -ne 0 -or $signed -cne $expected -or $current -cne $expected) { throw "An expanded page-tools feature blob does not match the exact signed and dispatched source: $path" }
+    param([string]$ProjectRoot,[string]$CurrentRevision = 'HEAD')
+    $signedBlobs = Get-SignedSourceBlobs -ProjectRoot $ProjectRoot -Revision $script:ExpandedPins.SignedSourceRevision -Paths @($script:ExpandedPins.FeaturePaths + 'src/App.tsx')
+    foreach ($path in $script:ExpandedPins.FeaturePaths) {
+        $current = (& git -C $ProjectRoot rev-parse "${CurrentRevision}:$path").Trim()
+        if ($LASTEXITCODE -ne 0 -or $current -cne $signedBlobs[$path]) { throw "An expanded page-tools feature blob does not match the exact signed and dispatched source: $path" }
     }
-    $signedShell = (& git -C $ProjectRoot rev-parse "$($script:ExpandedPins.SignedSourceRevision):src/App.tsx").Trim(); $currentShell = (& git -C $ProjectRoot rev-parse 'HEAD:src/App.tsx').Trim()
-    if ($LASTEXITCODE -ne 0 -or $signedShell -cne $script:ExpandedPins.SignedApplicationShellBlob) { throw 'The inspected signed application shell blob is not exact.' }
+    $signedShell = $signedBlobs['src/App.tsx']; $currentShell = (& git -C $ProjectRoot rev-parse "${CurrentRevision}:src/App.tsx").Trim()
     $shellSource = (& git -C $ProjectRoot show "$($script:ExpandedPins.SignedSourceRevision):src/App.tsx") -join "`n"
     $markers = @('Combine files','Organize pages','setCombineOpen(true)','setInsertOpen(true)','setReplaceOpen(true)','combineDocuments(first, second)','insertPagesCopy(target, donor, at)','replacePagesCopy(target, donor, start, count)','createPdfFromImage','exportPageImage')
     foreach ($marker in $markers) { if (-not $shellSource.Contains($marker,[StringComparison]::Ordinal)) { throw 'A required expanded page-tools selector marker is absent from the exact signed application shell.' } }
-    return [pscustomobject][ordered]@{ exactSignedFeatureBlobsMatched=$true;featureBlobCount=[int]$script:ExpandedPins.FeatureBlobs.Count;signedSelectorMarkerCount=$markers.Count;currentApplicationShellMatchesSigned=[bool]($currentShell -ceq $signedShell) }
+    return [pscustomobject][ordered]@{ exactSignedFeatureBlobsMatched=$true;featureBlobCount=[int]$script:ExpandedPins.FeaturePaths.Count;signedSelectorMarkerCount=$markers.Count;currentApplicationShellMatchesSigned=[bool]($currentShell -ceq $signedShell) }
 }
 
 function Get-ExpandedReceipt {
@@ -194,7 +184,7 @@ function Write-SanitizedExpandedRecord {
         imagePageTools=$Image;organizerTools=$Organizer;structuralPageTools=$Structural
     }
     $json = $record | ConvertTo-Json -Depth 14
-    if ($json -match '(?i)([A-Z]:\\|\\Users\\|runneradmin|RUNNER_TEMP|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|12510717103|39969839829|raw\.log|\.pdf-workstation)') { throw 'Sanitized expanded page-tools record contains a host path, credential identifier, artifact identifier, or raw evidence reference.' }
+    if ($json -match ('(?i)([A-Z]:\\|\\Users\\|runneradmin|RUNNER_TEMP|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|' + [string]$script:ExpandedPins.LeakIds + '|raw\.log|\.pdf-workstation)')) { throw 'Sanitized expanded page-tools record contains a host path, credential identifier, artifact identifier, or raw evidence reference.' }
     $path = Join-Path $Root 'expanded-page-tools-verification.json'; [IO.File]::WriteAllText($path,$json,[Text.UTF8Encoding]::new($false))
     $files = @(Get-ChildItem -LiteralPath $Root -File -Force); if ($files.Count -ne 1 -or -not $files[0].FullName.Equals($path,[StringComparison]::OrdinalIgnoreCase)) { throw 'Expanded page-tools output root must contain exactly one sanitized JSON record.' }
     return $path
@@ -202,6 +192,8 @@ function Write-SanitizedExpandedRecord {
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Assert-ExpandedHostedSource -ProjectRoot $projectRoot
+$signedInputs = Get-SignedCheckInputs -TargetVersion $TargetVersion -SourceRevision $SourceRevision -ArtifactRunId $ArtifactRunId -ArtifactId $ArtifactId -ArtifactName $ArtifactName -ArtifactBytes $ArtifactBytes -ArtifactDigest $ArtifactDigest -InstallerName $InstallerName -InstallerBytes $InstallerBytes -InstallerSha256 $InstallerSha256 -RecordBytes $RecordBytes -RecordSha256 $RecordSha256
+Initialize-ExpandedPins -Inputs $signedInputs -BaseResourceTargets (Get-SignedBaseResourceTargets -TargetSourceRoot $TargetSourceRoot -Inputs $signedInputs)
 $sourceBinding = Assert-SignedExpandedSourceParity -ProjectRoot $projectRoot
 if ([int]$sourceBinding.featureBlobCount -ne 16 -or [int]$sourceBinding.signedSelectorMarkerCount -ne 10) { throw 'Expanded page-tools signed source binding was incomplete.' }
 $signedRoot = Resolve-ExpandedRunnerPath -Path $SignedArtifactRoot -MustExist; $work = Resolve-ExpandedRunnerPath -Path $WorkRoot -MustBeFresh
@@ -222,7 +214,7 @@ $fresh = Get-FreshInstallFacts -InstallRoot $installRoot -SettingsRoot $settings
 [IO.Directory]::CreateDirectory($work) | Out-Null; Assert-NoReparseAncestors -Path $work
 Invoke-BoundedSilentInstaller -Path $installer
 $installed = Get-InstallFacts -RegistryPath $registryPath -ExpectedInstallRoot $installRoot
-Assert-InstallFacts -Facts $installed -ExpectedVersion '0.3.0' -ExpectedInstallRoot $installRoot -ExpectedApplication $receipt.packagedApplication -ExpectedSignatureStatus 'Valid' -ExpectedPublisher $script:ExpandedPins.ExpectedPublisher -ExpectedTimestamp $true
+Assert-InstallFacts -Facts $installed -ExpectedVersion $script:ExpandedPins.TargetVersion -ExpectedInstallRoot $installRoot -ExpectedApplication $receipt.packagedApplication -ExpectedSignatureStatus 'Valid' -ExpectedPublisher $script:ExpandedPins.ExpectedPublisher -ExpectedTimestamp $true
 $resources = Assert-InstalledSignedResources -InstallRoot $installRoot -Receipt $receipt -ReceiptSets $receiptSets
 if (Test-Path -LiteralPath $settingsRoot) { throw 'Silent install unexpectedly created the application settings root.' }
 [IO.Directory]::CreateDirectory($settingsRoot) | Out-Null
