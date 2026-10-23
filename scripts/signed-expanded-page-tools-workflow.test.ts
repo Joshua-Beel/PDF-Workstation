@@ -31,12 +31,12 @@ describe('signed installed expanded page-tools workflow', () => {
   });
 
   it('pins the exact signed artifact and all sixteen directly owned feature blobs', () => {
-    expect(workflow).toContain("artifact-ids: '11005152678'");
-    expect(workflow).toContain("run-id: '36499724415'");
-    expect(workflow).toContain('sha256:c0e89b5ae821d5875c31855c6596a7d47b7ca052468a026745a5d638e50ca569');
-    expect(verifier).toContain("SignedSourceRevision = '67d238218f4796ba7b8505d072868da0f397174a'");
-    expect(verifier).toContain("SignedInstallerSha256 = '8F7A167D1AED369D1A28B7C91692BAD8770E774FE9D8AFBBED970654144E428C'");
-    expect(verifier).toContain("SignedRecordSha256 = '4ED82057155877F2677262479FF4F2B00398CF5F524C51302DB50275D315E205'");
+    expect(workflow).toContain("artifact-ids: '12510717103'");
+    expect(workflow).toContain("run-id: '39969839829'");
+    expect(workflow).toContain('sha256:3e5c1003b553e3ed6d2f14bdd8f0b7b6baf56c7aacf55856e875f19ba270a689');
+    expect(verifier).toContain("SignedSourceRevision = '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'");
+    expect(verifier).toContain("SignedInstallerSha256 = '3DE99F111652727BB59F9C17FF4E3CCA42ED48E9DE5E0614920280FFB0BA9FE5'");
+    expect(verifier).toContain("SignedRecordSha256 = '0383DAE8FA04705FA26F63CB3CC4EDE16442129D87F99E7900BD1EF301C4FB5C'");
     expect(verifier.match(/^ {8}'(?:src|src-tauri)\/.+' = '[a-f0-9]{40}'$/gm)).toHaveLength(16);
     expect(verifier).toContain('featureBlobCount -ne 16');
     expect(verifier).toContain('signedSelectorMarkerCount -ne 10');
@@ -50,17 +50,12 @@ describe('signed installed expanded page-tools workflow', () => {
       $assignment=$ast.Find({param($node)$node-is[Management.Automation.Language.AssignmentStatementAst]-and$node.Left.Extent.Text-ceq'$script:ExpandedPins'},$true)
       Invoke-Expression $assignment.Extent.Text
       foreach($name in @('Assert-SignedExpandedSourceParity')){$definition=$ast.Find({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq$name},$true);Invoke-Expression $definition.Extent.Text}
+      $script:ExpandedPins.FeatureBlobs['src/CropDialog.tsx'] = ('0' * 40)
       Assert-SignedExpandedSourceParity -ProjectRoot '${process.cwd().replaceAll("'", "''")}' | Out-Null
     `;
     const result = runPowerShell(script);
     expect(result.status).toBe(1);
-    const pinEntries = [...verifier.matchAll(/^ {8}'([^']+)' = '([a-f0-9]{40})'$/gm)];
-    const firstChanged = pinEntries.find(([, path, signedBlob]) => {
-      const current = spawnSync('git', ['rev-parse', `HEAD:${path}`], { encoding: 'utf8' });
-      return current.status !== 0 || current.stdout.trim() !== signedBlob;
-    });
-    expect(firstChanged).toBeTruthy();
-    expect(result.stderr).toContain(`An expanded page-tools feature blob does not match the exact signed and dispatched source: ${firstChanged![1]}`);
+    expect(result.stderr).toContain('An expanded page-tools feature blob does not match the exact signed and dispatched source: src/CropDialog.tsx');
     expect(verifier).toContain('currentApplicationShellMatchesSigned');
     expect(verifier).not.toContain('exactSignedApplicationShellMatched=$true');
   }, 15_000);
@@ -90,7 +85,7 @@ describe('signed installed expanded page-tools workflow', () => {
       'Assert-ExpandedImageResult -Result $image', 'Assert-ExpandedOrganizerResult -Result $organizer', 'Assert-StructuralResult -Result $structural',
       'splitOutputPageCounts', 'sourcePageFingerprintSha256', 'splitPageFingerprintSha256', 'splitPageFingerprintOrderVerified',
     ]) expect(verifier).toContain(marker);
-    expect(verifier).toMatch(/11005152678\|36499724415/);
+    expect(verifier).toMatch(/12510717103\|39969839829/);
     expect(workflow).toContain('${{ env.EXPANDED_OUTPUT_ROOT }}/expanded-page-tools-verification.json');
     expect(workflow).not.toContain('created-from-image.pdf\n');
     expect(workflow).not.toContain('combined-output.pdf\n');

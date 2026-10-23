@@ -22,15 +22,15 @@ $script:Pins = [ordered]@{
     BaselineName = 'PDF.Workstation_0.2.0_x64-setup.exe'
     BaselineBytes = [uint64]6418229
     BaselineSha256 = '17788CB82BB42DEAC35EA197A385A9BAFC8CD331422446A2B834E115A90C4D2E'
-    SignedArtifactId = [uint64]11005152678
-    SignedRunId = [uint64]36499724415
-    SignedSourceRevision = '67d238218f4796ba7b8505d072868da0f397174a'
-    SignedInstallerName = 'PDF Workstation_0.2.6_x64-setup.exe'
-    SignedInstallerBytes = [uint64]10456616
-    SignedInstallerSha256 = '8F7A167D1AED369D1A28B7C91692BAD8770E774FE9D8AFBBED970654144E428C'
+    SignedArtifactId = [uint64]12510717103
+    SignedRunId = [uint64]39969839829
+    SignedSourceRevision = '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'
+    SignedInstallerName = 'PDF Workstation_0.3.0_x64-setup.exe'
+    SignedInstallerBytes = [uint64]11201296
+    SignedInstallerSha256 = '3DE99F111652727BB59F9C17FF4E3CCA42ED48E9DE5E0614920280FFB0BA9FE5'
     SignedRecordName = 'artifact-verification.json'
-    SignedRecordBytes = [uint64]7386
-    SignedRecordSha256 = '4ED82057155877F2677262479FF4F2B00398CF5F524C51302DB50275D315E205'
+    SignedRecordBytes = [uint64]7715
+    SignedRecordSha256 = '0383DAE8FA04705FA26F63CB3CC4EDE16442129D87F99E7900BD1EF301C4FB5C'
     ExpectedPublisher = 'Joshua Beel'
     SmokeWidth = 1200
     SmokeHeight = 240
@@ -212,7 +212,7 @@ function Assert-SignedArtifactReceipt {
     Assert-ReceiptValue -Value $Receipt.packagedApplication -Kind 'Packaged application'
 
     $base = @($Receipt.baseResources)
-    if ($base.Count -ne 26) { throw 'Signed artifact record must contain exactly 26 base resources.' }
+    if ($base.Count -ne 28) { throw 'Signed artifact record must contain exactly 28 base resources.' }
     $baseTargets = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     $pdfium = @()
     foreach ($entry in $base) {
@@ -745,7 +745,7 @@ function Write-SanitizedUpgradeRecord {
             installer = [ordered]@{ fileName = $script:Pins.BaselineName; bytes = $script:Pins.BaselineBytes; sha256 = $script:Pins.BaselineSha256; signature = 'NotSigned' }
         }
         upgrade = [ordered]@{
-            version = '0.2.6'
+            version = '0.3.0'
             installer = [ordered]@{ fileName = $script:Pins.SignedInstallerName; bytes = $script:Pins.SignedInstallerBytes; sha256 = $script:Pins.SignedInstallerSha256 }
             installedApplication = [ordered]@{ bytes = [uint64]$Receipt.packagedApplication.bytes; sha256 = [string]$Receipt.packagedApplication.sha256 }
             installedEngineOcrSmoke = $InstalledEngineSmoke
@@ -801,7 +801,7 @@ function Write-SanitizedUpgradeRecord {
         }
     }
     $json = $record | ConvertTo-Json -Depth 12
-    if ($json -match '(?i)([A-Z]:\\|\\Users\\|runneradmin|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|codesigning\.azure\.net|signingAccount|signingProfile|tenantId|clientId|11005152678|36499724415|569181842|raw\.log)') {
+    if ($json -match '(?i)([A-Z]:\\|\\Users\\|runneradmin|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|codesigning\.azure\.net|signingAccount|signingProfile|tenantId|clientId|12510717103|39969839829|569181842|raw\.log)') {
         throw 'Sanitized upgrade record contains a host path, token, credential identifier, artifact identifier, or raw log reference.'
     }
     $path = Join-Path $OutputRoot 'upgrade-verification.json'
@@ -845,7 +845,7 @@ $recordPath = Join-Path $signedRoot $script:Pins.SignedRecordName
 if ($signedFiles.Count -ne 2 -or -not (Test-Path -LiteralPath $signedInstaller -PathType Leaf) -or -not (Test-Path -LiteralPath $recordPath -PathType Leaf)) {
     throw 'Downloaded signed artifact must contain exactly the installer and sanitized record.'
 }
-Assert-FileReceipt -Path $signedInstaller -Bytes $script:Pins.SignedInstallerBytes -Sha256 $script:Pins.SignedInstallerSha256 -Kind 'Signed 0.2.6 installer'
+Assert-FileReceipt -Path $signedInstaller -Bytes $script:Pins.SignedInstallerBytes -Sha256 $script:Pins.SignedInstallerSha256 -Kind 'Signed 0.3.0 installer'
 Assert-FileReceipt -Path $recordPath -Bytes $script:Pins.SignedRecordBytes -Sha256 $script:Pins.SignedRecordSha256 -Kind 'Signed artifact verification record'
 $null = Assert-TrustedWindowsSignature -Path $signedInstaller -ExpectedPublisher $script:Pins.ExpectedPublisher
 $recordText = Get-Content -LiteralPath $recordPath -Raw -Encoding UTF8
@@ -895,7 +895,7 @@ Invoke-BoundedSilentInstaller -Path $signedInstaller
 $processFacts = Get-ConflictingProcessFacts -InstallerPaths @($baselinePath,$signedInstaller)
 if ($processFacts.applicationProcessPresent -or $processFacts.installerProcessPresent) { throw 'Signed silent upgrade left an application or installer process running.' }
 $upgraded = Get-InstallFacts -RegistryPath $registryPath -ExpectedInstallRoot $installRoot
-Assert-InstallFacts -Facts $upgraded -ExpectedVersion '0.2.6' -ExpectedInstallRoot $installRoot -ExpectedApplication $receipt.packagedApplication -ExpectedSignatureStatus 'Valid' -ExpectedPublisher $script:Pins.ExpectedPublisher -ExpectedTimestamp $true
+Assert-InstallFacts -Facts $upgraded -ExpectedVersion '0.3.0' -ExpectedInstallRoot $installRoot -ExpectedApplication $receipt.packagedApplication -ExpectedSignatureStatus 'Valid' -ExpectedPublisher $script:Pins.ExpectedPublisher -ExpectedTimestamp $true
 $installedResources = Assert-InstalledSignedResources -InstallRoot $installRoot -Receipt $receipt -ReceiptSets $receiptSets
 $applicationPublisherEvidence = New-HostedPublisherUiNotAttemptedEvidence `
     -Path $installedResources.Application.FullName `

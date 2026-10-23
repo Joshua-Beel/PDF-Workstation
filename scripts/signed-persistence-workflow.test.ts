@@ -21,9 +21,9 @@ describe('signed installed persistence workflow', () => {
     expect(workflow).toContain('fetch-depth: 0');
     expect(workflow).toContain('git diff --quiet --');
     expect(workflow).toContain('git diff --cached --quiet --');
-    expect(workflow).toContain('artifact-ids: \'11005152678\'');
-    expect(workflow).toContain("run-id: '36499724415'");
-    expect(workflow).toContain("[string]$artifact.workflow_run.head_sha -cne '67d238218f4796ba7b8505d072868da0f397174a'");
+    expect(workflow).toContain('artifact-ids: \'12510717103\'');
+    expect(workflow).toContain("run-id: '39969839829'");
+    expect(workflow).toContain("[string]$artifact.workflow_run.head_sha -cne '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'");
     expect(workflow).not.toContain('pull_request:');
     expect(workflow).not.toContain('push:');
   });
@@ -33,7 +33,7 @@ describe('signed installed persistence workflow', () => {
       expect(workflow).toContain(path);
       expect(verifier).toContain(path);
     }
-    expect(workflow).toContain("$signedRevision = '67d238218f4796ba7b8505d072868da0f397174a'");
+    expect(workflow).toContain("$signedRevision = '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'");
     expect(workflow).toContain("$workflowBlob -cne $signedBlob");
     expect(verifier).toContain('Assert-SignedPersistenceSource');
     expect(verifier).toContain('exactSignedStorageModulesMatched = $true');
@@ -49,7 +49,7 @@ describe('signed installed persistence workflow', () => {
       $ast=[Management.Automation.Language.Parser]::ParseFile('${process.cwd().replaceAll("'", "''")}\scripts\verify-signed-persistence.ps1',[ref]$tokens,[ref]$errors)
       $function=$ast.Find({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Assert-SignedPersistenceSource'},$true)
       Invoke-Expression $function.Extent.Text
-      $script:PersistenceArtifactPins=[ordered]@{SourceRevision='67d238218f4796ba7b8505d072868da0f397174a'}
+      $script:PersistenceArtifactPins=[ordered]@{SourceRevision='4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'}
       $head=(& git rev-parse HEAD).Trim();$result=Assert-SignedPersistenceSource -ProjectRoot '${process.cwd().replaceAll("'", "''")}' -WorkflowRevision $head
       if([int]$result.matchedStorageBlobCount-ne 2-or-not[bool]$result.selectorsBoundToSignedAppSource-or[int]$result.signedSelectorMarkerCount-ne 18){throw 'Signed persistence source binding was incomplete.'}
     `;
@@ -65,9 +65,9 @@ describe('signed installed persistence workflow', () => {
   });
 
   it('pins the signed bytes and source, verifies installed trust, and uploads one sanitized record', () => {
-    expect(verifier).toContain("SourceRevision = '67d238218f4796ba7b8505d072868da0f397174a'");
-    expect(verifier).toContain("InstallerSha256 = '8F7A167D1AED369D1A28B7C91692BAD8770E774FE9D8AFBBED970654144E428C'");
-    expect(verifier).toContain("RecordSha256 = '4ED82057155877F2677262479FF4F2B00398CF5F524C51302DB50275D315E205'");
+    expect(verifier).toContain("SourceRevision = '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'");
+    expect(verifier).toContain("InstallerSha256 = '3DE99F111652727BB59F9C17FF4E3CCA42ED48E9DE5E0614920280FFB0BA9FE5'");
+    expect(verifier).toContain("RecordSha256 = '0383DAE8FA04705FA26F63CB3CC4EDE16442129D87F99E7900BD1EF301C4FB5C'");
     expect(verifier).toContain('Assert-TrustedWindowsSignature -Path $installer');
     expect(verifier).toContain('Get-PersistenceInstalledApplication');
     expect(verifier).toContain('Assert-PersistenceFileReceipt -Path $welcome');
@@ -98,7 +98,7 @@ describe('signed installed persistence workflow', () => {
     for (const unverified of ['nativeWindowVisualVerified = $false', 'nativeFilePickerVerified = $false', 'userPdfVerified = $false']) {
       expect(verifier).toContain(unverified);
     }
-    expect(verifier).toContain('11005152678|36499724415');
+    expect(verifier).toContain('12510717103|39969839829');
     expect(verifier).toContain('Sanitized persistence record contains a path, credential name, artifact identifier, or raw log reference.');
   });
 });

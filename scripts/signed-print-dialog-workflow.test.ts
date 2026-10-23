@@ -23,11 +23,11 @@ describe('manual signed print dialog workflow', () => {
 
   it('pins the exact signed artifact and proves eight printing implementation blobs while reporting shell parity separately', () => {
     const workflow = readFileSync('.github/workflows/print-dialog-verification.yml', 'utf8');
-    expect(workflow).toContain("artifact-ids: '11005152678'");
-    expect(workflow).toContain("run-id: '36499724415'");
-    expect(workflow).toContain("$signed = '67d238218f4796ba7b8505d072868da0f397174a'");
-    expect(workflow).toContain("[uint64]$artifact.size_in_bytes -ne 10437483");
-    expect(workflow).toContain("sha256:c0e89b5ae821d5875c31855c6596a7d47b7ca052468a026745a5d638e50ca569");
+    expect(workflow).toContain("artifact-ids: '12510717103'");
+    expect(workflow).toContain("run-id: '39969839829'");
+    expect(workflow).toContain("$signed = '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d'");
+    expect(workflow).toContain("[uint64]$artifact.size_in_bytes -ne 11182480");
+    expect(workflow).toContain("sha256:3e5c1003b553e3ed6d2f14bdd8f0b7b6baf56c7aacf55856e875f19ba270a689");
     expect(workflow.match(/^ {12}'(?:src|src-tauri)\/.+'$/gm)).toHaveLength(8);
     expect(workflow).toContain('$currentBlob -cne $signedBlob');
     expect(workflow).toContain('SIGNED_PRINT_SHELL path=src/App.tsx matched=');
@@ -46,7 +46,7 @@ describe('manual signed print dialog workflow', () => {
     expect(verifier).toContain("status = 'explicit-unavailable'");
     expect(verifier).toContain('installationAttempted = $false');
     expect(verifier).toContain("'print-dialog-verification.json'");
-    expect(verifier).toMatch(/11005152678\|36499724415/);
+    expect(verifier).toMatch(/12510717103\|39969839829/);
     expect(workflow).toContain('${{ env.PRINT_OUTPUT_ROOT }}/print-dialog-verification.json');
     expect(workflow).not.toContain('printed-welcome-page-1.pdf\n');
   });

@@ -61,7 +61,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Tracked working-tree files changed after checkout.' }
           git diff --cached --quiet --
           if ($LASTEXITCODE -ne 0) { throw 'The tracked index changed after checkout.' }
-          git cat-file -e '67d238218f4796ba7b8505d072868da0f397174a^{commit}'
+          git cat-file -e '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d^{commit}'
           if ($LASTEXITCODE -ne 0) { throw 'The exact signed source commit is unavailable.' }
 
       - name: Prepare exact hosted WebDriver inputs
@@ -92,20 +92,20 @@ jobs:
         run: |
           if (Test-Path -LiteralPath $env:SIGNED_ARTIFACT_ROOT) { throw 'Signed artifact root must be fresh.' }
           $headers = @{ Authorization="Bearer $env:GITHUB_TOKEN";Accept='application/vnd.github+json';'X-GitHub-Api-Version'='2022-11-28' }
-          $artifact = Invoke-RestMethod -Uri 'https://api.github.com/repos/Joshua-Beel/PDF-Workstation/actions/artifacts/11005152678' -Headers $headers
-          if ([uint64]$artifact.id -ne 11005152678 -or [string]$artifact.name -cne 'signed-ocr-installer-67d238218f4796ba7b8505d072868da0f397174a' -or
-              [uint64]$artifact.size_in_bytes -ne 10437483 -or [string]$artifact.digest -cne 'sha256:c0e89b5ae821d5875c31855c6596a7d47b7ca052468a026745a5d638e50ca569' -or
-              [uint64]$artifact.workflow_run.id -ne 36499724415 -or [string]$artifact.workflow_run.head_sha -cne '67d238218f4796ba7b8505d072868da0f397174a' -or [bool]$artifact.expired) {
+          $artifact = Invoke-RestMethod -Uri 'https://api.github.com/repos/Joshua-Beel/PDF-Workstation/actions/artifacts/12510717103' -Headers $headers
+          if ([uint64]$artifact.id -ne 12510717103 -or [string]$artifact.name -cne 'signed-ocr-installer-4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d' -or
+              [uint64]$artifact.size_in_bytes -ne 11182480 -or [string]$artifact.digest -cne 'sha256:3e5c1003b553e3ed6d2f14bdd8f0b7b6baf56c7aacf55856e875f19ba270a689' -or
+              [uint64]$artifact.workflow_run.id -ne 39969839829 -or [string]$artifact.workflow_run.head_sha -cne '4a0f89c5b2f04004c77adbdd7ccee8442dd1c41d' -or [bool]$artifact.expired) {
             throw 'Signed artifact metadata does not match the exact successful run.'
           }
 
       - name: Download the exact signed artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          artifact-ids: '11005152678'
+          artifact-ids: '12510717103'
           github-token: ${{ github.token }}
           repository: Joshua-Beel/PDF-Workstation
-          run-id: '36499724415'
+          run-id: '39969839829'
           merge-multiple: true
           path: ${{ env.SIGNED_ARTIFACT_ROOT }}
 
