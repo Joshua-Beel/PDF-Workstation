@@ -154,6 +154,7 @@ it('binds the owned process identity into every process-bound open-dialog helper
   const body = String.raw`
     $script:calls=[Collections.Generic.List[object]]::new()
     $stubs=@(
+      @('verify-default-recovery.ps1','Wait-RecoveryOracle','1'),
       @('installed-reading-tools.ps1','Get-ReadingProcessUiSurfaceSnapshot','@([pscustomobject]@{surface=1})'),
       @('installed-reading-tools.ps1','Assert-ReadingSurfaceSnapshot','''surface-identities'''),
       @('installed-reading-tools.ps1','Get-ReadingPickerTargetSnapshot','@([pscustomobject]@{target=1})'),
@@ -170,15 +171,16 @@ it('binds the owned process identity into every process-bound open-dialog helper
     }
     $context=[pscustomobject]@{ApplicationProcessId=4242;ApplicationProcessStartUtcTicks=[long]638000000000000001;Deadline=[datetime]::UtcNow.AddMinutes(5);SessionId='session-1'}
     Open-RecoveryFixture $context 'C:\fixture\controlled-source.pdf'
-    $expected=@('Get-ReadingProcessUiSurfaceSnapshot','Assert-ReadingSurfaceSnapshot','Get-ReadingPickerTargetSnapshot','Assert-ReadingPickerTargetSnapshot','Invoke-WebDriverScript','Wait-ReadingProcessBoundPickerTargets','Submit-ProcessBoundOpenDialog')
+    $expected=@('Wait-RecoveryOracle','Get-ReadingProcessUiSurfaceSnapshot','Assert-ReadingSurfaceSnapshot','Get-ReadingPickerTargetSnapshot','Assert-ReadingPickerTargetSnapshot','Invoke-WebDriverScript','Wait-ReadingProcessBoundPickerTargets','Submit-ProcessBoundOpenDialog')
     if((@($script:calls|ForEach-Object name)-join',')-cne($expected-join',')){throw ('Unexpected helper sequence: '+(@($script:calls|ForEach-Object name)-join','))}
     foreach($call in $script:calls){
       if($call.bound.ContainsKey('ApplicationProcessId')-and($call.bound.ApplicationProcessId-isnot[int]-or$call.bound.ApplicationProcessId-ne4242)){throw ($call.name+' received the wrong process id.')}
       if($call.bound.ContainsKey('ApplicationProcessStartUtcTicks')-and$call.bound.ApplicationProcessStartUtcTicks-ne638000000000000001){throw ($call.name+' received the wrong start ticks.')}
-      if($call.name-cne'Invoke-WebDriverScript'-and-not$call.bound.ContainsKey('ApplicationProcessId')){throw ($call.name+' was not process-bound.')}
+      if($call.name-cne'Invoke-WebDriverScript'-and$call.name-cne'Wait-RecoveryOracle'-and-not$call.bound.ContainsKey('ApplicationProcessId')){throw ($call.name+' was not process-bound.')}
     }
-    if($script:calls[1].bound.Kind-cne'Recovery open baseline'-or$script:calls[3].bound.Kind-cne'Recovery picker baseline'){throw 'Snapshot kinds were not bound.'}
-    if($script:calls[4].bound.SessionId-cne'session-1'-or$script:calls[6].bound.Path-cne'C:\fixture\controlled-source.pdf'){throw 'Session or fixture path was not bound.'}
+    if($script:calls[0].bound.Kind-cne'Recovery toolbar Open control'-or-not(& $script:calls[0].bound.Predicate 1)-or(& $script:calls[0].bound.Predicate 2)-or$script:calls[0].bound.Script-notmatch'Toggle theme'){throw 'The toolbar Open wait was not bound to exactly one scoped control.'}
+    if($script:calls[2].bound.Kind-cne'Recovery open baseline'-or$script:calls[4].bound.Kind-cne'Recovery picker baseline'){throw 'Snapshot kinds were not bound.'}
+    if($script:calls[5].bound.SessionId-cne'session-1'-or$script:calls[5].bound.Script-notmatch'Toggle theme'-or$script:calls[7].bound.Path-cne'C:\fixture\controlled-source.pdf'){throw 'Session, scoped click or fixture path was not bound.'}
     Write-Output PASS
   `;
   const result = retainedPowerShell(extractFunction('Open-RecoveryFixture', body));
