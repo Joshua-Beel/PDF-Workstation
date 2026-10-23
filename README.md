@@ -137,6 +137,8 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 - Dev tooling: vite 6.4.3 to 6.4.4 for a dev-server advisory; `npm audit` reports 0 and the built frontend is byte-identical (SM6).
 - Release notes always check out with LF line endings, so the update text in `latest.json` carries no CRLF (SM6).
 - Version 0.3.0 prepared: six version sources bumped, 0.3.0-only release notes, notices regenerated, release steps rewritten (SM6). Not tagged or built; unverified in an installed build.
+- Fill forms review fixes (SM3; source tests only): the PDFium check reads choice values from the engine, and a typed combo value matches option labels only.
+- Fill forms: multi-select list boxes (checkbox list, several option ids per patch) and editable combo boxes (typed Latin-1 text or a listed option) (SM3; source tests only).
 - Forms breadth follow-ups (SM3; source tests only): U+00A0 refused, overflow-safe encoding differences, list-box labels encoded like other text, full Latin-1 width table and more tests.
 - Fill forms list boxes may have more options than visible rows (SM3; source tests only): the scroll position (`/TI`) is validated and an out-of-view choice scrolls into view.
 - Fill forms text values accept printable ASCII plus Latin-1 letters and symbols (SM3; source tests only): WinAnsi appearance bytes, UTF-16 value, Latin-1 Helvetica widths. Not Unicode beyond Latin-1.
