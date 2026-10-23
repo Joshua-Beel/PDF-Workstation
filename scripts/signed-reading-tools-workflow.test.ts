@@ -51,6 +51,28 @@ describe('manual signed reading-tools workflow', () => {
     expect(currentShell.status, currentShell.stderr).toBe(0);
   }, 30_000);
 
+  it('fails closed when a pinned feature blob or the pinned application-shell blob is wrong', () => {
+    const root = process.cwd().replaceAll("'", "''");
+    const run = (mutation: string) => spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', String.raw`
+      $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
+      $path='${root}\scripts\verify-signed-reading-tools.ps1';$tokens=$null;$errors=$null
+      $ast=[Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors);if($errors.Count){throw ($errors|Out-String)}
+      $assignment=$ast.Find({param($node)$node-is[Management.Automation.Language.AssignmentStatementAst]-and$node.Left.Extent.Text-ceq'$script:ReadingVerificationPins'},$true)
+      Invoke-Expression $assignment.Extent.Text
+      $definition=$ast.Find({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]-and$node.Name-ceq'Assert-SignedReadingSourceParity'},$true);Invoke-Expression $definition.Extent.Text
+      ${mutation}
+      Assert-SignedReadingSourceParity -ProjectRoot '${root}' | Out-Null
+    `], { cwd: process.cwd(), encoding: 'utf8', timeout: 30_000 });
+    const control = run('');
+    expect(control.status, control.stderr).toBe(0);
+    const feature = run("$script:ReadingVerificationPins.FeatureBlobs['src/Viewer.tsx'] = ('0' * 40)");
+    expect(feature.status).toBe(1);
+    expect(feature.stderr).toContain('A reading feature source blob does not match the exact signed and dispatched source parity contract.');
+    const shell = run("$script:ReadingVerificationPins.SignedApplicationShellBlob = ('0' * 40)");
+    expect(shell.status).toBe(1);
+    expect(shell.stderr).toContain('The inspected signed application shell blob is not exact.');
+  }, 60_000);
+
   it('keeps artifact credentials step-scoped and the UI verification credential-free', () => {
     const workflow = readFileSync('.github/workflows/reading-tools-verification.yml', 'utf8');
     const verify = workflow.slice(

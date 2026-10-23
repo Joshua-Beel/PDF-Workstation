@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- Review fixes for the signed-check re-pin: the reading-tools drift test now has negative controls (wrong feature blob, wrong app-shell blob), and releases.md, ocr-feasibility.md and license-inventory.md name the new pin (SM6b).
 - The five signed installed checks (expanded page tools, OCR upgrade, persistence, print dialog, reading tools) are re-pinned to a fresh signed 0.3.0 OCR artifact (artifact 12510717103, run 39969839829, source `4a0f89c`); none has been run hosted against it yet (SM6b).
 - Step 2 verifiers, second round: closure callbacks that could not see helper functions on the hosted runner removed, transitive helper analysis for everything the default verifier workflows reach, recovery stage markers and abrupt-termination cleanup (SM6; scripts and tests only).
 - Installed-app Step 2 verifiers: missing helper imports added, the recovery check clicks only the toolbar Open button, and a static test checks every verifier helper resolves (SM6; scripts and tests only).
