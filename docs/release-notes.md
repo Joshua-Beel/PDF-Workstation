@@ -1,6 +1,6 @@
-## 0.3.0
+## 0.3.1
 
-The first update since 0.2.0. Everything below was tested in source builds. These notes were written before the 0.3.0 installer was built, so each item is unverified in an installed 0.3.0 build.
+The first update since 0.2.0. Everything below was tested in source builds. These notes were written before the 0.3.1 installer was built, so each item is unverified in an installed 0.3.1 build.
 
 Reading and search
 - Find text with Ctrl+F: case matching, one excerpt per matching page (up to 500 pages), and highlights on the page where the PDF gives text positions.
@@ -18,11 +18,11 @@ Pages
 
 Comments and forms
 - Sticky notes, area highlights and highlights on selected text.
-- Fill a limited set of existing form fields (single-line text, including accented Latin letters such as é and ñ; checkboxes; radio buttons; single-choice lists, including scrolling list boxes) into a new copy. Forms outside that set are refused rather than partly filled.
+- Fill a limited set of existing form fields into a new copy: single-line text (including accented Latin letters such as é and ñ), checkboxes, radio buttons, dropdowns, editable combo boxes (type a value or pick a listed option), and list boxes with one or several selections. Forms outside that set are refused rather than partly filled.
 
 Workspace and updates
 - Remembers theme, zoom, panels and up to 50 recent files, with stars.
-- New in 0.3.0, for future updates: before an update installs, the app asks you to confirm and to save your work first. Choosing No keeps your current version.
+- New in 0.3.1, for future updates: before an update installs, the app asks you to confirm and to save your work first. Choosing No keeps your current version.
 - PDF Workstation is now MIT-licensed. Third-party notices are listed in the app.
 
 Still not included: text or image editing, saving over the original file (every save writes a new copy), PDF signing, certificate signatures or signature validation, form preparation, and redaction that keeps text searchable. Printers other than Microsoft Print to PDF are untested.
