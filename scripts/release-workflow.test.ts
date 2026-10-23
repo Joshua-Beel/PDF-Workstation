@@ -144,6 +144,7 @@ describe('release workflow contract', () => {
     expect(workflow).not.toMatch(/run: cargo test/);
     expect(serviceSource).toContain('fn recovery_checkpoint_ack_is_durable_and_explicit_restore_replays_exact_state()');
     expect(serviceSource).toContain('fn explicit_discard_is_idempotent_and_resolves_post_publish_lock()');
+    expect(serviceSource).toContain('fn keep_recovered_edits_never_serves_a_render_cached_during_the_offer()');
     expect(restartSource).toContain('fn restart_recovery_survives_fresh_workers()');
     for (const secret of [
       'TAURI_SIGNING_PRIVATE_KEY',

@@ -231,7 +231,7 @@ impl RequestQueue {
 #[derive(Clone)]
 pub struct PdfService { sender: RequestSender }
 static PDF_SERVICE: OnceLock<PdfService> = OnceLock::new();
-type CacheKey = (u64, u16, i32);
+type CacheKey = (u64, u16, i32, u64);
 struct Cache { entries: VecDeque<(CacheKey, Vec<u8>, usize)>, weight: usize }
 impl Cache {
     fn get(&mut self, key: CacheKey) -> Option<Vec<u8>> {
@@ -742,6 +742,7 @@ impl PdfService {
                             let info = match documents.get(&id).ok_or_else(||"Document is closed".to_owned()).and_then(|document| current_info(session, original, document)) { Ok(info) => info, Err(error) => { session.restore(snapshot); return Err(error); } };
                             recovery_offers.retain(|_,offer|offer.source!=record.source);
                             recovery_heads.insert(id, (record.source, record.generation));
+                            note_documents.remove(&id); cache.close(id);
                             Ok(RecoveredDocument { document: info, current_page: record.current_page })
                         })();
                         let _ = reply.send(result);
@@ -814,7 +815,7 @@ impl PdfService {
                             continue;
                         }
                         let width = width.clamp(64, 3000);
-                        let key = (id, page, width);
+                        let key = (id, page, width, sessions.get(&id).map_or(u64::MAX, |(session, _)| session.revision));
                         let result = if let Some(bytes) = cache.get(key) { Ok(bytes) } else {
                             (|| {
                                 let original = documents.get(&id).ok_or("Document is closed")?;
@@ -5567,6 +5568,20 @@ mod tests {
 
     #[test]
     #[ignore = "uses an isolated recovery-root worker and must run alone because PDFium binding is process-global"]
+    fn keep_recovered_edits_never_serves_a_render_cached_during_the_offer() {
+        let manifest=PathBuf::from(env!("CARGO_MANIFEST_DIR"));let folder=tempfile::tempdir().unwrap();let recovery=folder.path().join("recovery");std::fs::create_dir(&recovery).unwrap();let source_path=folder.path().join("source.pdf");std::fs::copy(manifest.join("resources/welcome.pdf"),&source_path).unwrap();let service=PdfService::start_worker(manifest.join("resources/pdfium/bin/pdfium.dll"),4096,Some(recovery.clone()));
+        let size=|id:u64|{let image=image::load_from_memory(&call(&service,|reply|Request::Render(id,0,602,reply)).unwrap()).unwrap();(image.width(),image.height())};
+        let opened=call(&service,|reply|Request::Open(source_path.clone(),reply)).unwrap();let upright=size(opened.id);assert!(upright.1>upright.0);
+        let edited=call(&service,|reply|Request::Edit(opened.id,PageEdit::Rotate{pages:vec![0],clockwise:true},reply)).unwrap();call(&service,|reply|Request::CheckpointRecovery(recovery.clone(),edited.id,edited.revision,1,reply)).unwrap();call(&service,|reply|Request::Close(edited.id,reply)).unwrap();
+        let (clean,offer)=match call(&service,|reply|Request::BeginOpen(source_path.clone(),reply)).unwrap().accept(){OpenResult::Opened{document,recovery}=>(document,recovery.unwrap()),_=>panic!("ordinary source must open")};assert_eq!((clean.revision,offer.revision,offer.current_page),(0,edited.revision,1));
+        assert_eq!(size(clean.id),upright);
+        let kept=call(&service,|reply|Request::KeepRecoveredEdits(clean.id,clean.revision,reply)).unwrap();assert_eq!((kept.document.id,kept.document.revision,kept.current_page),(clean.id,edited.revision,1));assert_eq!((kept.document.pages[0].width,kept.document.pages[0].height),(edited.pages[0].width,edited.pages[0].height));
+        let rotated=size(clean.id);assert_eq!(rotated.0,602);assert!(rotated.1<rotated.0,"page 1 after Keep must render rotated, got {rotated:?}");
+        call(&service,|reply|Request::Close(clean.id,reply)).unwrap();
+    }
+
+    #[test]
+    #[ignore = "uses an isolated recovery-root worker and must run alone because PDFium binding is process-global"]
     fn recovery_checkpoint_ack_is_durable_and_explicit_restore_replays_exact_state(){
         let manifest=PathBuf::from(env!("CARGO_MANIFEST_DIR"));let folder=tempfile::tempdir().unwrap();let recovery=folder.path().join("recovery");std::fs::create_dir(&recovery).unwrap();let service=PdfService::start_worker(manifest.join("resources/pdfium/bin/pdfium.dll"),4096,Some(recovery.clone()));let source_path=folder.path().join("source.pdf");let source=std::fs::read(manifest.join("resources/welcome.pdf")).unwrap();std::fs::write(&source_path,&source).unwrap();
         let opened=call(&service,|reply|Request::Open(source_path.clone(),reply)).unwrap();assert!(call(&service,|reply|Request::CheckpointRecovery(recovery.clone(),opened.id,opened.revision,0,reply)).unwrap_err().contains("unsaved"));
@@ -5988,9 +6003,10 @@ mod tests {
     #[test]
     fn cache_evicts_and_clears_closed_documents() {
         let mut cache = Cache { entries: VecDeque::new(), weight: 0 };
-        cache.insert((1, 0, 800), vec![1], 300 * 1024 * 1024);
-        cache.insert((2, 0, 800), vec![2], 300 * 1024 * 1024);
-        assert!(cache.get((1, 0, 800)).is_none()); assert_eq!(cache.get((2, 0, 800)), Some(vec![2]));
+        cache.insert((1, 0, 800, 0), vec![1], 300 * 1024 * 1024);
+        cache.insert((2, 0, 800, 0), vec![2], 300 * 1024 * 1024);
+        assert!(cache.get((1, 0, 800, 0)).is_none()); assert_eq!(cache.get((2, 0, 800, 0)), Some(vec![2]));
+        assert!(cache.get((2, 0, 800, 1)).is_none());
         cache.close(2); assert_eq!(cache.weight, 0);
     }
     #[test]
