@@ -1,10 +1,11 @@
 [CmdletBinding()]
 param(
- [Parameter(Mandatory=$true)][string]$ProjectRoot,[Parameter(Mandatory=$true)][string]$TargetSourceRoot,[Parameter(Mandatory=$true)][string]$DraftProofRoot,[Parameter(Mandatory=$true)][string]$AssetRoot,[Parameter(Mandatory=$true)][string]$WorkRoot,[Parameter(Mandatory=$true)][string]$OutputRoot,[Parameter(Mandatory=$true)][string]$WebDriverRoot,
- [Parameter(Mandatory=$true)][string]$WorkflowSourceRevision,[Parameter(Mandatory=$true)][string]$DraftProofWorkflowRevision,[Parameter(Mandatory=$true)][string]$DraftProofRunId,[Parameter(Mandatory=$true)][string]$DraftProofWorkflowId,[Parameter(Mandatory=$true)][string]$DraftProofArtifactId,[Parameter(Mandatory=$true)][string]$DraftProofArtifactName,[Parameter(Mandatory=$true)][string]$DraftProofArtifactBytes,[Parameter(Mandatory=$true)][string]$DraftProofArtifactDigest,[Parameter(Mandatory=$true)][string]$DraftProofReceiptBytes,[Parameter(Mandatory=$true)][string]$DraftProofReceiptSha256,
- [Parameter(Mandatory=$true)][string]$TargetVersion,[Parameter(Mandatory=$true)][string]$TargetTag,[Parameter(Mandatory=$true)][string]$TargetSourceRevision,[Parameter(Mandatory=$true)][string]$TargetReleaseId,
- [Parameter(Mandatory=$true)][string]$InstallerAssetId,[Parameter(Mandatory=$true)][string]$InstallerName,[Parameter(Mandatory=$true)][string]$InstallerBytes,[Parameter(Mandatory=$true)][string]$InstallerSha256,
- [Parameter(Mandatory=$true)][string]$SignatureAssetId,[Parameter(Mandatory=$true)][string]$SignatureBytes,[Parameter(Mandatory=$true)][string]$SignatureSha256,[Parameter(Mandatory=$true)][string]$ManifestAssetId,[Parameter(Mandatory=$true)][string]$ManifestBytes,[Parameter(Mandatory=$true)][string]$ManifestSha256,[Parameter(Mandatory=$true)][string]$ExpectedPublisher
+ [Parameter(Mandatory=$true)][string]$ProjectRoot,[Parameter(Mandatory=$true)][string]$TargetSourceRoot,[Parameter(Mandatory=$true)][string]$DraftProofRoot,[string]$AssetRoot,[Parameter(Mandatory=$true)][string]$WorkRoot,[Parameter(Mandatory=$true)][string]$OutputRoot,[Parameter(Mandatory=$true)][string]$WebDriverRoot,
+ [Parameter(Mandatory=$true)][string]$WorkflowSourceRevision,[string]$DraftProofWorkflowRevision,[string]$DraftProofRunId,[string]$DraftProofWorkflowId,[string]$DraftProofArtifactId,[string]$DraftProofArtifactName,[string]$DraftProofArtifactBytes,[string]$DraftProofArtifactDigest,[string]$DraftProofReceiptBytes,[string]$DraftProofReceiptSha256,
+ [Parameter(Mandatory=$true)][string]$TargetVersion,[string]$TargetTag,[Parameter(Mandatory=$true)][string]$TargetSourceRevision,[string]$TargetReleaseId,
+ [string]$InstallerAssetId,[Parameter(Mandatory=$true)][string]$InstallerName,[Parameter(Mandatory=$true)][string]$InstallerBytes,[Parameter(Mandatory=$true)][string]$InstallerSha256,
+ [string]$SignatureAssetId,[string]$SignatureBytes,[string]$SignatureSha256,[string]$ManifestAssetId,[string]$ManifestBytes,[string]$ManifestSha256,[Parameter(Mandatory=$true)][string]$ExpectedPublisher,
+ [ValidateSet('draft','artifact')][string]$ProofSource='draft',[string]$ArtifactRoot,[string]$ArtifactRunId,[string]$ArtifactId,[string]$ArtifactName,[string]$ArtifactBytes,[string]$ArtifactDigest
 )
 $ErrorActionPreference='Stop';Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'installed-image-page-tools.ps1')
@@ -45,6 +46,50 @@ function Assert-DefaultDraftReceipt {
  $engine=@($ocr|Where-Object role -CEQ 'engine');if($engine.Count-ne1-or([string]$engine[0].sha256).ToLowerInvariant()-cne$ocrIdentity){throw 'Default receipt OCR engine does not match its identity.'}
  if(-not[bool]$Receipt.verification.exactAssetInventory-or-not[bool]$Receipt.verification.exactExtractedInventory-or-not[bool]$Receipt.verification.targetSourceSixVersionsMatched-or-not[bool]$Receipt.verification.packagedApplicationIdentityAndVersionMatched-or[bool]$Receipt.verification.sourceBuildExecutableByteProvenanceReconstructed-or[bool]$Receipt.verification.optionalUninstaller-or-not[bool]$Receipt.verification.optionalUninstallerExcluded-or-not[bool]$Receipt.verification.ocrBundled-or-not[bool]$Receipt.verification.manifestSignatureTextBound-or[bool]$Receipt.verification.detachedUpdaterCryptographyVerified-or[bool]$Receipt.verification.installedBehaviorVerified){throw 'Default receipt verification scope mismatch.'}
  return [pscustomobject]@{Base=$base;Pdfium=$pdfium[0];Ocr=$ocr;OcrEngine=$engine[0]}
+}
+
+function Assert-ProofSourceParameters {
+ $draftOnly=@('AssetRoot','DraftProofWorkflowRevision','DraftProofRunId','DraftProofWorkflowId','DraftProofArtifactId','DraftProofArtifactName','DraftProofArtifactBytes','DraftProofArtifactDigest','DraftProofReceiptBytes','DraftProofReceiptSha256','TargetTag','TargetReleaseId','InstallerAssetId','SignatureAssetId','SignatureBytes','SignatureSha256','ManifestAssetId','ManifestBytes','ManifestSha256')
+ $artifactOnly=@('ArtifactRoot','ArtifactRunId','ArtifactId','ArtifactName','ArtifactBytes','ArtifactDigest')
+ if($ProofSource-cne'draft'-and$ProofSource-cne'artifact'){throw 'Proof source must be exactly draft or artifact.'}
+ foreach($name in $draftOnly){$present=-not[string]::IsNullOrWhiteSpace([string](Get-Variable -Name $name -ValueOnly));if(($ProofSource-ceq'draft')-ne$present){throw "Parameter $name is required for draft verification and forbidden for the pre-tag artifact rehearsal."}}
+ foreach($name in $artifactOnly){$present=-not[string]::IsNullOrWhiteSpace([string](Get-Variable -Name $name -ValueOnly));if(($ProofSource-ceq'artifact')-ne$present){throw "Parameter $name is required for the pre-tag artifact rehearsal and forbidden for draft verification."}}
+}
+
+function Assert-DefaultArtifactReceipt {
+ param($Receipt)
+ Assert-ExactProperties $Receipt @('schemaVersion','scope','mode','workflowSourceRevision','targetVersion','targetSourceRevision','artifact','assets','packagedApplication','baseResources','ocr','signatures','verification') 'Default artifact receipt'
+ if([int]$Receipt.schemaVersion-ne2-or[string]$Receipt.mode-cne'default-artifact-extraction'-or[string]$Receipt.workflowSourceRevision-cne$WorkflowSourceRevision-or[string]$Receipt.targetVersion-cne$TargetVersion-or[string]$Receipt.targetSourceRevision-cne$TargetSourceRevision){throw 'Default artifact receipt identity mismatch.'}
+ if($ArtifactName-cne"signed-ocr-installer-$TargetSourceRevision"-or$ArtifactDigest-cnotmatch'^sha256:[a-f0-9]{64}$'-or$InstallerName-cne"PDF Workstation_${TargetVersion}_x64-setup.exe"){throw 'Rehearsal artifact identity input is malformed.'}
+ Assert-ExactProperties $Receipt.artifact @('runId','id','name','bytes','digest') 'Default artifact identity'
+ if([string]$Receipt.artifact.runId-cne[string](ConvertTo-ExactUInt64 $ArtifactRunId 'Artifact run id')-or[string]$Receipt.artifact.id-cne[string](ConvertTo-ExactUInt64 $ArtifactId 'Artifact id')-or[string]$Receipt.artifact.name-cne$ArtifactName-or[string]$Receipt.artifact.bytes-cne[string](ConvertTo-ExactUInt64 $ArtifactBytes 'Artifact bytes')-or[string]$Receipt.artifact.digest-cne$ArtifactDigest){throw 'Default artifact receipt is not bound to the pinned artifact.'}
+ $assets=@($Receipt.assets);if($assets.Count-ne1){throw 'Default artifact receipt must hold exactly the installer.'}
+ Assert-ExactProperties $assets[0] @('role','name','bytes','sha256') 'Artifact installer receipt'
+ if([string]$assets[0].role-cne'installer'-or[string]$assets[0].name-cne$InstallerName-or[string]$assets[0].bytes-cne$InstallerBytes-or[string]$assets[0].sha256-cne$InstallerSha256){throw 'Artifact installer receipt mismatch.'}
+ Assert-ReceiptValue $Receipt.packagedApplication 'Packaged application'
+ $base=@($Receipt.baseResources);if($base.Count-ne28){throw 'Default receipt must contain 28 base resources.'}
+ $targets=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+ foreach($entry in $base){if(-not$targets.Add([string]$entry.target)-or[string]$entry.target-cnotmatch'^resources/[A-Za-z0-9._/-]+$'-or[string]$entry.target-match'(^|/)ocr(/|$)'){throw 'Default base resource is unsafe, duplicated, or OCR.'};Assert-ReceiptValue $entry 'Base resource'}
+ $pdfium=@($base|Where-Object target -CEQ 'resources/pdfium/bin/pdfium.dll');if($pdfium.Count-ne1-or[uint64]$pdfium[0].unsignedBytes-eq0-or[string]$pdfium[0].unsignedSha256-cnotmatch'^[A-F0-9]{64}$'){throw 'Default receipt has no unique signed PDFium source binding.'}
+ if([string]$Receipt.signatures.expectedPublisher-cne$ExpectedPublisher-or-not[bool]$Receipt.signatures.trustedTimestampsRequired-or[string]$Receipt.signatures.installer-cne'Valid'-or[string]$Receipt.signatures.application-cne'Valid'-or[string]$Receipt.signatures.pdfium-cne'Valid'-or[string]$Receipt.signatures.ocrEngine-cne'Valid'){throw 'Default receipt signature claim mismatch.'}
+ Assert-ExactProperties $Receipt.ocr @('identity','resources') 'Default receipt OCR package'
+ $ocrIdentity=[string]$Receipt.ocr.identity;$ocr=@($Receipt.ocr.resources);if($ocrIdentity-cnotmatch'^[a-f0-9]{64}$'-or$ocr.Count-ne5){throw 'Default receipt OCR package identity or count mismatch.'}
+ $ocrExpected=@{'bin/tesseract.exe'='engine';'tessdata/eng.traineddata'='model';'licenses/Tesseract-Apache-2.0.txt'='license';'licenses/Leptonica-BSD-2-Clause.txt'='license';'licenses/eng-fast-Apache-2.0.txt'='license'};$ocrSeen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+ foreach($entry in $ocr){Assert-ExactProperties $entry @('target','role','bytes','sha256') 'Default receipt OCR resource';$prefix="resources/ocr/$ocrIdentity/";$target=[string]$entry.target;if(-not$target.StartsWith($prefix,[StringComparison]::Ordinal)){throw 'Default receipt OCR resource is outside its identity folder.'};$suffix=$target.Substring($prefix.Length);if(-not$ocrExpected.ContainsKey($suffix)-or$ocrExpected[$suffix]-cne[string]$entry.role-or-not$ocrSeen.Add($suffix)-or$targets.Contains($target)){throw 'Default receipt OCR resource set mismatch.'};Assert-ReceiptValue $entry 'OCR resource'}
+ $engine=@($ocr|Where-Object role -CEQ 'engine');if($engine.Count-ne1-or([string]$engine[0].sha256).ToLowerInvariant()-cne$ocrIdentity){throw 'Default receipt OCR engine does not match its identity.'}
+ $v=$Receipt.verification
+ if([bool]$v.draft-or-not[bool]$v.releaseCandidateArtifact-or-not[bool]$v.exactAssetInventory-or-not[bool]$v.exactExtractedInventory-or-not[bool]$v.targetSourceSixVersionsMatched-or-not[bool]$v.packagedApplicationIdentityAndVersionMatched-or[bool]$v.sourceBuildExecutableByteProvenanceReconstructed-or[bool]$v.optionalUninstaller-or-not[bool]$v.optionalUninstallerExcluded-or-not[bool]$v.ocrBundled-or-not[bool]$v.packagedApplicationEmbedsCandidateUpdaterKey-or-not[bool]$v.updaterArtifactsAbsent-or[bool]$v.installedBehaviorVerified){throw 'Default artifact receipt verification scope mismatch.'}
+ return [pscustomobject]@{Base=$base;Pdfium=$pdfium[0];Ocr=$ocr;OcrEngine=$engine[0]}
+}
+
+function Read-DefaultArtifactRehearsal { param([string]$ProofRoot,[string]$ArtifactPath)
+ $files=@(Get-ChildItem -LiteralPath $ProofRoot -Recurse -Force);if($files.Count-ne1-or$files[0].PSIsContainer-or$files[0].Name-cne'default-artifact-verification.json'-or$files[0].Length-gt1MB){throw 'The rehearsal proof root must hold exactly one artifact extraction receipt.'}
+ $text=Get-Content -LiteralPath $files[0].FullName -Raw -Encoding UTF8;if($text-match'(?i)([A-Z]:\\|\\Users\\|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|raw\.log)'){throw 'Rehearsal artifact receipt is not sanitized.'}
+ $receipt=$text|ConvertFrom-Json;$sets=Assert-DefaultArtifactReceipt $receipt
+ $exported=@(Get-ChildItem -LiteralPath $ArtifactPath -Recurse -Force);if($exported.Count-ne2-or@($exported|Where-Object{$_.PSIsContainer}).Count-ne0){throw 'Signed artifact must contain exactly the installer and its verification record.'}
+ $installer=Join-Path $ArtifactPath $InstallerName;[uint64]$bytes=0;if(-not[uint64]::TryParse($InstallerBytes,[ref]$bytes)){throw 'Rehearsal installer byte input is invalid.'};Assert-FileReceipt $installer $bytes $InstallerSha256 'Rehearsal installer'
+ $binding=[ordered]@{source='ocr-signed-artifact';artifactRunId=[uint64]$receipt.artifact.runId;artifactId=[uint64]$receipt.artifact.id;artifactName=[string]$receipt.artifact.name;artifactBytes=[uint64]$receipt.artifact.bytes;artifactDigest=[string]$receipt.artifact.digest;installer=[ordered]@{bytes=$bytes;sha256=$InstallerSha256};extractionReceipt=[ordered]@{bytes=[uint64]$files[0].Length;sha256=Get-ExactSha256 $files[0].FullName};draftVerified=$false;releaseVerified=$false;updaterVerified=$false}
+ return [pscustomobject]@{Receipt=$receipt;Sets=$sets;Installer=$installer;Binding=$binding}
 }
 
 function Assert-IndependentReceiptParity { param($Pinned,$Independent)
@@ -106,6 +151,13 @@ function Write-InstalledRecord { param($Source,$Receipt,$Image,$Organizer,$Struc
  $json=$record|ConvertTo-Json -Depth 20;if($json-match'(?i)([A-Z]:\\|\\Users\\|runneradmin|RUNNER_TEMP|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|raw\.log|\.pdf-workstation)'){throw 'Installed receipt contains host or credential data.'};[IO.File]::WriteAllText((Join-Path $OutputRoot 'default-expanded-page-tools-verification.json'),$json,[Text.UTF8Encoding]::new($false))
 }
 
+function Write-RehearsalInstalledRecord { param($Source,$Rehearsal,$Image,$Organizer,$Structural,$BaselineProcesses,$FinalProcesses)
+ [IO.Directory]::CreateDirectory($OutputRoot)|Out-Null;$record=[ordered]@{schemaVersion=1;scope='Pre-tag rehearsal: installed default image, organizer, and structural page-tool verification with controlled fixtures, run on a signed release-candidate artifact rather than a release draft; no release, draft, updater, OCR recognition, comments, forms, print, or general behavior claim.';workflowSourceRevision=$WorkflowSourceRevision;targetSourceRevision=$TargetSourceRevision;targetVersion=$TargetVersion;sourceBinding=$Source;rehearsal=$Rehearsal;imagePageTools=$Image;organizerTools=$Organizer;structuralPageTools=$Structural;cleanup=[ordered]@{silentUninstallCompleted=$true;baseline=$BaselineProcesses;final=$FinalProcesses;settingsSentinelPreservedThroughTests=$true;ownedSettingsRemoved=$true};ocrBundled=$true;ocrRecognitionVerified=$false}
+ $json=$record|ConvertTo-Json -Depth 20;if($json-match'(?i)([A-Z]:\\|\\Users\\|runneradmin|RUNNER_TEMP|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|raw\.log|\.pdf-workstation)'){throw 'Installed receipt contains host or credential data.'};[IO.File]::WriteAllText((Join-Path $OutputRoot 'default-expanded-page-tools-rehearsal.json'),$json,[Text.UTF8Encoding]::new($false))
+}
+
+Assert-ProofSourceParameters
+if($ProofSource-ceq'draft'){
 if($TargetVersion-cnotmatch'^\d+\.\d+\.\d+$'-or$TargetTag-cne('v'+$TargetVersion)){throw 'Target version and stable tag are malformed or inconsistent.'}
 $token=$env:GITHUB_TOKEN;if([string]::IsNullOrWhiteSpace($token)){throw 'GitHub token is unavailable for exact proof reacquisition.'};Assert-Step1ArtifactMetadata $token
 $proofRoot=Resolve-RunnerPath $DraftProofRoot $env:RUNNER_TEMP -MustExist;$assetRoot=Resolve-RunnerPath $AssetRoot $env:RUNNER_TEMP -MustBeFresh;$work=Resolve-RunnerPath $WorkRoot $env:RUNNER_TEMP -MustBeFresh;$output=Resolve-RunnerPath $OutputRoot $env:RUNNER_TEMP -MustBeFresh;$drivers=Resolve-RunnerPath $WebDriverRoot $env:RUNNER_TEMP -MustExist
@@ -117,6 +169,13 @@ $independentWork=Join-Path $work 'independent-draft-work';$independentOutput=Joi
 & (Join-Path $PSScriptRoot 'verify-default-draft.ps1') -ProjectRoot $ProjectRoot -TargetSourceRoot $TargetSourceRoot -AssetRoot $assetRoot -WorkRoot $independentWork -OutputRoot $independentOutput -WorkflowSourceRevision $WorkflowSourceRevision -TargetVersion $TargetVersion -TargetTag $TargetTag -TargetSourceRevision $TargetSourceRevision -TargetReleaseId $TargetReleaseId -InstallerAssetId $InstallerAssetId -InstallerName $InstallerName -InstallerBytes $InstallerBytes -InstallerSha256 $InstallerSha256 -SignatureAssetId $SignatureAssetId -SignatureBytes $SignatureBytes -SignatureSha256 $SignatureSha256 -ManifestAssetId $ManifestAssetId -ManifestBytes $ManifestBytes -ManifestSha256 $ManifestSha256 -ExpectedPublisher $ExpectedPublisher
 $independent=Get-Content (Join-Path $independentOutput 'default-draft-verification.json') -Raw -Encoding UTF8|ConvertFrom-Json;Assert-IndependentReceiptParity $receipt $independent
 $env:GITHUB_TOKEN=$null;$env:GH_TOKEN=$null;$token=$null
+}else{
+if($TargetVersion-cnotmatch'^\d+\.\d+\.\d+$'-or$WorkflowSourceRevision-cnotmatch'^[a-f0-9]{40}$'-or$TargetSourceRevision-cnotmatch'^[a-f0-9]{40}$'){throw 'Rehearsal target identity is malformed.'}
+$env:GITHUB_TOKEN=$null;$env:GH_TOKEN=$null
+$proofRoot=Resolve-RunnerPath $DraftProofRoot $env:RUNNER_TEMP -MustExist;$assetRoot=Resolve-RunnerPath $ArtifactRoot $env:RUNNER_TEMP -MustExist;$work=Resolve-RunnerPath $WorkRoot $env:RUNNER_TEMP -MustBeFresh;$output=Resolve-RunnerPath $OutputRoot $env:RUNNER_TEMP -MustBeFresh;$drivers=Resolve-RunnerPath $WebDriverRoot $env:RUNNER_TEMP -MustExist
+$rehearsal=Read-DefaultArtifactRehearsal $proofRoot $assetRoot;$receipt=$rehearsal.Receipt;$sets=$rehearsal.Sets
+$sourceBinding=Assert-FeatureSourceParity
+}
 $installer=Join-Path $assetRoot $InstallerName;$installRoot=[IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'PDF Workstation')).TrimEnd('\');$settingsRoot=[IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'local.pdfworkstation.desktop')).TrimEnd('\');$registry='Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\PDF Workstation'
 $fresh=Get-FreshInstallFacts $installRoot $settingsRoot $registry @($installer);Assert-FreshInstallFacts $fresh
 $baselineProcesses=Get-ConflictingProcessFacts @($installer);Assert-EmptyProcessFacts $baselineProcesses 'Baseline'
@@ -137,4 +196,4 @@ try{
  }catch{$cleanupFailure=$_}
 }
 Complete-PrimaryAndCleanup $primaryFailure $cleanupFailure
-Write-InstalledRecord $sourceBinding $receipt $image $organizer $structural $baselineProcesses $finalProcesses
+if($ProofSource-ceq'draft'){Write-InstalledRecord $sourceBinding $receipt $image $organizer $structural $baselineProcesses $finalProcesses}else{Write-RehearsalInstalledRecord $sourceBinding $rehearsal.Binding $image $organizer $structural $baselineProcesses $finalProcesses}
