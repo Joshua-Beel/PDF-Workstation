@@ -294,15 +294,16 @@ function Invoke-ImagePageNativeSave {
         [Parameter(Mandatory = $true)][long]$ProcessStartUtcTicks,
         [Parameter(Mandatory = $true)][object[]]$NativeBaseline,
         [Parameter(Mandatory = $true)][string]$OutputPath,
-        [Parameter(Mandatory = $true)][datetime]$Deadline
+        [Parameter(Mandatory = $true)][datetime]$Deadline,
+        [string]$SuggestedName = ''
     )
     $surface = Wait-NewProcessNativeWindowSurface -ProcessId $ProcessId -Baseline $NativeBaseline -AnchorNames @('Save') -AnchorControlTypes @('ControlType.Button') -Stage 'save-output-dialog' -Deadline $Deadline
     $roles = Get-ValidatedBindingNativeRoles -Binding $surface
     if ($null -eq $roles -or $null -eq $roles.PSObject.Properties['save']) { throw 'Image page-tools Save dialog did not expose exact native roles.' }
     $remaining = [int][Math]::Min(120000,[Math]::Max(1,[Math]::Ceiling(($Deadline - [datetime]::UtcNow).TotalMilliseconds)))
     $deadlineTick = [Environment]::TickCount64 + $remaining
-    Set-BoundNativeSaveFileNameExact -ProcessId $ProcessId -ProcessStartUtcTicks $ProcessStartUtcTicks -Binding $surface -Value $OutputPath -DeadlineTickCount $deadlineTick
-    Invoke-BoundNativeSaveButtonExact -ProcessId $ProcessId -ProcessStartUtcTicks $ProcessStartUtcTicks -Binding $surface -DeadlineTickCount $deadlineTick
+    Set-BoundNativeSaveFileNameExact -ProcessId $ProcessId -ProcessStartUtcTicks $ProcessStartUtcTicks -Binding $surface -Value $OutputPath -DeadlineTickCount $deadlineTick -AwaitSuggestion -SuggestedName $SuggestedName
+    Invoke-BoundNativeSaveButtonExact -ProcessId $ProcessId -ProcessStartUtcTicks $ProcessStartUtcTicks -Binding $surface -DeadlineTickCount $deadlineTick -ExpectedFileName $OutputPath
     Wait-BoundProcessUiSurfaceClosed -ProcessId $ProcessId -Binding $surface -Stage 'save-output-dialog' -Deadline $Deadline -ProcessStartUtcTicks $ProcessStartUtcTicks -ExpectedNativeSaveFileName $OutputPath -ActionTransport 'native-bm-click-delivered'
     return $true
 }
@@ -325,7 +326,7 @@ function Invoke-ImagePageCreateNativeFlow {
     if ($clicked -isnot [bool] -or -not $clicked) { throw 'The exact Create PDF submit control was unavailable.' }
     $picker = Wait-ReadingProcessBoundPickerTargets -ApplicationProcessId $ProcessId -ApplicationProcessStartUtcTicks $ProcessStartUtcTicks -BaselineSurfaces $baselineSurfaces -BaselineTargets $baselineTargets -Deadline $Deadline
     Submit-ProcessBoundOpenDialog -Binding $picker -ApplicationProcessId $ProcessId -ApplicationProcessStartUtcTicks $ProcessStartUtcTicks -Path $SourceImagePath -Deadline $Deadline
-    $saveVerified = Invoke-ImagePageNativeSave -ProcessId $ProcessId -ProcessStartUtcTicks $ProcessStartUtcTicks -NativeBaseline $nativeBaseline -OutputPath $CreatedPdfPath -Deadline $Deadline
+    $saveVerified = Invoke-ImagePageNativeSave -ProcessId $ProcessId -ProcessStartUtcTicks $ProcessStartUtcTicks -NativeBaseline $nativeBaseline -OutputPath $CreatedPdfPath -Deadline $Deadline -SuggestedName ([IO.Path]::GetFileNameWithoutExtension($SourceImagePath) + '.pdf')
     if ([ReadingNativePickerApi]::IsWindow([IntPtr]$picker.filenameHandle) -or [ReadingNativePickerApi]::IsWindow([IntPtr]$picker.openButtonHandle)) { throw 'The bound source-image picker targets remained after the Save transition.' }
     return [pscustomobject]@{ sourcePickerControlCategory=[string]$picker.filenameControlCategory;createSaveDialogVerified=[bool]$saveVerified }
 }

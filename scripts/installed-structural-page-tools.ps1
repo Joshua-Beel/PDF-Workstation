@@ -258,8 +258,8 @@ function Invoke-StructuralNativeSave {
     if ($null -eq $roles -or $null -eq $roles.PSObject.Properties['save'] -or $null -eq $roles.PSObject.Properties['filenameEdit']) { throw "The $Tool Save dialog did not expose the exact native HWND role contract." }
     $remaining = [int][Math]::Min(120000,[Math]::Max(1,[Math]::Ceiling(($Deadline - [datetime]::UtcNow).TotalMilliseconds)))
     $actionDeadline = [Environment]::TickCount64 + $remaining
-    Set-BoundNativeSaveFileNameExact -ProcessId $ApplicationProcessId -ProcessStartUtcTicks $ApplicationStartTicks -Binding $binding -Value $OutputPath -DeadlineTickCount $actionDeadline
-    Invoke-BoundNativeSaveButtonExact -ProcessId $ApplicationProcessId -ProcessStartUtcTicks $ApplicationStartTicks -Binding $binding -DeadlineTickCount $actionDeadline
+    Set-BoundNativeSaveFileNameExact -ProcessId $ApplicationProcessId -ProcessStartUtcTicks $ApplicationStartTicks -Binding $binding -Value $OutputPath -DeadlineTickCount $actionDeadline -AwaitSuggestion
+    Invoke-BoundNativeSaveButtonExact -ProcessId $ApplicationProcessId -ProcessStartUtcTicks $ApplicationStartTicks -Binding $binding -DeadlineTickCount $actionDeadline -ExpectedFileName $OutputPath
     Wait-BoundProcessUiSurfaceClosed -ProcessId $ApplicationProcessId -Binding $binding -Stage 'save-output-dialog' -Deadline $Deadline -ProcessStartUtcTicks $ApplicationStartTicks -ExpectedNativeSaveFileName $OutputPath -ActionTransport 'native-bm-click-delivered'
     $state = Wait-StructuralDocumentState -SessionId $SessionId -ExpectedName $ExpectedName -ExpectedPages $ExpectedPages -ExpectedTabs $ExpectedTabs -Deadline $Deadline
     $receipt = Wait-StructuralStableFile -Path $OutputPath -Deadline $Deadline

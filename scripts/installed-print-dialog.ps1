@@ -2006,8 +2006,15 @@ function Set-BoundNativeSaveFileNameExact {
         [scriptblock]$NativeWindowProvider,
         [scriptblock]$SetProvider,
         [scriptblock]$ReadProvider,
-        [ValidateRange(1,2000)][int]$SettleMilliseconds = 250
+        [ValidateRange(1,2000)][int]$SettleMilliseconds = 250,
+        [switch]$AwaitSuggestion,
+        [string]$SuggestedName = '',
+        [ValidateRange(1,60000)][int]$SuggestionTimeoutMilliseconds = 20000
     )
+    $diagStart = [Environment]::TickCount64
+    $describe = { param([string]$Name) if ($Name.Length -eq 0) { 'empty' } elseif ($Name -ceq $Value) { 'typed' } elseif ($SuggestedName.Length -gt 0 -and $Name -ceq $SuggestedName) { 'suggested' } elseif ($Name.IndexOfAny([char[]]'\/:') -lt 0 -and $Name.Length -le 64) { 'other:' + $Name } else { 'other-path' } }
+    $diag = { param([string]$Phase,[string]$Name) [Console]::Out.WriteLine(('NATIVE_SAVE_DIAG t={0} phase={1} name={2}' -f ([Environment]::TickCount64 - $diagStart),$Phase,(& $describe $Name))) }
+    if ($SuggestedName.Length -gt 0 -and ($SuggestedName.IndexOfAny([char[]]'\/:') -ge 0 -or $SuggestedName.Length -gt 255)) { throw 'The expected Save dialog suggestion must be a bare file name.' }
     $record = Get-BoundNativeSaveRoleRecord -ProcessId $ProcessId -Binding $Binding -Role 'filenameEdit' -DeadlineTickCount $DeadlineTickCount -NativeWindowProvider $NativeWindowProvider
     $rootHandleValue = Get-NativeSurfaceHandleValue -Identity ([string]$Binding.surfaceRootIdentity)
     $editHandleValue = [long]$record.HandleValue
@@ -2019,6 +2026,17 @@ function Set-BoundNativeSaveFileNameExact {
         else { [string][Smacrobat.PrintVerification.NativeWindows]::ReadSaveFileNameBounded($ProcessId,$ProcessStartUtcTicks,$rootHandleValue,$editHandleValue,$DeadlineTickCount) }
     }
     $pause = { if ([Environment]::TickCount64 + $SettleMilliseconds -ge $DeadlineTickCount) { throw 'Native save filename deadline expired.' }; Start-Sleep -Milliseconds $SettleMilliseconds }
+    $awaiting = $settles -and ($AwaitSuggestion -or $SuggestedName.Length -gt 0)
+    if ($awaiting) {
+        $suggestionEnd = [Math]::Min([Environment]::TickCount64 + $SuggestionTimeoutMilliseconds, $DeadlineTickCount)
+        $seen = $false
+        while ([Environment]::TickCount64 -lt $suggestionEnd) {
+            $current = & $readName
+            if (($SuggestedName.Length -gt 0 -and $current -ceq $SuggestedName) -or ($SuggestedName.Length -eq 0 -and $current.Length -gt 0)) { $seen = $true; & $diag 'suggestion-seen' $current; break }
+            & $pause
+        }
+        if (-not $seen) { & $diag 'suggestion-missing' (& $readName); throw 'The Save dialog never showed the application''s suggested filename, so typing could race its initialization.' }
+    }
     if ($settles) {
         $settleEnd = [Math]::Min([Environment]::TickCount64 + 3000, $DeadlineTickCount)
         $previous = $null
@@ -2028,6 +2046,7 @@ function Set-BoundNativeSaveFileNameExact {
             $previous = $current
             & $pause
         }
+        if ($awaiting) { & $diag 'settled' $current }
     }
     for ($attempt = 1; $attempt -le 4; $attempt++) {
         $set = if ($SetProvider) { & $SetProvider $ProcessId $ProcessStartUtcTicks $rootHandleValue $editHandleValue $Value $DeadlineTickCount } else {
@@ -2036,8 +2055,8 @@ function Set-BoundNativeSaveFileNameExact {
         if ($set -isnot [bool] -or -not $set -or [Environment]::TickCount64 -ge $DeadlineTickCount) { throw 'Native save filename action was not exactly accepted before its deadline.' }
         if (-not $settles) { return }
         $stable = $true
-        foreach ($check in 1..2) { & $pause; if ((& $readName) -cne $Value) { $stable = $false; break } }
-        if ($stable) { return }
+        foreach ($check in 1..2) { & $pause; $observed = & $readName; if ($observed -cne $Value) { $stable = $false; if ($awaiting) { & $diag ('replaced-after-attempt-' + $attempt) $observed }; break } }
+        if ($stable) { if ($awaiting) { & $diag 'typed-stable' $Value }; return }
     }
     throw 'Native save filename did not stay set; the dialog replaced it after it was typed.'
 }
@@ -2049,13 +2068,22 @@ function Invoke-BoundNativeSaveButtonExact {
         [Parameter(Mandatory = $true)]$Binding,
         [Parameter(Mandatory = $true)][long]$DeadlineTickCount,
         [scriptblock]$NativeWindowProvider,
-        [scriptblock]$ClickProvider
+        [scriptblock]$ClickProvider,
+        [string]$ExpectedFileName = '',
+        [scriptblock]$ReadProvider
     )
     $record = Get-BoundNativeSaveRoleRecord -ProcessId $ProcessId -Binding $Binding -Role 'save' -DeadlineTickCount $DeadlineTickCount -NativeWindowProvider $NativeWindowProvider
     $rootHandleValue = Get-NativeSurfaceHandleValue -Identity ([string]$Binding.surfaceRootIdentity)
     $buttonHandleValue = [long]$record.HandleValue
     if ([Environment]::TickCount64 -ge $DeadlineTickCount) { throw 'Native save button deadline expired.' }
-    if ($null -eq $ClickProvider) { Initialize-PrintNativeWindowInterop }
+    if ($null -eq $ClickProvider -or ($ExpectedFileName.Length -gt 0 -and $null -eq $ReadProvider)) { Initialize-PrintNativeWindowInterop }
+    if ($ExpectedFileName.Length -gt 0) {
+        $editRecord = Get-BoundNativeSaveRoleRecord -ProcessId $ProcessId -Binding $Binding -Role 'filenameEdit' -DeadlineTickCount $DeadlineTickCount -NativeWindowProvider $NativeWindowProvider
+        $current = if ($ReadProvider) { [string](& $ReadProvider $ProcessId $ProcessStartUtcTicks $rootHandleValue ([long]$editRecord.HandleValue) $DeadlineTickCount) } else { [string][Smacrobat.PrintVerification.NativeWindows]::ReadSaveFileNameBounded($ProcessId,$ProcessStartUtcTicks,$rootHandleValue,[long]$editRecord.HandleValue,$DeadlineTickCount) }
+        $nameMatches = $current -ceq $ExpectedFileName
+        [Console]::Out.WriteLine(('NATIVE_SAVE_DIAG phase=pre-click name={0}' -f $(if ($nameMatches) { 'typed' } elseif ($current.Length -eq 0) { 'empty' } else { 'replaced' })))
+        if (-not $nameMatches) { throw 'Native save filename was replaced before the Save button was pressed.' }
+    }
     $clicked = if ($ClickProvider) { & $ClickProvider $ProcessId $ProcessStartUtcTicks $rootHandleValue $buttonHandleValue $DeadlineTickCount } else {
         [Smacrobat.PrintVerification.NativeWindows]::ClickSaveButtonExact($ProcessId,$ProcessStartUtcTicks,$rootHandleValue,$buttonHandleValue,$DeadlineTickCount)
     }

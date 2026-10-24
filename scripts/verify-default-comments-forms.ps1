@@ -38,8 +38,8 @@ function Invoke-CommentsFormsNativeSave { param([string]$SessionId,[int]$Process
  $binding=Wait-NewProcessNativeWindowSurface -ProcessId $ProcessId -Baseline $baseline -AnchorNames @('Save') -AnchorControlTypes @('ControlType.Button') -Stage 'save-output-dialog' -Deadline $Deadline
  $roles=Get-ValidatedBindingNativeRoles -Binding $binding;if($null-eq$roles-or$null-eq$roles.PSObject.Properties['save']-or$null-eq$roles.PSObject.Properties['filenameEdit']){throw 'Comments/forms Save dialog lacked exact native roles.'}
  $remaining=[int][Math]::Min(120000,[Math]::Max(1,[Math]::Ceiling(($Deadline-[datetime]::UtcNow).TotalMilliseconds)));$tick=[Environment]::TickCount64+$remaining
- Set-BoundNativeSaveFileNameExact -ProcessId $ProcessId -ProcessStartUtcTicks $ProcessStartUtcTicks -Binding $binding -Value $OutputPath -DeadlineTickCount $tick
- Invoke-BoundNativeSaveButtonExact -ProcessId $ProcessId -ProcessStartUtcTicks $ProcessStartUtcTicks -Binding $binding -DeadlineTickCount $tick
+ Set-BoundNativeSaveFileNameExact -ProcessId $ProcessId -ProcessStartUtcTicks $ProcessStartUtcTicks -Binding $binding -Value $OutputPath -DeadlineTickCount $tick -AwaitSuggestion
+ Invoke-BoundNativeSaveButtonExact -ProcessId $ProcessId -ProcessStartUtcTicks $ProcessStartUtcTicks -Binding $binding -DeadlineTickCount $tick -ExpectedFileName $OutputPath
  Wait-BoundProcessUiSurfaceClosed -ProcessId $ProcessId -Binding $binding -Stage 'save-output-dialog' -Deadline $Deadline -ProcessStartUtcTicks $ProcessStartUtcTicks -ExpectedNativeSaveFileName $OutputPath -ActionTransport 'native-bm-click-delivered'
  $null=Wait-ImagePageStableFile -Path $OutputPath -Deadline $Deadline;return Get-CommentsFormsReceipt $OutputPath
 }
