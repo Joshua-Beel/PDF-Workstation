@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- Rehearsal fixes, round 3: image and structural Save dialogs keep the app's own suggested name (checked against the dialog's folder), comments and forms type the filename as keyboard input, and the PDFium fetch retries up to 3 times (SM6; scripts and tests only).
 - Rehearsal fixes, round 2: the recovery check waits for page 1 to be selected before rotating (it had rotated the still-selected page 2) and checks the rotated thumbnails; the Save-dialog wait accepts the suggestion with its extension hidden (SM6; scripts and tests only).
 - Rehearsal fixes: the recovery check now really moves to page 2 before the edit (its old synthetic blur never reached React), and app Save dialogs are typed into only after the app's suggested name appears, with a re-check before Save (SM6; scripts and tests only).
 - Review fixes for the input-driven signed checks: the reading-tools source record no longer claims blob verification it does not perform, the OCR upgrade workflow checks source-revision ancestry and validates artifact metadata before its second checkout (SM6b).

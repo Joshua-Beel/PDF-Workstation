@@ -258,8 +258,8 @@ function Invoke-StructuralNativeSave {
     if ($null -eq $roles -or $null -eq $roles.PSObject.Properties['save'] -or $null -eq $roles.PSObject.Properties['filenameEdit']) { throw "The $Tool Save dialog did not expose the exact native HWND role contract." }
     $remaining = [int][Math]::Min(120000,[Math]::Max(1,[Math]::Ceiling(($Deadline - [datetime]::UtcNow).TotalMilliseconds)))
     $actionDeadline = [Environment]::TickCount64 + $remaining
-    Set-BoundNativeSaveFileNameExact -ProcessId $ApplicationProcessId -ProcessStartUtcTicks $ApplicationStartTicks -Binding $binding -Value $OutputPath -DeadlineTickCount $actionDeadline -AwaitSuggestion
-    Invoke-BoundNativeSaveButtonExact -ProcessId $ApplicationProcessId -ProcessStartUtcTicks $ApplicationStartTicks -Binding $binding -DeadlineTickCount $actionDeadline -ExpectedFileName $OutputPath
+    Set-BoundNativeSaveFileNameExact -ProcessId $ApplicationProcessId -ProcessStartUtcTicks $ApplicationStartTicks -Binding $binding -Value $OutputPath -DeadlineTickCount $actionDeadline -AwaitSuggestion -SuggestedName ([IO.Path]::GetFileName($OutputPath)) -AcceptSuggestion
+    Invoke-BoundNativeSaveButtonExact -ProcessId $ApplicationProcessId -ProcessStartUtcTicks $ApplicationStartTicks -Binding $binding -DeadlineTickCount $actionDeadline -ExpectedSuggestion ([IO.Path]::GetFileName($OutputPath))
     Wait-BoundProcessUiSurfaceClosed -ProcessId $ApplicationProcessId -Binding $binding -Stage 'save-output-dialog' -Deadline $Deadline -ProcessStartUtcTicks $ApplicationStartTicks -ExpectedNativeSaveFileName $OutputPath -ActionTransport 'native-bm-click-delivered'
     $state = Wait-StructuralDocumentState -SessionId $SessionId -ExpectedName $ExpectedName -ExpectedPages $ExpectedPages -ExpectedTabs $ExpectedTabs -Deadline $Deadline
     $receipt = Wait-StructuralStableFile -Path $OutputPath -Deadline $Deadline
@@ -428,6 +428,7 @@ function Invoke-InstalledStructuralPageTools {
     $insertFingerprints = [string[]]@($firstFingerprints[0..1] + $secondFingerprints + $firstFingerprints[2..5])
     $replaceFingerprints = [string[]]@(@($firstFingerprints[0]) + $secondFingerprints + $firstFingerprints[3..5])
     foreach ($path in @($CombineOutputPath,$InsertOutputPath,$ReplaceOutputPath)) { if (Test-Path -LiteralPath $path) { throw 'Structural output paths must be fresh.' }; Assert-NoReparseAncestors -Path $path }
+    if ([IO.Path]::GetFileName($CombineOutputPath) -cne 'combined.pdf' -or [IO.Path]::GetFileName($InsertOutputPath) -cne 'inserted-pages.pdf' -or [IO.Path]::GetFileName($ReplaceOutputPath) -cne 'replaced-pages.pdf') { throw 'Structural outputs must use the application''s suggested names.' }
     $distinctOutputs = @(@($CombineOutputPath,$InsertOutputPath,$ReplaceOutputPath) | ForEach-Object { [IO.Path]::GetFullPath($_).ToLowerInvariant() } | Sort-Object -Unique)
     if ($distinctOutputs.Count -ne 3) { throw 'Structural output paths must be distinct.' }
     if (Test-Path -LiteralPath $ProfileRoot) { throw 'Structural page-tools WebView profile must be fresh.' }

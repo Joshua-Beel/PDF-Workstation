@@ -131,18 +131,104 @@ describe('default Step 2 oracles', () => {
     expect(result.stdout).toContain('NATIVE_SAVE_DIAG phase=pre-click name=replaced');
   }, 90_000);
 
-  it('waits for the app suggestion in every app Save dialog flow and checks the name again before Save', () => {
+  it('accepts the app suggestion where it is deterministic, types like a keyboard where a specific name is needed, and binds outputs to the app source', () => {
     const image = readFileSync('scripts/installed-image-page-tools.ps1', 'utf8');
-    expect(image).toContain('-Value $OutputPath -DeadlineTickCount $deadlineTick -AwaitSuggestion -SuggestedName $SuggestedName');
-    expect(image).toContain('-Binding $surface -DeadlineTickCount $deadlineTick -ExpectedFileName $OutputPath');
+    expect(image).toContain('-Value $OutputPath -DeadlineTickCount $deadlineTick -AwaitSuggestion -SuggestedName $SuggestedName -AcceptSuggestion');
+    expect(image).toContain('-Binding $surface -DeadlineTickCount $deadlineTick -ExpectedSuggestion $SuggestedName');
     expect(image).toContain("-OutputPath $CreatedPdfPath -Deadline $Deadline -SuggestedName ([IO.Path]::GetFileNameWithoutExtension($SourceImagePath) + '.pdf')");
+    expect(image).toContain("-OutputPath $ExportedPngPath -Deadline $Deadline -SuggestedName ([IO.Path]::GetFileNameWithoutExtension($ExportSourcePdfPath) + '-page-1.png')");
+    expect(image).toContain("throw 'Image page-tools outputs must be the application''s suggested names in the source image folder.'");
     const structural = readFileSync('scripts/installed-structural-page-tools.ps1', 'utf8');
-    expect(structural).toContain('-DeadlineTickCount $actionDeadline -AwaitSuggestion');
-    expect(structural).toContain('-DeadlineTickCount $actionDeadline -ExpectedFileName $OutputPath');
+    expect(structural).toContain('-DeadlineTickCount $actionDeadline -AwaitSuggestion -SuggestedName ([IO.Path]::GetFileName($OutputPath)) -AcceptSuggestion');
+    expect(structural).toContain('-DeadlineTickCount $actionDeadline -ExpectedSuggestion ([IO.Path]::GetFileName($OutputPath))');
+    expect(structural).toContain("-cne 'combined.pdf' -or [IO.Path]::GetFileName($InsertOutputPath) -cne 'inserted-pages.pdf' -or [IO.Path]::GetFileName($ReplaceOutputPath) -cne 'replaced-pages.pdf'");
     const forms = readFileSync('scripts/verify-default-comments-forms.ps1', 'utf8');
-    expect(forms).toContain('-DeadlineTickCount $tick -AwaitSuggestion');
+    expect(forms).toContain('-DeadlineTickCount $tick -AwaitSuggestion -Transport keyboard');
     expect(forms).toContain('-DeadlineTickCount $tick -ExpectedFileName $OutputPath');
+    const main = readFileSync('src-tauri/src/main.rs', 'utf8');
+    for (const name of ['combined.pdf', 'inserted-pages.pdf', 'replaced-pages.pdf']) expect(main).toContain(`.set_file_name("${name}")`);
+    expect(main).toContain('let suggested = format!("{}.pdf", source.file_stem().unwrap_or_default().to_string_lossy());');
+    expect(readFileSync('src-tauri/src/service.rs', 'utf8')).toContain('Ok(PageImagePreflight { suggested_name: format!("{stem}-page-{}.{}", usize::from(page) + 1, format.extension()) })');
+    for (const verifier of ['scripts/verify-default-expanded-page-tools.ps1', 'scripts/verify-signed-expanded-page-tools.ps1']) {
+      const text = readFileSync(verifier, 'utf8');
+      for (const name of ['image-source.pdf', 'image-source-page-1.png', 'combined.pdf', 'inserted-pages.pdf', 'replaced-pages.pdf']) expect(text, verifier).toContain(`(Join-Path $work '${name}')`);
+    }
   });
+
+  it('accepts a settled suggestion without typing only in the expected folder, and the Save pre-check accepts the suggestion with its extension hidden', () => {
+    const stubs = [
+      "function Get-BoundNativeSaveRoleRecord { param($ProcessId,$Binding,$Role) [pscustomobject]@{ HandleValue = $(if ($Role -ceq 'save') { 601 } else { 505 }) } }",
+      "function Get-NativeSurfaceHandleValue { 500 }",
+      "function Initialize-PrintNativeWindowInterop { throw 'real interop must not load in this test' }",
+      "$binding = [pscustomobject]@{ surfaceRootIdentity = 'hwnd:500|native' }",
+      "$value = 'D:\\work\\image-source.pdf'",
+      "function Run-Accept([string]$Shown, [string]$Folder, [string]$Output = $value) {",
+      "  $script:sets = 0",
+      "  $set = { param($p, $t, $r, $e, $v, $d) $script:sets++; $true }",
+      "  $read = { param($p, $t, $r, $e, $d) $Shown }",
+      "  $folderRead = { param($p, $t, $r, $d) $Folder }",
+      "  Set-BoundNativeSaveFileNameExact -ProcessId 7319 -ProcessStartUtcTicks 638500000000000000L -Binding $binding -Value $Output -DeadlineTickCount ([Environment]::TickCount64 + 30000) -SetProvider $set -ReadProvider $read -FolderProvider $folderRead -SettleMilliseconds 5 -AwaitSuggestion -SuggestedName 'image-source.pdf' -AcceptSuggestion -SuggestionTimeoutMilliseconds 300",
+      "}",
+      "Run-Accept 'image-source' 'D:\\work'; if ($script:sets -ne 0) { throw 'accepting a suggestion typed a name' }",
+      "Run-Accept 'image-source.pdf' 'D:\\work\\'; if ($script:sets -ne 0) { throw 'trailing slash folder' }",
+      "Run-Accept 'image-source' ''; if ($script:sets -ne 0) { throw 'unavailable folder' }",
+      "$message = $null; try { Run-Accept 'image-source' 'D:\\elsewhere' } catch { $message = $_.Exception.Message }; if ($message -notlike '*not in the expected output folder*') { throw 'folder mismatch accepted' }",
+      "$message = $null; try { Run-Accept 'other.pdf' 'D:\\work' } catch { $message = $_.Exception.Message }; if ($message -notlike '*never showed*') { throw 'wrong suggestion accepted' }",
+      "$message = $null; try { Run-Accept 'image-source' 'D:\\work' 'D:\\work\\created.pdf' } catch { $message = $_.Exception.Message }; if ($message -notlike '*named exactly as the suggestion*') { throw 'mismatched output accepted' }",
+      "$script:clicks = 0; $click = { param($p, $t, $r, $b, $d) $script:clicks++; $true }",
+      "foreach ($shown in @('image-source', 'IMAGE-SOURCE.pdf')) { Invoke-BoundNativeSaveButtonExact -ProcessId 7319 -ProcessStartUtcTicks 638500000000000000L -Binding $binding -DeadlineTickCount ([Environment]::TickCount64 + 20000) -ClickProvider $click -ExpectedSuggestion 'image-source.pdf' -ReadProvider ([scriptblock]::Create(\"'\" + $shown + \"'\")) }",
+      "if ($script:clicks -ne 2) { throw 'suggestion pre-check refused' }",
+      "$message = $null; try { Invoke-BoundNativeSaveButtonExact -ProcessId 7319 -ProcessStartUtcTicks 638500000000000000L -Binding $binding -DeadlineTickCount ([Environment]::TickCount64 + 20000) -ClickProvider $click -ExpectedSuggestion 'image-source.pdf' -ReadProvider { 'created.pdf' } } catch { $message = $_.Exception.Message }; if ($message -notlike '*replaced before*' -or $script:clicks -ne 2) { throw 'changed suggestion clicked' }",
+      "$message = $null; try { Invoke-BoundNativeSaveButtonExact -ProcessId 7319 -ProcessStartUtcTicks 638500000000000000L -Binding $binding -DeadlineTickCount ([Environment]::TickCount64 + 20000) -ClickProvider $click -ExpectedSuggestion 'a.pdf' -ExpectedFileName 'b.pdf' -ReadProvider { 'a' } } catch { $message = $_.Exception.Message }; if ($message -notlike '*not both*') { throw 'both checks accepted' }",
+    ].join('\n');
+    const result = runWithFunctions('installed-print-dialog.ps1', ['Set-BoundNativeSaveFileNameExact', 'Invoke-BoundNativeSaveButtonExact'], stubs);
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(result.stdout).toContain('PASS');
+    expect(result.stdout).toMatch(/phase=dialog-folder state=match/);
+    expect(result.stdout).toMatch(/phase=dialog-folder state=unavailable/);
+    expect(result.stdout).toMatch(/phase=dialog-folder state=mismatch/);
+    expect(result.stdout).toMatch(/phase=accepted-suggestion name=suggested/);
+    expect(result.stdout).toContain('NATIVE_SAVE_DIAG phase=pre-click name=suggested');
+    expect(result.stdout).not.toMatch(/work|elsewhere/);
+  }, 90_000);
+
+  it('types a filename as keyboard characters through the bounded native helper', () => {
+    const source = readFileSync('scripts/installed-print-dialog.ps1', 'utf8');
+    const typed = source.slice(source.indexOf('public static bool TypeSaveFileNameExact'), source.indexOf('public static string ReadSaveFolderBounded'));
+    expect(typed).toContain('Call(edit, EM_SETSEL, IntPtr.Zero, new IntPtr(-1), deadline);');
+    expect(typed).toContain('Call(edit, WM_CHAR, new IntPtr(character), new IntPtr(1), deadline);');
+    expect(typed).toContain('if (character < 0x20 || character == 0x7F) throw');
+    expect(typed).toContain('ValidateSaveFileNameEdit(processId, root, edit);');
+    expect(typed).toContain('was not exactly revalidated after keyboard input');
+    expect(typed).not.toContain('WM_SETTEXT');
+    expect(source).toContain("elseif ($Transport -ceq 'keyboard') {\n            [Smacrobat.PrintVerification.NativeWindows]::TypeSaveFileNameExact(".replace(/\n/g, source.includes('\r\n') ? '\r\n' : '\n'));
+    const folder = source.slice(source.indexOf('public static string ReadSaveFolderBounded'), source.indexOf('public static string ReadSaveFileNameBounded'));
+    expect(folder).toContain('GetDlgCtrlID(hwnd) == 1001 && ClassOf(GetParent(hwnd)).Equals("Breadcrumb Parent", StringComparison.Ordinal)');
+    expect(folder).toContain('if (crumbs.Count != 1) return "";');
+  });
+
+  it('retries the pinned PDFium metadata and archive fetches a bounded number of times and still verifies them', () => {
+    const result = runWithFunctions('prepare-default-draft-pdfium.ps1', ['Invoke-PdfiumFetchWithRetry'], [
+      "$script:delays = @(); $sleep = { param($s) $script:delays += $s }",
+      "$script:calls = 0; $value = Invoke-PdfiumFetchWithRetry -Kind 'metadata' -SleepProvider $sleep -Action { $script:calls++; if ($script:calls -lt 3) { throw 'Pinned PDFium metadata request failed with HTTP status 503.' }; 'ok' }",
+      "if ($value -cne 'ok' -or $script:calls -ne 3 -or ($script:delays -join ',') -cne '5,15') { throw ('retry: ' + $script:calls + ' ' + ($script:delays -join ',')) }",
+      "$script:calls = 0; $script:delays = @(); $message = $null; try { Invoke-PdfiumFetchWithRetry -Kind 'download' -SleepProvider $sleep -Action { $script:calls++; throw 'Pinned PDFium download failed with HTTP status 502.' } } catch { $message = $_.Exception.Message }",
+      "if ($message -notlike '*HTTP status 502*' -or $script:calls -ne 3) { throw 'exhausted retry' }",
+      "$script:calls = 0; $first = Invoke-PdfiumFetchWithRetry -Kind 'metadata' -SleepProvider $sleep -Action { $script:calls++; 'first' }; if ($first -cne 'first' -or $script:calls -ne 1) { throw 'success retried' }",
+      "$message = $null; try { Invoke-PdfiumFetchWithRetry -Kind 'x' -DelaySeconds @(0,0,0,0,0,0) -Action { 1 } } catch { $message = $_.Exception.Message }; if ($message -notlike '*out of bounds*') { throw 'unbounded retries' }",
+      "$message = $null; try { Invoke-PdfiumFetchWithRetry -Kind 'x' -DelaySeconds @(0,600) -SleepProvider $sleep -Action { throw 'boom' } } catch { $message = $_.Exception.Message }; if ($message -notlike '*out of bounds*') { throw 'unbounded delay' }",
+    ].join('\n'));
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(result.stdout).toContain('PASS');
+    expect(result.stdout).toContain('PDFIUM_FETCH_DIAG kind=metadata attempt=1 failed=Pinned PDFium metadata request failed with HTTP status 503.');
+    expect(result.stdout).toContain('PDFIUM_FETCH_DIAG kind=download attempt=3 failed=Pinned PDFium download failed with HTTP status 502.');
+    const script = readFileSync('scripts/prepare-default-draft-pdfium.ps1', 'utf8');
+    expect(script).toContain("$metadata=Invoke-PdfiumFetchWithRetry -Kind 'metadata' -Action {");
+    expect(script).toContain("$null=Invoke-PdfiumFetchWithRetry -Kind 'download' -Action {");
+    expect(script.indexOf("Invoke-PdfiumFetchWithRetry -Kind 'metadata'")).toBeLessThan(script.indexOf('Assert-PdfiumReleaseMetadata $metadata'));
+    expect(script).toContain("if((Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash-cne$assetSha256){throw 'Pinned PDFium archive hash differs from its receipt.'}");
+    expect(script).toContain("if($total-ne$assetBytes){throw 'Pinned PDFium download ended before its receipt.'}");
+  }, 90_000);
 
   it('navigates Recovery A with a real React click, because React 18 handles onBlur through focusout and ignores a synthetic blur event', () => {
     const recovery = readFileSync('scripts/verify-default-recovery.ps1', 'utf8');

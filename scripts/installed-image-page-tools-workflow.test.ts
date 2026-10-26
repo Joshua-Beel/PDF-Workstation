@@ -74,8 +74,8 @@ describe('installed image page-tools verifier', () => {
       function Get-ReadingPickerTargetSnapshot{@()}
       function Assert-ReadingPickerTargetSnapshot{}
       function Get-ProcessNativeWindowSnapshot{@()}
-      try{Invoke-ImagePageCreateNativeFlow -SessionId 'session' -ProcessId 42 -ProcessStartUtcTicks 10 -SourceImagePath 'C:\proof\source.png' -CreatedPdfPath 'C:\proof\created.pdf' -Deadline ([datetime]::UtcNow.AddSeconds(5))}catch{}
-      try{Invoke-ImagePageExportNativeFlow -SessionId 'session' -ProcessId 42 -ProcessStartUtcTicks 10 -ExportedPngPath 'C:\proof\exported.png' -Deadline ([datetime]::UtcNow.AddSeconds(5))}catch{}
+      try{Invoke-ImagePageCreateNativeFlow -SessionId 'session' -ProcessId 42 -ProcessStartUtcTicks 10 -SourceImagePath 'C:\proof\source.png' -CreatedPdfPath 'C:\proof\source.pdf' -Deadline ([datetime]::UtcNow.AddSeconds(5))}catch{}
+      try{Invoke-ImagePageExportNativeFlow -SessionId 'session' -ProcessId 42 -ProcessStartUtcTicks 10 -ExportedPngPath 'C:\proof\source-page-1.png' -ExportSourcePdfPath 'C:\proof\source.pdf' -Deadline ([datetime]::UtcNow.AddSeconds(5))}catch{}
       $expectedCreate=@'
 const d=document.querySelector('dialog[aria-labelledby="create-pdf-title"]');const b=d?[...d.querySelectorAll('button')].filter(x=>x.textContent.trim()==='Create PDF'&&!x.disabled):[];if(b.length===1)setTimeout(()=>b[0].click(),0);return b.length===1;
 '@
@@ -145,7 +145,7 @@ const d=document.querySelector('dialog[aria-labelledby="export-image-title"]');c
       function Set-BoundNativeSaveFileNameExact{$script:events.Add('set')}
       function Invoke-BoundNativeSaveButtonExact{$script:events.Add('click')}
       function Wait-BoundProcessUiSurfaceClosed{$script:events.Add('close')}
-      $ok=Invoke-ImagePageNativeSave -ProcessId 42 -ProcessStartUtcTicks 10 -NativeBaseline @([pscustomobject]@{runtimeIdentity='hwnd:1|native'}) -OutputPath 'C:\proof\output.pdf' -Deadline ([datetime]::UtcNow.AddSeconds(5))
+      $ok=Invoke-ImagePageNativeSave -ProcessId 42 -ProcessStartUtcTicks 10 -NativeBaseline @([pscustomobject]@{runtimeIdentity='hwnd:1|native'}) -OutputPath 'C:\proof\output.pdf' -SuggestedName 'output.pdf' -Deadline ([datetime]::UtcNow.AddSeconds(5))
       if(-not$ok-or($script:events-join',')-cne'bind,validate,set,click,close'){throw ('Unexpected native Save order: '+($script:events-join','))}
     `));
     expect(result.status, result.stderr || result.stdout).toBe(0);
@@ -321,7 +321,7 @@ public static class ExpectedImagePageFixture {
       [IO.File]::WriteAllText((Join-Path $drivers 'webdriver-receipt.json'),$driverRecord,[Text.UTF8Encoding]::new($false))
       $application=Join-Path $root 'PDF Workstation.exe';$pdfium=Join-Path $root 'pdfium.dll';$source=Join-Path $root 'source.png'
       [IO.File]::WriteAllBytes($application,[byte[]](1));[IO.File]::WriteAllBytes($pdfium,[byte[]](2));[IO.File]::WriteAllBytes($source,[byte[]](3))
-      $created=Join-Path $root 'created.pdf';$exported=Join-Path $root 'exported.png'
+      $created=Join-Path $root 'source.pdf';$exported=Join-Path $root 'source-page-1.png'
       $provider={param($app,$pdfiumPath,$tauri,$edge,$profileRoot,$settingsRoot,$sourcePath,$createdPath,$exportedPath,$edgeVersion)
         [IO.File]::WriteAllBytes($createdPath,[byte[]](4));[IO.File]::WriteAllBytes($exportedPath,[byte[]](5));$createdReceipt=New-Receipt $createdPath;$exportedReceipt=New-Receipt $exportedPath
         [IO.File]::WriteAllText((Join-Path $profileRoot 'profile.marker'),'controlled',[Text.UTF8Encoding]::new($false))

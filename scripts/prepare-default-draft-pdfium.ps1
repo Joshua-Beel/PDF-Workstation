@@ -38,16 +38,39 @@ function ConvertFrom-PdfiumTarListing {
  if($facts.Count-ne$expectedEntries.Count-or(Compare-Object $expectedEntries $facts -CaseSensitive)){throw 'Pinned PDFium archive inventory changed.'};return $facts
 }
 
+function Invoke-PdfiumFetchWithRetry {
+ param([scriptblock]$Action,[string]$Kind,[int[]]$DelaySeconds=@(0,5,15),[scriptblock]$SleepProvider)
+ if($DelaySeconds.Count-lt1-or$DelaySeconds.Count-gt5){throw 'PDFium fetch retry count is out of bounds.'}
+ for($attempt=1;$attempt-le$DelaySeconds.Count;$attempt++){
+  $delay=$DelaySeconds[$attempt-1];if($delay-lt0-or$delay-gt60){throw 'PDFium fetch retry delay is out of bounds.'}
+  if($delay-gt0){if($SleepProvider){&$SleepProvider $delay}else{Start-Sleep -Seconds $delay}}
+  try{return (&$Action)}catch{
+   $reason=[string]$_.Exception.Message;if($reason.Length-gt160){$reason=$reason.Substring(0,160)}
+   [Console]::Out.WriteLine(('PDFIUM_FETCH_DIAG kind={0} attempt={1} failed={2}' -f $Kind,$attempt,($reason-replace'[
+]',' ')))
+   if($attempt-ge$DelaySeconds.Count){throw}
+  }
+ }
+}
+
 $target=[IO.Path]::GetFullPath($TargetSourceRoot).TrimEnd('\');$work=[IO.Path]::GetFullPath($WorkRoot).TrimEnd('\')
 if(Test-Path -LiteralPath $work){throw 'PDFium preparation root must be fresh.'};[IO.Directory]::CreateDirectory($work)|Out-Null
 $handler=[Net.Http.HttpClientHandler]::new();$handler.AllowAutoRedirect=$false;$client=[Net.Http.HttpClient]::new($handler);$client.Timeout=[TimeSpan]::FromSeconds(120);$downloadHandler=$null;$downloadClient=$null
 try{
  $client.DefaultRequestHeaders.UserAgent.ParseAdd('Smacrobat-DraftVerifier')
- $metadataResponse=$client.GetAsync($metadataUrl,[Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
- try{if(-not$metadataResponse.IsSuccessStatusCode-or$metadataResponse.RequestMessage.RequestUri.AbsoluteUri-cne$metadataUrl){throw 'Pinned PDFium metadata request failed.'};$metadataStream=$metadataResponse.Content.ReadAsStreamAsync().GetAwaiter().GetResult();$memory=[IO.MemoryStream]::new();try{$buffer=[byte[]]::new(16384);while(($read=$metadataStream.Read($buffer,0,$buffer.Length))-gt0){if($memory.Length+$read-gt1MB){throw 'Pinned PDFium metadata exceeded its bound.'};$memory.Write($buffer,0,$read)};$metadata=[Text.Encoding]::UTF8.GetString($memory.ToArray())|ConvertFrom-Json}finally{$memory.Dispose();$metadataStream.Dispose()}}finally{$metadataResponse.Dispose()}
+ $metadata=Invoke-PdfiumFetchWithRetry -Kind 'metadata' -Action {
+  $metadataResponse=$client.GetAsync($metadataUrl,[Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+  try{if(-not$metadataResponse.IsSuccessStatusCode-or$metadataResponse.RequestMessage.RequestUri.AbsoluteUri-cne$metadataUrl){throw ('Pinned PDFium metadata request failed with HTTP status '+[int]$metadataResponse.StatusCode+'.')};$metadataStream=$metadataResponse.Content.ReadAsStreamAsync().GetAwaiter().GetResult();$memory=[IO.MemoryStream]::new();try{$buffer=[byte[]]::new(16384);while(($read=$metadataStream.Read($buffer,0,$buffer.Length))-gt0){if($memory.Length+$read-gt1MB){throw 'Pinned PDFium metadata exceeded its bound.'};$memory.Write($buffer,0,$read)};$metadata=[Text.Encoding]::UTF8.GetString($memory.ToArray())|ConvertFrom-Json}finally{$memory.Dispose();$metadataStream.Dispose()}}finally{$metadataResponse.Dispose()}
+  $metadata
+ }
  Assert-PdfiumReleaseMetadata $metadata
- $archive=Join-Path $work $assetName;$downloadHandler=[Net.Http.HttpClientHandler]::new();$downloadHandler.AllowAutoRedirect=$true;$downloadHandler.MaxAutomaticRedirections=5;$downloadClient=[Net.Http.HttpClient]::new($downloadHandler);$downloadClient.Timeout=[TimeSpan]::FromSeconds(120);$downloadClient.DefaultRequestHeaders.UserAgent.ParseAdd('Smacrobat-DraftVerifier');$response=$downloadClient.GetAsync($downloadUrl,[Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
- try{if(-not$response.IsSuccessStatusCode){throw 'Pinned PDFium download failed.'};$stream=$response.Content.ReadAsStreamAsync().GetAwaiter().GetResult();$file=[IO.File]::Open($archive,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None);try{[uint64]$total=0;$buffer=[byte[]]::new(65536);while(($read=$stream.Read($buffer,0,$buffer.Length))-gt0){$total+=[uint64]$read;if($total-gt$assetBytes){throw 'Pinned PDFium download exceeded its receipt.'};$file.Write($buffer,0,$read)};if($total-ne$assetBytes){throw 'Pinned PDFium download ended before its receipt.'}}finally{$file.Dispose();$stream.Dispose()}}finally{$response.Dispose()}
+ $archive=Join-Path $work $assetName;$downloadHandler=[Net.Http.HttpClientHandler]::new();$downloadHandler.AllowAutoRedirect=$true;$downloadHandler.MaxAutomaticRedirections=5;$downloadClient=[Net.Http.HttpClient]::new($downloadHandler);$downloadClient.Timeout=[TimeSpan]::FromSeconds(120);$downloadClient.DefaultRequestHeaders.UserAgent.ParseAdd('Smacrobat-DraftVerifier')
+ $null=Invoke-PdfiumFetchWithRetry -Kind 'download' -Action {
+  if(Test-Path -LiteralPath $archive){[IO.File]::Delete($archive)}
+  $response=$downloadClient.GetAsync($downloadUrl,[Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+  try{if(-not$response.IsSuccessStatusCode){throw ('Pinned PDFium download failed with HTTP status '+[int]$response.StatusCode+'.')};$stream=$response.Content.ReadAsStreamAsync().GetAwaiter().GetResult();$file=[IO.File]::Open($archive,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None);try{[uint64]$total=0;$buffer=[byte[]]::new(65536);while(($read=$stream.Read($buffer,0,$buffer.Length))-gt0){$total+=[uint64]$read;if($total-gt$assetBytes){throw 'Pinned PDFium download exceeded its receipt.'};$file.Write($buffer,0,$read)};if($total-ne$assetBytes){throw 'Pinned PDFium download ended before its receipt.'}}finally{$file.Dispose();$stream.Dispose()}}finally{$response.Dispose()}
+  $true
+ }
 }finally{if($null-ne$downloadClient){$downloadClient.Dispose()};if($null-ne$downloadHandler){$downloadHandler.Dispose()};$client.Dispose();$handler.Dispose()}
 if((Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash-cne$assetSha256){throw 'Pinned PDFium archive hash differs from its receipt.'}
 $null=ConvertFrom-PdfiumTarListing (Invoke-BoundedTar @('-tvzf',$archive))

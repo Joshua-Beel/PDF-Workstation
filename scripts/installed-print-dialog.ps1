@@ -136,6 +136,8 @@ namespace Smacrobat.PrintVerification {
         private const uint BM_GETCHECK = 0x00F0;
         private const uint WM_COMMAND = 0x0111;
         private const uint WM_SETTEXT = 0x000C;
+        private const uint WM_CHAR = 0x0102;
+        private const uint EM_SETSEL = 0x00B1;
         private const uint WM_GETTEXT = 0x000D;
         private const uint WM_GETTEXTLENGTH = 0x000E;
         private const int CBN_SELCHANGE = 1;
@@ -346,6 +348,41 @@ namespace Smacrobat.PrintVerification {
             ValidateSaveFileNameEdit(processId, root, edit);
             if (Environment.TickCount64 >= deadline) throw new TimeoutException("Native save filename deadline expired.");
             return true;
+        }
+
+        public static bool TypeSaveFileNameExact(int processId, long processStartUtcTicks, long rootHandleValue, long editHandleValue, string value, long deadline) {
+            if (processId <= 0 || processStartUtcTicks <= 0 || rootHandleValue == 0 || editHandleValue == 0 || String.IsNullOrEmpty(value) || value.Length > 1024 || deadline <= Environment.TickCount64 || deadline - Environment.TickCount64 > 120000) throw new ArgumentOutOfRangeException();
+            foreach (char character in value) if (character < 0x20 || character == 0x7F) throw new ArgumentOutOfRangeException(nameof(value));
+            ValidateProcessStart(processId, processStartUtcTicks);
+            var root = new IntPtr(rootHandleValue); var edit = new IntPtr(editHandleValue);
+            ValidateSaveFileNameEdit(processId, root, edit);
+            Call(edit, EM_SETSEL, IntPtr.Zero, new IntPtr(-1), deadline);
+            Call(edit, WM_CHAR, new IntPtr(0x08), new IntPtr(1), deadline);
+            if (ReadWindowTextBounded(edit, deadline).Length != 0) throw new InvalidOperationException("Native save filename could not be cleared by keyboard input.");
+            foreach (char character in value) {
+                if (Environment.TickCount64 >= deadline) throw new TimeoutException("Native save filename deadline expired.");
+                Call(edit, WM_CHAR, new IntPtr(character), new IntPtr(1), deadline);
+            }
+            if (!ReadWindowTextBounded(edit, deadline).Equals(value, StringComparison.Ordinal)) throw new InvalidOperationException("Native save filename was not exactly revalidated after keyboard input.");
+            ValidateProcessStart(processId, processStartUtcTicks);
+            ValidateSaveFileNameEdit(processId, root, edit);
+            if (Environment.TickCount64 >= deadline) throw new TimeoutException("Native save filename deadline expired.");
+            return true;
+        }
+
+        public static string ReadSaveFolderBounded(int processId, long processStartUtcTicks, long rootHandleValue, long deadline) {
+            if (processId <= 0 || processStartUtcTicks <= 0 || rootHandleValue == 0 || deadline <= Environment.TickCount64 || deadline - Environment.TickCount64 > 120000) throw new ArgumentOutOfRangeException();
+            ValidateProcessStart(processId, processStartUtcTicks);
+            var root = new IntPtr(rootHandleValue);
+            ValidateSaveRoot(processId, root);
+            var crumbs = new List<IntPtr>();
+            EnumChildWindows(root, (hwnd, state) => { if (IsOwned(hwnd, processId) && ClassOf(hwnd).Equals("ToolbarWindow32", StringComparison.Ordinal) && GetDlgCtrlID(hwnd) == 1001 && ClassOf(GetParent(hwnd)).Equals("Breadcrumb Parent", StringComparison.Ordinal)) crumbs.Add(hwnd); return crumbs.Count < 4; }, IntPtr.Zero);
+            if (crumbs.Count != 1) return "";
+            string text = ReadWindowTextBounded(crumbs[0], deadline);
+            ValidateProcessStart(processId, processStartUtcTicks);
+            ValidateSaveRoot(processId, root);
+            const string prefix = "Address: ";
+            return text.StartsWith(prefix, StringComparison.Ordinal) ? text.Substring(prefix.Length) : "";
         }
 
         public static string ReadSaveFileNameBounded(int processId, long processStartUtcTicks, long rootHandleValue, long editHandleValue, long deadline) {
@@ -2009,9 +2046,13 @@ function Set-BoundNativeSaveFileNameExact {
         [ValidateRange(1,2000)][int]$SettleMilliseconds = 250,
         [switch]$AwaitSuggestion,
         [string]$SuggestedName = '',
-        [ValidateRange(1,60000)][int]$SuggestionTimeoutMilliseconds = 20000
+        [ValidateRange(1,60000)][int]$SuggestionTimeoutMilliseconds = 20000,
+        [ValidateSet('settext','keyboard')][string]$Transport = 'settext',
+        [switch]$AcceptSuggestion,
+        [scriptblock]$FolderProvider
     )
     $diagStart = [Environment]::TickCount64
+    if ($AcceptSuggestion -and (($SuggestedName.Length -eq 0) -or (-not [IO.Path]::GetFileName($Value).Equals($SuggestedName,[StringComparison]::Ordinal)) -or (($null -ne $SetProvider) -and ($null -eq $ReadProvider)))) { throw 'Accepting the Save dialog suggestion requires the expected output to be named exactly as the suggestion.' }
     $isSuggestion = { param([string]$Name) $SuggestedName.Length -gt 0 -and $Name.Length -gt 0 -and ($Name.Equals($SuggestedName,[StringComparison]::OrdinalIgnoreCase) -or $Name.Equals([IO.Path]::GetFileNameWithoutExtension($SuggestedName),[StringComparison]::OrdinalIgnoreCase)) }
     $describe = { param([string]$Name) if ($Name.Length -eq 0) { 'empty' } elseif ($Name -ceq $Value) { 'typed' } elseif (& $isSuggestion $Name) { 'suggested' } elseif ($Name.IndexOfAny([char[]]'\/:') -lt 0 -and $Name.Length -le 64) { 'other:' + $Name } else { 'other-path' } }
     $diag = { param([string]$Phase,[string]$Name) [Console]::Out.WriteLine(('NATIVE_SAVE_DIAG t={0} phase={1} name={2}' -f ([Environment]::TickCount64 - $diagStart),$Phase,(& $describe $Name))) }
@@ -2049,8 +2090,21 @@ function Set-BoundNativeSaveFileNameExact {
         }
         if ($awaiting) { & $diag 'settled' $current }
     }
+    if ($AcceptSuggestion) {
+        $final = & $readName
+        if (-not (& $isSuggestion $final)) { & $diag 'suggestion-not-kept' $final; throw 'The Save dialog suggestion changed before it could be accepted.' }
+        $folder = if ($FolderProvider) { [string](& $FolderProvider $ProcessId $ProcessStartUtcTicks $rootHandleValue $DeadlineTickCount) } else { [string][Smacrobat.PrintVerification.NativeWindows]::ReadSaveFolderBounded($ProcessId,$ProcessStartUtcTicks,$rootHandleValue,$DeadlineTickCount) }
+        $expectedFolder = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Value)).TrimEnd('\')
+        $folderState = if ($folder.Length -eq 0) { 'unavailable' } elseif ($folder.TrimEnd('\').Equals($expectedFolder,[StringComparison]::OrdinalIgnoreCase)) { 'match' } else { 'mismatch' }
+        [Console]::Out.WriteLine(('NATIVE_SAVE_DIAG t={0} phase=dialog-folder state={1}' -f ([Environment]::TickCount64 - $diagStart),$folderState))
+        if ($folderState -ceq 'mismatch') { throw 'The Save dialog is not in the expected output folder, so its suggested name would land elsewhere.' }
+        & $diag 'accepted-suggestion' $final
+        return
+    }
     for ($attempt = 1; $attempt -le 4; $attempt++) {
-        $set = if ($SetProvider) { & $SetProvider $ProcessId $ProcessStartUtcTicks $rootHandleValue $editHandleValue $Value $DeadlineTickCount } else {
+        $set = if ($SetProvider) { & $SetProvider $ProcessId $ProcessStartUtcTicks $rootHandleValue $editHandleValue $Value $DeadlineTickCount } elseif ($Transport -ceq 'keyboard') {
+            [Smacrobat.PrintVerification.NativeWindows]::TypeSaveFileNameExact($ProcessId,$ProcessStartUtcTicks,$rootHandleValue,$editHandleValue,$Value,$DeadlineTickCount)
+        } else {
             [Smacrobat.PrintVerification.NativeWindows]::SetSaveFileNameExact($ProcessId,$ProcessStartUtcTicks,$rootHandleValue,$editHandleValue,$Value,$DeadlineTickCount)
         }
         if ($set -isnot [bool] -or -not $set -or [Environment]::TickCount64 -ge $DeadlineTickCount) { throw 'Native save filename action was not exactly accepted before its deadline.' }
@@ -2071,18 +2125,22 @@ function Invoke-BoundNativeSaveButtonExact {
         [scriptblock]$NativeWindowProvider,
         [scriptblock]$ClickProvider,
         [string]$ExpectedFileName = '',
-        [scriptblock]$ReadProvider
+        [scriptblock]$ReadProvider,
+        [string]$ExpectedSuggestion = ''
     )
+    if ($ExpectedFileName.Length -gt 0 -and $ExpectedSuggestion.Length -gt 0) { throw 'Pass either a typed filename or an accepted suggestion, not both.' }
     $record = Get-BoundNativeSaveRoleRecord -ProcessId $ProcessId -Binding $Binding -Role 'save' -DeadlineTickCount $DeadlineTickCount -NativeWindowProvider $NativeWindowProvider
     $rootHandleValue = Get-NativeSurfaceHandleValue -Identity ([string]$Binding.surfaceRootIdentity)
     $buttonHandleValue = [long]$record.HandleValue
     if ([Environment]::TickCount64 -ge $DeadlineTickCount) { throw 'Native save button deadline expired.' }
-    if ($null -eq $ClickProvider -or ($ExpectedFileName.Length -gt 0 -and $null -eq $ReadProvider)) { Initialize-PrintNativeWindowInterop }
-    if ($ExpectedFileName.Length -gt 0) {
+    $checking = $ExpectedFileName.Length -gt 0 -or $ExpectedSuggestion.Length -gt 0
+    if ($null -eq $ClickProvider -or ($checking -and $null -eq $ReadProvider)) { Initialize-PrintNativeWindowInterop }
+    if ($checking) {
         $editRecord = Get-BoundNativeSaveRoleRecord -ProcessId $ProcessId -Binding $Binding -Role 'filenameEdit' -DeadlineTickCount $DeadlineTickCount -NativeWindowProvider $NativeWindowProvider
         $current = if ($ReadProvider) { [string](& $ReadProvider $ProcessId $ProcessStartUtcTicks $rootHandleValue ([long]$editRecord.HandleValue) $DeadlineTickCount) } else { [string][Smacrobat.PrintVerification.NativeWindows]::ReadSaveFileNameBounded($ProcessId,$ProcessStartUtcTicks,$rootHandleValue,[long]$editRecord.HandleValue,$DeadlineTickCount) }
-        $nameMatches = $current -ceq $ExpectedFileName
-        [Console]::Out.WriteLine(('NATIVE_SAVE_DIAG phase=pre-click name={0}' -f $(if ($nameMatches) { 'typed' } elseif ($current.Length -eq 0) { 'empty' } else { 'replaced' })))
+        $nameMatches = if ($ExpectedSuggestion.Length -gt 0) { $current.Length -gt 0 -and ($current.Equals($ExpectedSuggestion,[StringComparison]::OrdinalIgnoreCase) -or $current.Equals([IO.Path]::GetFileNameWithoutExtension($ExpectedSuggestion),[StringComparison]::OrdinalIgnoreCase)) } else { $current -ceq $ExpectedFileName }
+        $kind = if ($ExpectedSuggestion.Length -gt 0) { 'suggested' } else { 'typed' }
+        [Console]::Out.WriteLine(('NATIVE_SAVE_DIAG phase=pre-click name={0}' -f $(if ($nameMatches) { $kind } elseif ($current.Length -eq 0) { 'empty' } else { 'replaced' })))
         if (-not $nameMatches) { throw 'Native save filename was replaced before the Save button was pressed.' }
     }
     $clicked = if ($ClickProvider) { & $ClickProvider $ProcessId $ProcessStartUtcTicks $rootHandleValue $buttonHandleValue $DeadlineTickCount } else {

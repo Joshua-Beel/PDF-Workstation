@@ -295,15 +295,16 @@ function Invoke-ImagePageNativeSave {
         [Parameter(Mandatory = $true)][object[]]$NativeBaseline,
         [Parameter(Mandatory = $true)][string]$OutputPath,
         [Parameter(Mandatory = $true)][datetime]$Deadline,
-        [string]$SuggestedName = ''
+        [Parameter(Mandatory = $true)][string]$SuggestedName
     )
+    if (-not [IO.Path]::GetFileName($OutputPath).Equals($SuggestedName,[StringComparison]::Ordinal)) { throw 'Image page-tools outputs must be named exactly as the application suggests.' }
     $surface = Wait-NewProcessNativeWindowSurface -ProcessId $ProcessId -Baseline $NativeBaseline -AnchorNames @('Save') -AnchorControlTypes @('ControlType.Button') -Stage 'save-output-dialog' -Deadline $Deadline
     $roles = Get-ValidatedBindingNativeRoles -Binding $surface
     if ($null -eq $roles -or $null -eq $roles.PSObject.Properties['save']) { throw 'Image page-tools Save dialog did not expose exact native roles.' }
     $remaining = [int][Math]::Min(120000,[Math]::Max(1,[Math]::Ceiling(($Deadline - [datetime]::UtcNow).TotalMilliseconds)))
     $deadlineTick = [Environment]::TickCount64 + $remaining
-    Set-BoundNativeSaveFileNameExact -ProcessId $ProcessId -ProcessStartUtcTicks $ProcessStartUtcTicks -Binding $surface -Value $OutputPath -DeadlineTickCount $deadlineTick -AwaitSuggestion -SuggestedName $SuggestedName
-    Invoke-BoundNativeSaveButtonExact -ProcessId $ProcessId -ProcessStartUtcTicks $ProcessStartUtcTicks -Binding $surface -DeadlineTickCount $deadlineTick -ExpectedFileName $OutputPath
+    Set-BoundNativeSaveFileNameExact -ProcessId $ProcessId -ProcessStartUtcTicks $ProcessStartUtcTicks -Binding $surface -Value $OutputPath -DeadlineTickCount $deadlineTick -AwaitSuggestion -SuggestedName $SuggestedName -AcceptSuggestion
+    Invoke-BoundNativeSaveButtonExact -ProcessId $ProcessId -ProcessStartUtcTicks $ProcessStartUtcTicks -Binding $surface -DeadlineTickCount $deadlineTick -ExpectedSuggestion $SuggestedName
     Wait-BoundProcessUiSurfaceClosed -ProcessId $ProcessId -Binding $surface -Stage 'save-output-dialog' -Deadline $Deadline -ProcessStartUtcTicks $ProcessStartUtcTicks -ExpectedNativeSaveFileName $OutputPath -ActionTransport 'native-bm-click-delivered'
     return $true
 }
@@ -337,12 +338,13 @@ function Invoke-ImagePageExportNativeFlow {
         [Parameter(Mandatory = $true)][int]$ProcessId,
         [Parameter(Mandatory = $true)][long]$ProcessStartUtcTicks,
         [Parameter(Mandatory = $true)][string]$ExportedPngPath,
+        [Parameter(Mandatory = $true)][string]$ExportSourcePdfPath,
         [Parameter(Mandatory = $true)][datetime]$Deadline
     )
     $nativeBaseline = @(Get-ProcessNativeWindowSnapshot -ProcessId $ProcessId -Deadline $Deadline -TopLevelOnly)
     $clicked = Invoke-ImagePageWebDriverScript -SessionId $SessionId -Deadline $Deadline -Stage 'submit-export' -Script "const d=document.querySelector('dialog[aria-labelledby=`"export-image-title`"]');const b=d?[...d.querySelectorAll('button')].filter(x=>x.textContent.trim()==='Export PNG'&&!x.disabled):[];if(b.length===1)setTimeout(()=>b[0].click(),0);return b.length===1;"
     if ($clicked -isnot [bool] -or -not $clicked) { throw 'The exact Export PNG submit control was unavailable.' }
-    return Invoke-ImagePageNativeSave -ProcessId $ProcessId -ProcessStartUtcTicks $ProcessStartUtcTicks -NativeBaseline $nativeBaseline -OutputPath $ExportedPngPath -Deadline $Deadline
+    return Invoke-ImagePageNativeSave -ProcessId $ProcessId -ProcessStartUtcTicks $ProcessStartUtcTicks -NativeBaseline $nativeBaseline -OutputPath $ExportedPngPath -Deadline $Deadline -SuggestedName ([IO.Path]::GetFileNameWithoutExtension($ExportSourcePdfPath) + '-page-1.png')
 }
 
 function Invoke-FreshInstalledImagePageToolsSession {
@@ -456,7 +458,7 @@ function Invoke-RealInstalledImagePageTools {
         if ($exportOpened -isnot [bool] -or -not $exportOpened) { throw 'The exact Export page as image menu control was unavailable.' }
         $exportDefaults = Wait-ImagePageWebDriverOracle -SessionId $sessionId -Script "const d=document.querySelector('dialog[aria-labelledby=`"export-image-title`"]');const f=d?.querySelector('select[aria-label=`"Image format`"]');const r=d?.querySelector('select[aria-label=`"Image resolution`"]');return {dialog:!!d,format:f?.value||'',dpi:r?.value||''};" -Deadline $deadline -Stage 'export-defaults' -Predicate { param($v) [bool]$v.dialog -and [string]$v.format -ceq 'png' -and [string]$v.dpi -ceq '150' }
         $nativeDeadline = Get-ImagePagePhaseDeadline -TotalDeadline $deadline -MaximumMilliseconds $script:ImagePagePins.NativeDialogTimeoutMilliseconds
-        $exportSaveVerified = Invoke-ImagePageExportNativeFlow -SessionId $sessionId -ProcessId $appProcessId -ProcessStartUtcTicks $appProcessStartUtcTicks -ExportedPngPath $ExportedPngPath -Deadline $nativeDeadline
+        $exportSaveVerified = Invoke-ImagePageExportNativeFlow -SessionId $sessionId -ProcessId $appProcessId -ProcessStartUtcTicks $appProcessStartUtcTicks -ExportedPngPath $ExportedPngPath -ExportSourcePdfPath $CreatedPdfPath -Deadline $nativeDeadline
         try { $null = Wait-ImagePageStableFile -Path $ExportedPngPath -Deadline (Get-ImagePagePhaseDeadline -TotalDeadline $deadline -MaximumMilliseconds $script:ImagePagePins.OutputTimeoutMilliseconds) }
         catch { Write-ImagePageOutputDiagnostics -Path $ExportedPngPath -Stage 'export-output' -SessionId $sessionId -Deadline $deadline; throw }
         $pngProof = Get-ImagePagePngProof -Path $ExportedPngPath
@@ -493,6 +495,8 @@ function Invoke-InstalledImagePageTools {
     if ([IO.Path]::GetExtension($SourceImagePath) -cne '.png' -or [IO.Path]::GetExtension($CreatedPdfPath) -cne '.pdf' -or [IO.Path]::GetExtension($ExportedPngPath) -cne '.png') { throw 'Image page-tools paths do not have the exact PNG, PDF, and PNG extensions.' }
     $distinctPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($path in @($SourceImagePath,$CreatedPdfPath,$ExportedPngPath)) { if (-not $distinctPaths.Add([IO.Path]::GetFullPath($path))) { throw 'Image page-tools fixture and output paths must be distinct.' } }
+    $sourceFolder = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($SourceImagePath))
+    if (-not [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($CreatedPdfPath)).Equals($sourceFolder,[StringComparison]::OrdinalIgnoreCase) -or -not [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($ExportedPngPath)).Equals($sourceFolder,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($CreatedPdfPath) -cne ([IO.Path]::GetFileNameWithoutExtension($SourceImagePath) + '.pdf') -or [IO.Path]::GetFileName($ExportedPngPath) -cne ([IO.Path]::GetFileNameWithoutExtension($CreatedPdfPath) + '-page-1.png')) { throw 'Image page-tools outputs must be the application''s suggested names in the source image folder.' }
     $receipt = Get-Content -LiteralPath (Join-Path $WebDriverRoot 'webdriver-receipt.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     Assert-WebDriverReceipt -Receipt $receipt
     $tauriDriver = Join-Path $WebDriverRoot 'tauri-driver-install/bin/tauri-driver.exe'; $edgeDriver = Join-Path $WebDriverRoot 'edge-driver/msedgedriver.exe'
