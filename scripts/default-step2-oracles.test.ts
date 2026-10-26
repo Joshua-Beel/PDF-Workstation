@@ -253,6 +253,49 @@ describe('default Step 2 oracles', () => {
     expect(app).toContain('label="Previous page" disabled={page === 0}');
   });
 
+  it('checks the full signed PDFium base-resource receipt in the structural stage instead of a bare bytes and SHA-256 pair', () => {
+    const root = join(process.cwd(), 'target', `structural-pdfium-${randomUUID()}`);
+    const bin = join(root, 'resources', 'pdfium', 'bin');
+    mkdirSync(bin, { recursive: true });
+    try {
+      writeFileSync(join(bin, 'pdfium.dll'), 'signed pdfium bytes');
+      writeFileSync(join(root, 'other.dll'), 'signed pdfium bytes');
+      const dll = join(bin, 'pdfium.dll').replaceAll("'", "''");
+      const other = join(root, 'other.dll').replaceAll("'", "''");
+      const result = runWithFunctions('installed-structural-page-tools.ps1', ['Assert-StructuralExactProperties', 'Assert-StructuralFileReceipt', 'Assert-StructuralPdfiumReceipt'], [
+        ". ./scripts/ocr/installer-package.ps1",
+        `$dll='${dll}';$other='${other}';$sha=Get-ExactSha256 -Path $dll;$bytes=[uint64](Get-Item -LiteralPath $dll).Length`,
+        "function New-Entry { [pscustomobject][ordered]@{ target='resources/pdfium/bin/pdfium.dll'; bytes=$bytes; sha256=$sha; unsignedBytes=[uint64]7; unsignedSha256=('F'*64) } }",
+        "function Reject([scriptblock]$Action,[string]$Kind){$bad=$false;try{&$Action}catch{$bad=$true};if(-not$bad){throw ($Kind+' accepted')}}",
+        "Assert-StructuralPdfiumReceipt -Path $dll -Receipt (New-Entry) -Kind 'PDFium'",
+        "Reject { Assert-StructuralPdfiumReceipt -Path $dll -Receipt ([pscustomobject]@{bytes=$bytes;sha256=$sha}) -Kind 'PDFium' } 'bare receipt'",
+        "$e=New-Entry;$e.target='resources/pdfium/LICENSE';Reject { Assert-StructuralPdfiumReceipt -Path $dll -Receipt $e -Kind 'PDFium' } 'other target'",
+        "$e=New-Entry;$e.unsignedBytes=[uint64]0;Reject { Assert-StructuralPdfiumReceipt -Path $dll -Receipt $e -Kind 'PDFium' } 'zero unsigned bytes'",
+        "$e=New-Entry;$e.unsignedSha256='abc';Reject { Assert-StructuralPdfiumReceipt -Path $dll -Receipt $e -Kind 'PDFium' } 'malformed unsigned hash'",
+        "$e=New-Entry;$e.sha256=('A'*64);Reject { Assert-StructuralPdfiumReceipt -Path $dll -Receipt $e -Kind 'PDFium' } 'changed file'",
+        "$e=New-Entry|Select-Object *,@{n='extra';e={1}};Reject { Assert-StructuralPdfiumReceipt -Path $dll -Receipt $e -Kind 'PDFium' } 'extra property'",
+        "Reject { Assert-StructuralPdfiumReceipt -Path $other -Receipt (New-Entry) -Kind 'PDFium' } 'other path'",
+      ].join('\n'));
+      expect(result.status, result.stderr || result.stdout).toBe(0);
+      expect(result.stdout).toContain('PASS');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+    const structural = readFileSync('scripts/installed-structural-page-tools.ps1', 'utf8');
+    expect(structural).toContain("Assert-StructuralPdfiumReceipt -Path $PdfiumPath -Receipt $PdfiumReceipt -Kind 'Installed signed structural page-tools PDFium'");
+    expect(structural).toContain("Assert-StructuralPdfiumReceipt -Path $PdfiumPath -Receipt $PdfiumReceipt -Kind 'Final installed signed structural page-tools PDFium'");
+    expect(structural).toContain('-Receipt ([pscustomobject][ordered]@{ bytes = [uint64]$receipt.tauriDriver.bytes; sha256 = [string]$receipt.tauriDriver.sha256 })');
+    expect(structural).toContain('-Receipt ([pscustomobject][ordered]@{ bytes = [uint64]$receipt.edgeDriver.bytes; sha256 = [string]$receipt.edgeDriver.sha256 })');
+    expect(structural).not.toMatch(/-Receipt \$receipt\.(tauriDriver|edgeDriver) /);
+    expect(structural.indexOf('Assert-WebDriverReceipt -Receipt $receipt')).toBeLessThan(structural.indexOf('$receipt.tauriDriver.bytes'));
+    const launch = readFileSync('scripts/installed-app-launch.ps1', 'utf8');
+    expect(launch).toContain("Assert-LaunchExactProperties -Value $Receipt.tauriDriver -Expected @('version','cargoVersion','rustcVersion','bytes','sha256')");
+    expect(launch).toContain("Assert-LaunchExactProperties -Value $Receipt.edgeDriver -Expected @('version','bytes','sha256','signatureStatus','publisher','hasTimestamp')");
+    expect(readFileSync('scripts/verify-default-expanded-page-tools.ps1', 'utf8')).toContain("Assert-StructuralPdfiumReceipt -Path $resources.Pdfium.FullName -Receipt $sets.Pdfium -Kind 'Final preserved PDFium'");
+    expect(readFileSync('scripts/verify-signed-expanded-page-tools.ps1', 'utf8')).toContain("Assert-StructuralPdfiumReceipt -Path $resources.Pdfium.FullName -Receipt $receiptSets.Pdfium -Kind 'Final installed PDFium'");
+    expect(readFileSync('scripts/verify-signed-ocr-upgrade.ps1', 'utf8')).toContain("@('target','bytes','sha256','unsignedBytes','unsignedSha256')");
+  }, 90_000);
+
   it('writes the settings sentinel under the exact name the organizer and structural helpers require', () => {
     const expanded = readFileSync('scripts/verify-default-expanded-page-tools.ps1', 'utf8');
     expect(expanded).toContain("$sentinel=Join-Path $settingsRoot 'upgrade-sentinel.json'");

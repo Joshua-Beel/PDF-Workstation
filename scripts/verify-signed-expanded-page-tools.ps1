@@ -239,7 +239,8 @@ $structural = Invoke-InstalledStructuralPageTools -ApplicationPath $resources.Ap
 Assert-StructuralResult -Result $structural
 if (@(Get-ChildItem -LiteralPath $settingsRoot -Force).Count -ne 1) { throw 'Structural page tools escaped their requested profile into application settings.' }; Assert-StructuralFileReceipt -Path $settingsSentinel -Receipt $settingsSentinelReceipt -Kind 'Post-structural settings sentinel'
 
-foreach ($item in @(@($resources.Application.FullName,$receipt.packagedApplication,'Final installed application'),@($resources.Pdfium.FullName,$receiptSets.Pdfium,'Final installed PDFium'),@($resources.Welcome.FullName,$welcomeReceipt,'Final installed welcome'),@($organizerFixture,$organizerFixtureReceipt,'Final organizer and first structural fixture'),@($donorFixture,$donorFixtureReceipt,'Final second structural fixture'),@($sourcePng,$sourcePngReceipt,'Final image fixture'),@($settingsSentinel,$settingsSentinelReceipt,'Final settings sentinel'))) {
+Assert-StructuralPdfiumReceipt -Path $resources.Pdfium.FullName -Receipt $receiptSets.Pdfium -Kind 'Final installed PDFium'
+foreach ($item in @(@($resources.Application.FullName,$receipt.packagedApplication,'Final installed application'),@($resources.Welcome.FullName,$welcomeReceipt,'Final installed welcome'),@($organizerFixture,$organizerFixtureReceipt,'Final organizer and first structural fixture'),@($donorFixture,$donorFixtureReceipt,'Final second structural fixture'),@($sourcePng,$sourcePngReceipt,'Final image fixture'),@($settingsSentinel,$settingsSentinelReceipt,'Final settings sentinel'))) {
     Assert-StructuralFileReceipt -Path ([string]$item[0]) -Receipt $item[1] -Kind ([string]$item[2])
 }
 $proof = Write-SanitizedExpandedRecord -Root $output -WorkflowRevision ([string]$env:GITHUB_SHA) -SourceBinding $sourceBinding -Receipt $receipt -Image $image -Organizer $organizer -Structural $structural

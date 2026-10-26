@@ -29,6 +29,14 @@ function Assert-StructuralExactProperties {
     if ($actual.Count -ne $wanted.Count -or (Compare-Object $wanted $actual -CaseSensitive)) { throw "$Kind has an unexpected or missing property." }
 }
 
+function Assert-StructuralPdfiumReceipt {
+    param([Parameter(Mandatory = $true)][string]$Path,[Parameter(Mandatory = $true)]$Receipt,[Parameter(Mandatory = $true)][string]$Kind)
+    Assert-StructuralExactProperties -Value $Receipt -Expected @('target','bytes','sha256','unsignedBytes','unsignedSha256') -Kind "$Kind receipt"
+    if ([string]$Receipt.target -cne 'resources/pdfium/bin/pdfium.dll' -or [uint64]$Receipt.unsignedBytes -eq 0 -or [string]$Receipt.unsignedSha256 -cnotmatch '^[A-F0-9]{64}$') { throw "$Kind receipt is not the signed PDFium base-resource record." }
+    if (-not [IO.Path]::GetFullPath($Path).EndsWith('\resources\pdfium\bin\pdfium.dll',[StringComparison]::OrdinalIgnoreCase)) { throw "$Kind is not the installed PDFium resource named by its receipt." }
+    Assert-StructuralFileReceipt -Path $Path -Receipt ([pscustomobject][ordered]@{ bytes = [uint64]$Receipt.bytes; sha256 = [string]$Receipt.sha256 }) -Kind $Kind
+}
+
 function Assert-StructuralFileReceipt {
     param([Parameter(Mandatory = $true)][string]$Path,[Parameter(Mandatory = $true)]$Receipt,[Parameter(Mandatory = $true)][string]$Kind)
     Assert-StructuralExactProperties -Value $Receipt -Expected @('bytes','sha256') -Kind "$Kind receipt"
@@ -403,10 +411,10 @@ function Invoke-InstalledStructuralPageTools {
     $tauri = Join-Path $WebDriverRoot 'tauri-driver-install/bin/tauri-driver.exe'; $edge = Join-Path $WebDriverRoot 'edge-driver/msedgedriver.exe'
     Assert-StructuralFileReceipt -Path $ApplicationPath -Receipt $ApplicationReceipt -Kind 'Installed signed structural page-tools application'
     $null = Assert-TrustedWindowsSignature -Path $ApplicationPath -ExpectedPublisher $ExpectedPublisher
-    Assert-StructuralFileReceipt -Path $PdfiumPath -Receipt $PdfiumReceipt -Kind 'Installed signed structural page-tools PDFium'
+    Assert-StructuralPdfiumReceipt -Path $PdfiumPath -Receipt $PdfiumReceipt -Kind 'Installed signed structural page-tools PDFium'
     $null = Assert-TrustedWindowsSignature -Path $PdfiumPath -ExpectedPublisher $ExpectedPublisher
-    Assert-StructuralFileReceipt -Path $tauri -Receipt $receipt.tauriDriver -Kind 'Pinned structural page-tools tauri-driver'
-    Assert-StructuralFileReceipt -Path $edge -Receipt $receipt.edgeDriver -Kind 'Pinned structural page-tools EdgeDriver'
+    Assert-StructuralFileReceipt -Path $tauri -Receipt ([pscustomobject][ordered]@{ bytes = [uint64]$receipt.tauriDriver.bytes; sha256 = [string]$receipt.tauriDriver.sha256 }) -Kind 'Pinned structural page-tools tauri-driver'
+    Assert-StructuralFileReceipt -Path $edge -Receipt ([pscustomobject][ordered]@{ bytes = [uint64]$receipt.edgeDriver.bytes; sha256 = [string]$receipt.edgeDriver.sha256 }) -Kind 'Pinned structural page-tools EdgeDriver'
     $null = Assert-TrustedWindowsSignature -Path $edge -ExpectedPublisher $script:LaunchPins.EdgePublisher
     Assert-StructuralFileReceipt -Path $FirstFixturePath -Receipt $FirstFixtureReceipt -Kind 'First structural fixture'
     Assert-StructuralFileReceipt -Path $SecondFixturePath -Receipt $SecondFixtureReceipt -Kind 'Second structural fixture'
@@ -446,6 +454,6 @@ function Invoke-InstalledStructuralPageTools {
     if ($proofFiles.Count -ne 5 -or @($proofFiles | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $_.Length -le 0 -or $_.Length -gt $script:StructuralPins.PdfiumProofRecordBytesMaximum }).Count -ne 0) { throw 'Structural PDFium proof root did not contain exactly five bounded regular proof records.' }
     Assert-StructuralFileReceipt -Path $FirstFixturePath -Receipt $FirstFixtureReceipt -Kind 'Final first structural fixture'
     Assert-StructuralFileReceipt -Path $SecondFixturePath -Receipt $SecondFixtureReceipt -Kind 'Final second structural fixture'
-    Assert-StructuralFileReceipt -Path $PdfiumPath -Receipt $PdfiumReceipt -Kind 'Final installed signed structural page-tools PDFium'
+    Assert-StructuralPdfiumReceipt -Path $PdfiumPath -Receipt $PdfiumReceipt -Kind 'Final installed signed structural page-tools PDFium'
     return $result
 }
