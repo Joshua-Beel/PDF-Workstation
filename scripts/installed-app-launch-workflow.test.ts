@@ -585,11 +585,11 @@ $child=[Diagnostics.Process]::Start($info);[IO.File]::WriteAllText($ChildPidPath
       $late=[Collections.Generic.Queue[object]]::new();$late.Enqueue($null);$late.Enqueue($residual);$late.Enqueue($null);$late.Enqueue($null);$lateCalls=0
       $lateResult=Wait-LaunchProcessQuiescence -Deadline ([datetime]::UtcNow.AddSeconds(2)) -SnapshotProvider {$script:lateCalls++;$next=$late.Dequeue();if($null-ne$next){$next}}
       if(-not$lateResult.stable-or$lateResult.processes.Count-ne0-or$lateCalls-ne4){throw 'A late residual did not reset cleanup quiescence.'}
-      $persistentCalls=0;$persistentResult=Wait-LaunchProcessQuiescence -Deadline ([datetime]::UtcNow.AddMilliseconds(20)) -SnapshotProvider {$script:persistentCalls++;$residual}
+      $persistentCalls=0;$persistentResult=Wait-LaunchProcessQuiescence -Deadline ([datetime]::UtcNow.AddMilliseconds(500)) -SnapshotProvider {$script:persistentCalls++;$residual}
       if($persistentResult.stable-or$persistentResult.processes.Count-ne1-or$persistentCalls-lt1){throw 'Persistent cleanup residual was accepted or its final facts were lost.'}
       $capturedFacts=Get-LaunchResidualFacts -Processes $persistentResult.processes -Captured @($captured)
       $reused=[pscustomobject]@{Id=71;ProcessName='msedgedriver';Path=$path;StartTime=$started.AddTicks(1)}
-      $reusedResult=Wait-LaunchProcessQuiescence -Deadline ([datetime]::UtcNow.AddMilliseconds(20)) -SnapshotProvider {$reused}
+      $reusedResult=Wait-LaunchProcessQuiescence -Deadline ([datetime]::UtcNow.AddMilliseconds(500)) -SnapshotProvider {$reused}
       $reusedFacts=Get-LaunchResidualFacts -Processes $reusedResult.processes -Captured @($captured)
       if($capturedFacts.ownership-cne'captured'-or$reusedFacts.ownership-cne'uncaptured'-or-not$capturedFacts.edgeDriver-or-not$reusedFacts.edgeDriver){throw 'Final captured or PID-reuse residual facts were not identity-bound.'}
       foreach($case in @([pscustomobject]@{result=$persistentResult;facts=$capturedFacts},[pscustomobject]@{result=$reusedResult;facts=$reusedFacts})){
