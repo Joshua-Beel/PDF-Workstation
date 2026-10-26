@@ -2012,7 +2012,8 @@ function Set-BoundNativeSaveFileNameExact {
         [ValidateRange(1,60000)][int]$SuggestionTimeoutMilliseconds = 20000
     )
     $diagStart = [Environment]::TickCount64
-    $describe = { param([string]$Name) if ($Name.Length -eq 0) { 'empty' } elseif ($Name -ceq $Value) { 'typed' } elseif ($SuggestedName.Length -gt 0 -and $Name -ceq $SuggestedName) { 'suggested' } elseif ($Name.IndexOfAny([char[]]'\/:') -lt 0 -and $Name.Length -le 64) { 'other:' + $Name } else { 'other-path' } }
+    $isSuggestion = { param([string]$Name) $SuggestedName.Length -gt 0 -and $Name.Length -gt 0 -and ($Name.Equals($SuggestedName,[StringComparison]::OrdinalIgnoreCase) -or $Name.Equals([IO.Path]::GetFileNameWithoutExtension($SuggestedName),[StringComparison]::OrdinalIgnoreCase)) }
+    $describe = { param([string]$Name) if ($Name.Length -eq 0) { 'empty' } elseif ($Name -ceq $Value) { 'typed' } elseif (& $isSuggestion $Name) { 'suggested' } elseif ($Name.IndexOfAny([char[]]'\/:') -lt 0 -and $Name.Length -le 64) { 'other:' + $Name } else { 'other-path' } }
     $diag = { param([string]$Phase,[string]$Name) [Console]::Out.WriteLine(('NATIVE_SAVE_DIAG t={0} phase={1} name={2}' -f ([Environment]::TickCount64 - $diagStart),$Phase,(& $describe $Name))) }
     if ($SuggestedName.Length -gt 0 -and ($SuggestedName.IndexOfAny([char[]]'\/:') -ge 0 -or $SuggestedName.Length -gt 255)) { throw 'The expected Save dialog suggestion must be a bare file name.' }
     $record = Get-BoundNativeSaveRoleRecord -ProcessId $ProcessId -Binding $Binding -Role 'filenameEdit' -DeadlineTickCount $DeadlineTickCount -NativeWindowProvider $NativeWindowProvider
@@ -2032,7 +2033,7 @@ function Set-BoundNativeSaveFileNameExact {
         $seen = $false
         while ([Environment]::TickCount64 -lt $suggestionEnd) {
             $current = & $readName
-            if (($SuggestedName.Length -gt 0 -and $current -ceq $SuggestedName) -or ($SuggestedName.Length -eq 0 -and $current.Length -gt 0)) { $seen = $true; & $diag 'suggestion-seen' $current; break }
+            if ((& $isSuggestion $current) -or ($SuggestedName.Length -eq 0 -and $current.Length -gt 0)) { $seen = $true; & $diag 'suggestion-seen' $current; break }
             & $pause
         }
         if (-not $seen) { & $diag 'suggestion-missing' (& $readName); throw 'The Save dialog never showed the application''s suggested filename, so typing could race its initialization.' }

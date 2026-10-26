@@ -96,6 +96,8 @@ describe('default Step 2 oracles', () => {
       "}",
       "Run-Late 12 'image-source.pdf' 'image-source.pdf'; if ($script:typedBeforeSuggestion -or $script:sets -ne 1 -or $script:edit -cne $value) { throw ('exact late suggestion: sets=' + $script:sets) }",
       "Run-Late 12 'combined.pdf' '' | Out-Null; if ($script:typedBeforeSuggestion -or $script:sets -ne 1) { throw 'any late suggestion' }",
+      "foreach ($shown in @('image-source', 'Image-Source', 'IMAGE-SOURCE.PDF')) { Run-Late 4 $shown 'image-source.pdf' | Out-Null; if ($script:typedBeforeSuggestion -or $script:sets -ne 1 -or $script:edit -cne $value) { throw ('hidden-extension suggestion refused: ' + $shown) } }",
+      "foreach ($near in @('image-source.png', 'image-sources', 'image-source.pdf.pdf', 'image')) { $message = $null; try { Run-Late 2 $near 'image-source.pdf' 200 | Out-Null } catch { $message = $_.Exception.Message }; if ($message -notlike '*never showed*' -or $script:sets -ne 0) { throw ('near-miss suggestion accepted: ' + $near) } }",
       "$message = $null; try { Run-Late 100000 'never' '' 200 | Out-Null } catch { $message = $_.Exception.Message }; if ($message -notlike '*never showed*' -or $script:sets -ne 0) { throw ('missing suggestion: ' + $message) }",
       "$message = $null; try { Run-Late 3 'other.pdf' 'image-source.pdf' 200 | Out-Null } catch { $message = $_.Exception.Message }; if ($message -notlike '*never showed*' -or $script:sets -ne 0) { throw ('wrong suggestion: ' + $message) }",
       "$message = $null; try { Set-BoundNativeSaveFileNameExact -ProcessId 7319 -ProcessStartUtcTicks 638500000000000000L -Binding $binding -Value $value -DeadlineTickCount ([Environment]::TickCount64 + 30000) -SetProvider {$true} -ReadProvider {''} -SuggestedName 'C:\\x.pdf' } catch { $message = $_.Exception.Message }; if ($message -notlike '*bare file name*') { throw 'path suggestion accepted' }",
@@ -149,6 +151,14 @@ describe('default Step 2 oracles', () => {
     expect(recovery).toContain("{param($v)[string]$v.page-ceq'2'-and[bool]$v.previousEnabled} 'Recovery A page 2'");
     expect(recovery.indexOf("'Recovery A page 2'")).toBeLessThan(recovery.indexOf('"Organize pages"'));
     expect(recovery).toContain("[string]$v.page-ceq'2'-and[bool]$v.previousEnabled-and[bool]$v.undo-and[int]$v.dialogs-eq0");
+    expect(recovery).not.toContain('"Select page 1\\"]").click();document.querySelector("button[aria-label=\\"Rotate');
+    expect(recovery).toContain("{param($v)[string]$v.selected-ceq'Select page 1'} 'Recovery A page 1 selected'");
+    expect(recovery.indexOf("'Recovery A page 1 selected'")).toBeLessThan(recovery.indexOf('Rotate selected pages clockwise'));
+    expect(recovery).toContain("-and[int]$v.p1w-gt[int]$v.p1h-and[int]$v.p1h-gt0-and[int]$v.p2h-gt[int]$v.p2w-and[int]$v.p2w-gt0} 'Recovery A acknowledged edit'");
+    const organizer = readFileSync('src/Organizer.tsx', 'utf8');
+    expect(organizer).toContain('useState<number[]>(() => [clampPage(currentPage, document.pages.length)])');
+    expect(organizer).toContain("onClick={() => void edit({ kind: 'rotate', pages: selected, clockwise: true })}");
+    expect(organizer).toContain('alt={`Page ${index + 1} preview`}');
     expect(recovery).toContain("[string]$v.page-ceq'2'-and[bool]$v.previousEnabled-and[bool]$v.undo-and(Test-RecoveryQuarterTurnRender");
     const reactDom = readFileSync('node_modules/react-dom/cjs/react-dom.development.js', 'utf8');
     expect(reactDom).toContain("registerSimpleEvent('focusout', 'onBlur');");
