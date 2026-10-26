@@ -56,7 +56,7 @@ describe('installed signed reading-tools verifier', () => {
     expect(source).toContain('Wait-ReadingProcessUiSurfaceClosed');
     expect(source).toContain('Wait-ReadingProcessBoundPickerTargets');
     expect(source).toContain('baselineTargetIdentities');
-    expect(source).toContain("$className -ceq 'Edit' -and $controlId -in @(1001,1148)");
+    expect(source).toContain("$className -ceq 'Edit' -and $controlId -in @(1001,1148,1152)");
     expect(source).toContain("$className -ceq 'Button' -and $controlId -eq 1");
     expect(source).not.toMatch(/TreeScope\]::Descendants|\.FindAll\s*\(/);
     expect(source).not.toContain('UIAutomationClient');

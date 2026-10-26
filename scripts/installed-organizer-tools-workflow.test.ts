@@ -39,7 +39,7 @@ describe('installed organizer tools workflow', () => {
         nativeDriverVersion='151.0.1.2';returnedRuntimeVersion='151.0.1.3';profileBinding='session-capability-requested-profile'
         processBoundOpenPickerVerified=$true;openFilenameControlCategory='edit-1148';organizerWorkspaceVerified=$true
         cropInteractionVerified=$true;croppedPageWidth=540;croppedPageHeight=720;resetCropInteractionVerified=$true
-        restoredPageWidth=612;restoredPageHeight=792;processBoundSplitPickerVerified=$true;splitFilenameControlCategory='edit-1001'
+        restoredPageWidth=612;restoredPageHeight=792;processBoundSplitPickerVerified=$true;splitFilenameControlCategory='edit-1152'
         splitOutputFileCount=3;splitOutputBytes=[uint64]12345;splitOutputPageCounts=[int[]]@(2,2,2);sourcePageFingerprintSha256=$hashes;splitPageFingerprintSha256=[string[]]$hashes.Clone();splitPageFingerprintOrderVerified=$true;splitFolderCreatedVerified=$true;sourceFixturePreserved=$true
         sessionDeleted=$true;ownedProcessTreeStopped=$true;relevantProcessesRemaining=0
       }
@@ -160,10 +160,10 @@ describe('installed organizer tools workflow', () => {
       function Submit-ProcessBoundOpenDialog{param($Binding,[int]$ApplicationProcessId,[long]$ApplicationProcessStartUtcTicks,[string]$Path,[datetime]$Deadline);if($ApplicationProcessStartUtcTicks-ne987654321){throw 'start identity lost'};$script:order+='native-submit';$script:submitted=$Path}
       function Wait-ReadingProcessUiSurfaceClosed{param($Binding,[int]$ApplicationProcessId,[long]$ApplicationProcessStartUtcTicks,[datetime]$Deadline);if($ApplicationProcessStartUtcTicks-ne987654321){throw 'start identity lost'};$script:order+='native-close'}
       function Wait-WebDriverOracle{param([string]$SessionId,[datetime]$Deadline,[string]$Kind,[string]$Script,[scriptblock]$Predicate);$script:order+='product-complete';[pscustomobject]@{}}
-      $tempRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\');$testRoot=Join-Path $tempRoot ('smacrobat-organizer-native-'+[Guid]::NewGuid().ToString('N'));[IO.Directory]::CreateDirectory($testRoot)|Out-Null;$target=Join-Path $testRoot 'organizer-split'
+      $tempRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\');$testRoot=Join-Path $tempRoot ('smacrobat-organizer-native-'+[Guid]::NewGuid().ToString('N'));[IO.Directory]::CreateDirectory($testRoot)|Out-Null;$target=Join-Path $testRoot 'Split PDFs'
       try{
         $category=Invoke-OrganizerProcessBoundSplit -SessionId fixture -ApplicationProcessId 71 -ApplicationProcessStartUtcTicks 987654321 -TargetPath $target -Deadline ([datetime]::UtcNow.AddSeconds(1))
-        if($category-cne'edit-1148'-or$script:submitted-cne$target-or($script:order-join',')-cne'surface,surface-gate,targets,target-gate,dom-submit,native-bind,native-submit,native-close,product-complete'){throw 'Organizer split picker identity sequence drifted.'}
+        if($category-cne'edit-1148'-or$script:submitted-cne$testRoot-or($script:order-join',')-cne'surface,surface-gate,targets,target-gate,dom-submit,native-bind,native-submit,native-close,product-complete'){throw 'Organizer split picker identity sequence drifted.'}
         [IO.Directory]::CreateDirectory($target)|Out-Null;$rejected=$false;try{Invoke-OrganizerProcessBoundSplit -SessionId fixture -ApplicationProcessId 71 -ApplicationProcessStartUtcTicks 987654321 -TargetPath $target -Deadline ([datetime]::UtcNow.AddSeconds(1))|Out-Null}catch{$rejected=$_.Exception.Message-ceq'The organizer split target must be fresh.'};if(-not$rejected){throw 'Existing organizer split target was accepted.'}
       }finally{if([IO.Path]::GetFullPath($testRoot).StartsWith($tempRoot+'\',[StringComparison]::OrdinalIgnoreCase)-and[IO.Directory]::Exists($testRoot)){[IO.Directory]::Delete($testRoot,$true)}}
     `);
@@ -193,7 +193,7 @@ describe('installed organizer tools workflow', () => {
   it('accepts only the exact three-file bounded split inventory under the fresh parent', () => {
     const result = runPowerShell(String.raw`
       . '${root}\scripts\installed-organizer-tools.ps1'
-      $tempRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\');$testRoot=Join-Path $tempRoot ('smacrobat-organizer-inventory-'+[Guid]::NewGuid().ToString('N'));$parent=Join-Path $testRoot 'valid';$target=Join-Path $parent 'organizer-split';$badParent=Join-Path $testRoot 'invalid';$badTarget=Join-Path $badParent 'organizer-split'
+      $tempRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\');$testRoot=Join-Path $tempRoot ('smacrobat-organizer-inventory-'+[Guid]::NewGuid().ToString('N'));$parent=Join-Path $testRoot 'valid';$target=Join-Path $parent 'Split PDFs';$badParent=Join-Path $testRoot 'invalid';$badTarget=Join-Path $badParent 'Split PDFs'
       try{
         [IO.Directory]::CreateDirectory($target)|Out-Null;foreach($name in @('pages-0001-0002.pdf','pages-0003-0004.pdf','pages-0005-0006.pdf')){[IO.File]::WriteAllBytes((Join-Path $target $name),[byte[]](1,2,3))}
         $inventory=Get-OrganizerSplitInventory -SplitParentRoot $parent -TargetPath $target;if($inventory.fileCount-ne3-or$inventory.totalBytes-ne9){throw 'Exact organizer split inventory was not accepted.'}

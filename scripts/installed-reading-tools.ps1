@@ -335,7 +335,7 @@ function Get-ReadingPickerTargetSnapshot {
             if ($ownerProcessId -ne $ApplicationProcessId) { return $true }
             $controlId = [ReadingNativePickerApi]::GetDlgCtrlID($handle)
             $className = Get-ReadingWindowClassName -Handle $handle
-            $targetKind = if ($className -ceq 'Edit' -and $controlId -in @(1001,1148)) { 'filename' } elseif ($className -ceq 'Button' -and $controlId -eq 1) { 'open' } else { '' }
+            $targetKind = if ($className -ceq 'Edit' -and $controlId -in @(1001,1148,1152)) { 'filename' } elseif ($className -ceq 'Button' -and $controlId -eq 1) { 'open' } else { '' }
             if ($targetKind) {
                 $identity = Get-ReadingHandleIdentity -Handle $handle
                 if (-not $targetIdentities.Add($identity)) { $state.exceeded = $true; return $false }
@@ -360,7 +360,7 @@ function Assert-ReadingPickerTargetSnapshot {
     $identities = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($entry in $Snapshot) {
         $properties = @($entry.PSObject.Properties.Name | Sort-Object -CaseSensitive)
-        $categoryValid = ([string]$entry.targetKind -ceq 'filename' -and [string]$entry.nativeControlCategory -in @('edit-1001','edit-1148')) -or ([string]$entry.targetKind -ceq 'open' -and [string]$entry.nativeControlCategory -ceq 'button-idok')
+        $categoryValid = ([string]$entry.targetKind -ceq 'filename' -and [string]$entry.nativeControlCategory -in @('edit-1001','edit-1148','edit-1152')) -or ([string]$entry.targetKind -ceq 'open' -and [string]$entry.nativeControlCategory -ceq 'button-idok')
         if (($properties -join ',') -cne 'handle,isEnabled,isOffscreen,nativeControlCategory,processId,runtimeIdentity,surfaceRuntimeIdentity,targetKind' -or [string]$entry.runtimeIdentity -cnotmatch '^\d{1,20}$' -or -not $identities.Add([string]$entry.runtimeIdentity) -or -not $SurfaceIdentities.Contains([string]$entry.surfaceRuntimeIdentity) -or -not $categoryValid -or [int]$entry.processId -ne $ApplicationProcessId -or [IntPtr]$entry.handle -eq [IntPtr]::Zero) {
             throw "$Kind was invalid, cross-surface, or ambiguous."
         }
@@ -422,7 +422,7 @@ function Assert-ReadingSurfaceBinding {
     param([Parameter(Mandatory = $true)]$Binding,[Parameter(Mandatory = $true)][int]$ApplicationProcessId,[Parameter(Mandatory = $true)][long]$ApplicationProcessStartUtcTicks,[Parameter(Mandatory = $true)][datetime]$Deadline,[switch]$AllowUnavailableTargets,[scriptblock]$ProcessIdentityProvider)
     Assert-ReadingApplicationProcessIdentity -ApplicationProcessId $ApplicationProcessId -ApplicationProcessStartUtcTicks $ApplicationProcessStartUtcTicks -Deadline $Deadline -ProcessIdentityProvider $ProcessIdentityProvider
     $properties = @($Binding.PSObject.Properties.Name | Sort-Object -CaseSensitive)
-    if (($properties -join ',') -cne 'baselineIdentities,baselineTargetIdentities,dedicatedNewSurface,filenameControlCategory,filenameHandle,filenameRuntimeIdentity,openButtonHandle,openButtonRuntimeIdentity,surfaceControlType,surfaceHandle,surfaceRuntimeIdentity' -or [string]$Binding.surfaceControlType -cne 'Hwnd' -or [string]$Binding.filenameControlCategory -notin @('edit-1001','edit-1148') -or @($Binding.baselineIdentities).Count -lt 1 -or @($Binding.baselineIdentities).Count -gt 8 -or @($Binding.baselineTargetIdentities).Count -gt 32 -or [string]$Binding.filenameRuntimeIdentity -cnotmatch '^\d{1,20}$' -or [string]$Binding.openButtonRuntimeIdentity -cnotmatch '^\d{1,20}$' -or [IntPtr]$Binding.surfaceHandle -eq [IntPtr]::Zero -or [IntPtr]$Binding.filenameHandle -eq [IntPtr]::Zero -or [IntPtr]$Binding.openButtonHandle -eq [IntPtr]::Zero) {
+    if (($properties -join ',') -cne 'baselineIdentities,baselineTargetIdentities,dedicatedNewSurface,filenameControlCategory,filenameHandle,filenameRuntimeIdentity,openButtonHandle,openButtonRuntimeIdentity,surfaceControlType,surfaceHandle,surfaceRuntimeIdentity' -or [string]$Binding.surfaceControlType -cne 'Hwnd' -or [string]$Binding.filenameControlCategory -notin @('edit-1001','edit-1148','edit-1152') -or @($Binding.baselineIdentities).Count -lt 1 -or @($Binding.baselineIdentities).Count -gt 8 -or @($Binding.baselineTargetIdentities).Count -gt 32 -or [string]$Binding.filenameRuntimeIdentity -cnotmatch '^\d{1,20}$' -or [string]$Binding.openButtonRuntimeIdentity -cnotmatch '^\d{1,20}$' -or [IntPtr]$Binding.surfaceHandle -eq [IntPtr]::Zero -or [IntPtr]$Binding.filenameHandle -eq [IntPtr]::Zero -or [IntPtr]$Binding.openButtonHandle -eq [IntPtr]::Zero) {
         throw 'The native picker surface binding was invalid.'
     }
     if (-not $AllowUnavailableTargets) {
@@ -433,7 +433,7 @@ function Assert-ReadingSurfaceBinding {
         }
         if ((Get-ReadingHandleIdentity -Handle ([IntPtr]$Binding.surfaceHandle)) -cne [string]$Binding.surfaceRuntimeIdentity -or (Get-ReadingHandleIdentity -Handle ([IntPtr]$Binding.filenameHandle)) -cne [string]$Binding.filenameRuntimeIdentity -or (Get-ReadingHandleIdentity -Handle ([IntPtr]$Binding.openButtonHandle)) -cne [string]$Binding.openButtonRuntimeIdentity) { throw 'A bound native picker HWND identity changed before its action.' }
         if ([ReadingNativePickerApi]::GetAncestor([IntPtr]$Binding.filenameHandle,2) -ne [IntPtr]$Binding.surfaceHandle -or [ReadingNativePickerApi]::GetAncestor([IntPtr]$Binding.openButtonHandle,2) -ne [IntPtr]$Binding.surfaceHandle) { throw 'A bound native picker target escaped the exact owned HWND before its action.' }
-        $expectedFilenameControlId = if ([string]$Binding.filenameControlCategory -ceq 'edit-1001') { 1001 } else { 1148 }
+        $expectedFilenameControlId = switch -CaseSensitive ([string]$Binding.filenameControlCategory) { 'edit-1001' { 1001 } 'edit-1148' { 1148 } 'edit-1152' { 1152 } default { throw 'The native picker filename control category is unknown.' } }
         if ((Get-ReadingWindowClassName -Handle ([IntPtr]$Binding.filenameHandle)) -cne 'Edit' -or [ReadingNativePickerApi]::GetDlgCtrlID([IntPtr]$Binding.filenameHandle) -ne $expectedFilenameControlId -or (Get-ReadingWindowClassName -Handle ([IntPtr]$Binding.openButtonHandle)) -cne 'Button' -or [ReadingNativePickerApi]::GetDlgCtrlID([IntPtr]$Binding.openButtonHandle) -ne 1) { throw 'A bound native picker HWND no longer matched the exact filename or Open control contract.' }
         Assert-ReadingApplicationProcessIdentity -ApplicationProcessId $ApplicationProcessId -ApplicationProcessStartUtcTicks $ApplicationProcessStartUtcTicks -Deadline $Deadline -ProcessIdentityProvider $ProcessIdentityProvider
         if ([datetime]::UtcNow -ge $Deadline) { throw 'The native picker HWND binding deadline expired.' }

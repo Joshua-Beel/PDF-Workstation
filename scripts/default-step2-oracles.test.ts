@@ -253,6 +253,32 @@ describe('default Step 2 oracles', () => {
     expect(app).toContain('label="Previous page" disabled={page === 0}');
   });
 
+  it('writes the settings sentinel under the exact name the organizer and structural helpers require', () => {
+    const expanded = readFileSync('scripts/verify-default-expanded-page-tools.ps1', 'utf8');
+    expect(expanded).toContain("$sentinel=Join-Path $settingsRoot 'upgrade-sentinel.json'");
+    for (const helper of ['scripts/installed-organizer-tools.ps1', 'scripts/installed-structural-page-tools.ps1']) {
+      expect(readFileSync(helper, 'utf8'), helper).toContain("$settingsEntries[0].Name -cne 'upgrade-sentinel.json'");
+    }
+    expect(readFileSync('scripts/verify-signed-expanded-page-tools.ps1', 'utf8')).toContain("$settingsSentinel = Join-Path $settingsRoot 'upgrade-sentinel.json'");
+  });
+
+  it('binds the split folder picker by its Folder box and submits the existing parent, matching the app split contract', () => {
+    const reading = readFileSync('scripts/installed-reading-tools.ps1', 'utf8');
+    expect(reading).toContain("$className -ceq 'Edit' -and $controlId -in @(1001,1148,1152)");
+    expect(reading).toContain("'edit-1152' { 1152 } default { throw 'The native picker filename control category is unknown.' }");
+    const organizer = readFileSync('scripts/installed-organizer-tools.ps1', 'utf8');
+    expect(organizer).toContain("SplitFolderName = 'Split PDFs'");
+    expect(organizer).toContain('-Path ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($TargetPath))) -Deadline $Deadline');
+    expect(organizer).toContain("splitFilenameControlCategory -cne 'edit-1152'");
+    expect(organizer).toContain("openFilenameControlCategory -notin @('edit-1001','edit-1148')");
+    expect(readFileSync('scripts/verify-signed-expanded-page-tools.ps1', 'utf8')).toContain("splitFilenameControlCategory -cne 'edit-1152'");
+    expect(reading).toContain("[ValidateSet('edit-1001','edit-1148')][string]$NativeControlCategory");
+    const split = readFileSync('src-tauri/src/split.rs', 'utf8');
+    expect(split).toContain('const SPLIT_FOLDER_NAME: &str = "Split PDFs";');
+    expect(split).toContain('FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST');
+    expect(split).toContain('let name = format!("pages-{:04}-{:04}.pdf", start + 1, end);');
+  });
+
   it('writes bounded file diagnostics for a missing image output without a session', () => {
     const root = join(process.cwd(), 'target', `image-diag-${randomUUID()}`);
     mkdirSync(root, { recursive: true });

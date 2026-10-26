@@ -163,7 +163,7 @@ function Assert-ExpandedOrganizerResult {
         -not [bool]$Result.processBoundOpenPickerVerified -or [string]$Result.openFilenameControlCategory -notin @('edit-1001','edit-1148') -or -not [bool]$Result.organizerWorkspaceVerified -or
         -not [bool]$Result.cropInteractionVerified -or -not [bool]$Result.resetCropInteractionVerified -or -not [bool]$Result.processBoundSplitPickerVerified -or
         [int]$Result.croppedPageWidth -ne 540 -or [int]$Result.croppedPageHeight -ne 720 -or [int]$Result.restoredPageWidth -ne 612 -or [int]$Result.restoredPageHeight -ne 792 -or
-        [string]$Result.splitFilenameControlCategory -notin @('edit-1001','edit-1148') -or [int]$Result.splitOutputFileCount -ne 3 -or [uint64]$Result.splitOutputBytes -eq 0 -or [uint64]$Result.splitOutputBytes -gt 768MB -or
+        [string]$Result.splitFilenameControlCategory -cne 'edit-1152' -or [int]$Result.splitOutputFileCount -ne 3 -or [uint64]$Result.splitOutputBytes -eq 0 -or [uint64]$Result.splitOutputBytes -gt 768MB -or
         $splitCounts.Count -ne 3 -or ($splitCounts -join ',') -cne '2,2,2' -or $sourceFingerprints.Count -ne 6 -or $splitFingerprints.Count -ne 6 -or
         @($sourceFingerprints | Where-Object { [string]$_ -cnotmatch '^[A-F0-9]{64}$' }).Count -ne 0 -or @($sourceFingerprints | Sort-Object -Unique).Count -ne 6 -or
         -not [bool]$Result.splitPageFingerprintOrderVerified -or (Compare-Object $sourceFingerprints $splitFingerprints -SyncWindow 0 -CaseSensitive) -or
