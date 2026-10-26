@@ -2,6 +2,7 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { expect, it, vi, type Mock } from 'vitest';
 import ExportPageImageDialog, { DEFAULT_PNG_DPI, MAX_PNG_PIXELS, pageImageDimensions, validPageImageReceipt, validatePageImageDimensions, type PageImageTarget } from './ExportPageImageDialog';
 import type { PageImageExport } from './bridge';
+import dimensionTable from './pageImageDimensions.fixture.json';
 
 const target: PageImageTarget = { id: 7, revision: 4, page: 2, size: { width: 612, height: 792 } };
 const receipt = (overrides: Partial<PageImageExport> = {}): PageImageExport => ({ path: 'C:/exports/source-page-3.png', documentId: 7, revision: 4, page: 2, dpi: 150, width: 1275, height: 1650, format: 'png', ...overrides });
@@ -102,4 +103,13 @@ it('ignores a late native result after the dialog is removed', async () => {
   act(() => ui.unmount());
   await act(async () => resolve(receipt()));
   expect(exportPage).toHaveBeenCalledOnce();
+});
+
+it('promises the same pixel sizes as the native exporter on the shared table', () => {
+  // The Rust test dimensions_agree_with_the_dialog_formula_on_the_shared_table checks the same rows.
+  expect(dimensionTable.length).toBeGreaterThanOrEqual(30);
+  for (const row of dimensionTable) {
+    expect(pageImageDimensions({ width: row.width, height: row.height }, row.dpi), JSON.stringify(row)).toEqual({ width: row.pixelWidth, height: row.pixelHeight });
+  }
+  expect(pageImageDimensions({ width: 612, height: 792 }, 150)).toEqual({ width: 1275, height: 1650 });
 });

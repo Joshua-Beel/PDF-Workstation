@@ -37,14 +37,24 @@ pub struct RasterDimensions {
     rgb_bytes: usize,
 }
 
+/// Points to whole pixels at `dpi`, rounded up, computed exactly as the export dialog does
+/// (`Math.ceil(points * dpi / 72)` in `ExportPageImageDialog.tsx`). The f32 size is read through its
+/// shortest decimal form, the number the dialog receives in JSON, and is multiplied before dividing:
+/// dividing first (150 / 72 = 2.0833333333333335) turned Letter's 792 pt into 1650.0000000000002 and
+/// so 1651 px. Multiplying first is exact for whole-point sizes (the product is an exact integer and a
+/// non-integer quotient is at least 1/72 away from the next integer).
+pub(crate) fn pixels_at(points: f32, dpi: u16) -> f64 {
+    let points = points.to_string().parse::<f64>().unwrap_or(f64::from(points));
+    (points * f64::from(dpi) / 72.0).ceil()
+}
+
 pub fn dimensions(width_points: f32, height_points: f32, dpi: u16, format: PageImageFormat) -> Result<RasterDimensions, String> {
     if !matches!(dpi, 72 | 150 | 300) { return Err(format!("Choose 72, 150, or 300 DPI for {} export.", format.label())); }
     if !width_points.is_finite() || !height_points.is_finite() || width_points <= 0.0 || height_points <= 0.0 {
         return Err("The page has invalid displayed dimensions.".into());
     }
-    let scale = f64::from(dpi) / 72.0;
-    let width = (f64::from(width_points) * scale).ceil();
-    let height = (f64::from(height_points) * scale).ceil();
+    let width = pixels_at(width_points, dpi);
+    let height = pixels_at(height_points, dpi);
     if !width.is_finite() || !height.is_finite() || width < 1.0 || height < 1.0 || width > f64::from(MAX_EDGE) || height > f64::from(MAX_EDGE) {
         return Err(format!("The {} dimensions exceed the 16,384 pixel edge limit.", format.label()));
     }
@@ -218,6 +228,38 @@ mod tests {
             assert!(dimensions(8_000.0, 4_000.0, 72, format).is_ok());
         }
         assert_eq!([pixels_per_meter(72).unwrap(), pixels_per_meter(150).unwrap(), pixels_per_meter(300).unwrap()], [2_835, 5_906, 11_811]);
+    }
+
+    #[test]
+    fn letter_and_a4_match_the_export_dialog_at_every_dpi() {
+        // The 0.3.1 rehearsal regression: Letter at 150 DPI was 1275 x 1651, the dialog promised 1650.
+        for format in [PageImageFormat::Png, PageImageFormat::Jpeg] {
+            for (width, height, dpi, expected) in [
+                (612.0, 792.0, 72, (612, 792)), (612.0, 792.0, 150, (1_275, 1_650)), (612.0, 792.0, 300, (2_550, 3_300)),
+                (595.276, 841.89, 72, (596, 842)), (595.276, 841.89, 150, (1_241, 1_754)), (595.276, 841.89, 300, (2_481, 3_508)),
+                (100.5, 200.25, 150, (210, 418)),
+            ] {
+                let actual = dimensions(width, height, dpi, format).unwrap();
+                assert_eq!((actual.width, actual.height), expected, "{format:?} {width}x{height} at {dpi}");
+            }
+        }
+    }
+
+    #[test]
+    fn dimensions_agree_with_the_dialog_formula_on_the_shared_table() {
+        // `src/pageImageDimensions.fixture.json` is also checked against `pageImageDimensions` in
+        // `src/ExportPageImageDialog.test.tsx`, so Rust and the dialog agree on every row.
+        let table: Vec<serde_json::Value> = serde_json::from_str(&std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/pageImageDimensions.fixture.json")).unwrap()).unwrap();
+        assert!(table.len() >= 30);
+        for row in table {
+            let (width, height) = (row["width"].as_f64().unwrap() as f32, row["height"].as_f64().unwrap() as f32);
+            let dpi = row["dpi"].as_u64().unwrap() as u16;
+            let expected = (row["pixelWidth"].as_u64().unwrap() as u32, row["pixelHeight"].as_u64().unwrap() as u32);
+            for format in [PageImageFormat::Png, PageImageFormat::Jpeg] {
+                let actual = dimensions(width, height, dpi, format).unwrap();
+                assert_eq!((actual.width, actual.height), expected, "{row}");
+            }
+        }
     }
 
     #[test]

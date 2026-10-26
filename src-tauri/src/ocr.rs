@@ -175,8 +175,10 @@ pub(crate) fn raster_dimensions(width_points: f32, height_points: f32) -> Result
     if !width_points.is_finite() || !height_points.is_finite() || width_points <= 0.0 || height_points <= 0.0 {
         return Err("The page has invalid displayed dimensions for OCR.".into());
     }
-    let width = (f64::from(width_points) * f64::from(OCR_DPI) / 72.0).ceil();
-    let height = (f64::from(height_points) * f64::from(OCR_DPI) / 72.0).ceil();
+    // The same conversion as page-image export and redaction, so the OCR raster and a 150 DPI export
+    // of the same page always have the same pixel size.
+    let width = crate::page_image::pixels_at(width_points, OCR_DPI);
+    let height = crate::page_image::pixels_at(height_points, OCR_DPI);
     if !width.is_finite() || !height.is_finite() || width < 1.0 || height < 1.0
         || width > OCR_MAX_EDGE as f64 || height > OCR_MAX_EDGE as f64
     {

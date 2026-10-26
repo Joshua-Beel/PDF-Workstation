@@ -45,6 +45,30 @@ fn decoded_image(bytes: &[u8]) -> Vec<u8> {
 }
 
 #[test]
+fn edge_marks_reach_the_last_row_and_column_whatever_the_pixel_size() {
+    // Security check for the 150 DPI rounding fix: marks map through the bitmap's own pixel size, so a
+    // mark on the page edge blackens the last row and column both at the old size (1275 x 1651 for
+    // Letter) and at the corrected size (1275 x 1650); no strip at the edge is left uncovered.
+    for (image_width, image_height) in [(1_275u32, 1_651u32), (1_275, 1_650)] {
+        let pixels = (image_width * image_height) as usize;
+        let page = RasterRedactionPage {
+            page_width: 612.0,
+            page_height: 792.0,
+            image_width,
+            image_height,
+            rgb: vec![255; pixels * 3],
+            rectangles: vec![RasterRedactionRect { x: 600.0, y: 780.0, width: 12.0, height: 12.0 }],
+        };
+        let image = decoded_image(&redact_raster_pages(vec![page]).unwrap().bytes);
+        let at = |x: u32, y: u32| &image[((y * image_width + x) * 3) as usize..((y * image_width + x) * 3 + 3) as usize];
+        assert_eq!(at(image_width - 1, image_height - 1), [0, 0, 0]);
+        assert_eq!(at(image_width - 1, image_height - 25), [0, 0, 0]);
+        assert_eq!(at(image_width - 25, image_height - 1), [0, 0, 0]);
+        assert_eq!(at(0, 0), [255, 255, 255]);
+    }
+}
+
+#[test]
 fn writer_is_exact_bounded_and_self_verified() {
     let bytes = build_clean_raster_pdf(vec![CleanRasterPage {
         page_width: 4.0,
