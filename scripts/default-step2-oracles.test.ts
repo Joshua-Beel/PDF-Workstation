@@ -327,6 +327,40 @@ describe('default Step 2 oracles', () => {
     expect(readFileSync('scripts/verify-default-comments-forms.ps1', 'utf8')).toContain("'Invoke-OwnedCleanup','Invoke-SilentUninstall','Wait-OwnedUninstallComplete','Get-OwnedStateRemaining',");
   }, 90_000);
 
+  it('lists what the uninstaller left in the install folder by relative name, kind, size and origin, with no absolute paths', () => {
+    const result = runWithFunctions('verify-default-expanded-page-tools.ps1', ['ConvertTo-OwnedRelativeName', 'Get-OwnedInstallEntries', 'Save-OwnedInstallSnapshot', 'Write-OwnedInstallLeftoverDiagnostics', 'Get-OwnedStateRemaining', 'Wait-OwnedUninstallComplete'], [
+      "$root = Join-Path (Get-Location) ('target/leftover-' + [guid]::NewGuid()); $install = Join-Path $root 'PDF Workstation'",
+      "try {",
+      "  foreach ($relative in @('pdf-workstation.exe','uninstall.exe','resources/pdfium/bin/pdfium.dll','resources/ocr/abc/bin/tesseract.exe')) { $path = Join-Path $install $relative; [IO.Directory]::CreateDirectory((Split-Path -Parent $path)) | Out-Null; [IO.File]::WriteAllText($path, 'x' * 4) }",
+      "  Save-OwnedInstallSnapshot $install",
+      "  foreach ($relative in @('pdf-workstation.exe','uninstall.exe','resources/pdfium/bin/pdfium.dll','resources/ocr/abc/bin/tesseract.exe')) { Remove-Item -LiteralPath (Join-Path $install $relative) }",
+      "  [IO.File]::WriteAllText((Join-Path $install 'resources/ocr/abc/bin/run.log'), 'runtime!')",
+      "  Write-OwnedInstallLeftoverDiagnostics $install -ProcessProvider { @('tesseract.exe', 'C:\\evil') }",
+      "  $many = Join-Path $root 'many'; [IO.Directory]::CreateDirectory($many) | Out-Null; foreach ($index in 1..35) { [IO.File]::WriteAllText((Join-Path $many ('f' + $index + '.tmp')), 'y') }",
+      "  Write-OwnedInstallLeftoverDiagnostics $many -ProcessProvider { @() }",
+      "  $script:diagnosed = 0; $message = $null",
+      "  try { Wait-OwnedUninstallComplete -RegistryPath 'x' -InstallRoot $install -TimeoutMilliseconds 1 -StateProvider { @('install-folder') } -SleepProvider { param($ms) Start-Sleep -Milliseconds 5 } -LeftoverDiagnostics { $script:diagnosed++ } } catch { $message = $_.Exception.Message }",
+      "  if ($script:diagnosed -ne 1 -or $message -notlike '*install-folder*') { throw 'timeout did not run leftover diagnostics' }",
+      "  $script:diagnosed = 0; try { Wait-OwnedUninstallComplete -RegistryPath 'x' -InstallRoot $install -TimeoutMilliseconds 1 -StateProvider { @('uninstall-registry-key') } -SleepProvider { param($ms) Start-Sleep -Milliseconds 5 } -LeftoverDiagnostics { $script:diagnosed++ } } catch { }",
+      "  if ($script:diagnosed -ne 0) { throw 'leftover diagnostics ran without a leftover install folder' }",
+      "} finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }",
+    ].join('\n'));
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(result.stdout).toContain('PASS');
+    expect(result.stdout).toContain('OWNED_CLEANUP_DIAG phase=installed-snapshot entries=10');
+    expect(result.stdout).toContain('OWNED_CLEANUP_DIAG phase=leftover-summary entries=7 snapshotKnown=true');
+    expect(result.stdout).toContain('OWNED_CLEANUP_DIAG phase=leftover kind=dir bytes=-1 origin=installed name=resources/ocr/abc/bin');
+    expect(result.stdout).toContain('OWNED_CLEANUP_DIAG phase=leftover kind=file bytes=8 origin=runtime name=resources/ocr/abc/bin/run.log');
+    expect(result.stdout).toContain('OWNED_CLEANUP_DIAG phase=leftover-processes count=2 names=C??evil,tesseract.exe');
+    expect(result.stdout).toContain('OWNED_CLEANUP_DIAG phase=leftover-truncated omitted=5');
+    expect(result.stdout.match(/phase=leftover kind=file bytes=1 origin=runtime name=f\d+\.tmp/g)?.length).toBe(30);
+    expect(result.stdout).not.toMatch(/[A-Za-z]:\\|target[\\/]leftover/);
+    const expanded = readFileSync('scripts/verify-default-expanded-page-tools.ps1', 'utf8');
+    expect(expanded).toContain('$resources=Assert-InstalledDefaultResources $installRoot $receipt $sets;Save-OwnedInstallSnapshot $installRoot');
+    expect(readFileSync('scripts/verify-default-comments-forms.ps1', 'utf8')).toContain('$resources=Assert-InstalledDefaultResources $installRoot $receipt $sets;Save-OwnedInstallSnapshot $installRoot');
+    expect(expanded).toContain("if($remaining-contains'install-folder'){try{if($LeftoverDiagnostics){&$LeftoverDiagnostics}else{Write-OwnedInstallLeftoverDiagnostics $InstallRoot}}");
+  }, 90_000);
+
   it('writes the settings sentinel under the exact name the organizer and structural helpers require', () => {
     const expanded = readFileSync('scripts/verify-default-expanded-page-tools.ps1', 'utf8');
     expect(expanded).toContain("$sentinel=Join-Path $settingsRoot 'upgrade-sentinel.json'");

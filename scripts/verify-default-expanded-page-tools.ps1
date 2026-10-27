@@ -131,13 +131,45 @@ function Get-OwnedStateRemaining { param([string]$RegistryPath,[string]$InstallR
  $remaining=@();if(Test-Path -LiteralPath $RegistryPath){$remaining+='uninstall-registry-key'};if(Test-Path -LiteralPath $InstallRoot){$remaining+='install-folder'};if($SettingsRoot-and(Test-Path -LiteralPath $SettingsRoot)){$remaining+='settings-folder'};return $remaining
 }
 
-function Wait-OwnedUninstallComplete { param([string]$RegistryPath,[string]$InstallRoot,[int]$TimeoutMilliseconds=180000,[scriptblock]$StateProvider,[scriptblock]$SleepProvider)
+function ConvertTo-OwnedRelativeName { param([string]$Root,[string]$FullName)
+ $base=[IO.Path]::GetFullPath($Root).TrimEnd('\')+'\';$full=[IO.Path]::GetFullPath($FullName)
+ if(-not$full.StartsWith($base,[StringComparison]::OrdinalIgnoreCase)){return '<outside>'}
+ $relative=($full.Substring($base.Length).Replace('\','/')-replace'[^\x21-\x7E ]','?');if($relative.Length-gt120){$relative=$relative.Substring(0,117)+'...'};return $relative
+}
+
+function Get-OwnedInstallEntries { param([string]$InstallRoot)
+ if(-not(Test-Path -LiteralPath $InstallRoot -PathType Container)){return @()}
+ return @(Get-ChildItem -LiteralPath $InstallRoot -Recurse -Force -ErrorAction SilentlyContinue|Sort-Object FullName|ForEach-Object{[pscustomobject][ordered]@{relative=ConvertTo-OwnedRelativeName $InstallRoot $_.FullName;kind=$(if($_.PSIsContainer){'dir'}else{'file'});bytes=$(if($_.PSIsContainer){-1}else{[int64]$_.Length})}})
+}
+
+function Save-OwnedInstallSnapshot { param([string]$InstallRoot)
+ $script:OwnedInstallSnapshot=[string[]]@(Get-OwnedInstallEntries $InstallRoot|ForEach-Object{[string]$_.relative})
+ [Console]::Out.WriteLine(('OWNED_CLEANUP_DIAG phase=installed-snapshot entries={0}' -f $script:OwnedInstallSnapshot.Count))
+}
+
+function Write-OwnedInstallLeftoverDiagnostics { param([string]$InstallRoot,[scriptblock]$EntryProvider,[scriptblock]$ProcessProvider)
+ $snapshotVariable=Get-Variable -Name OwnedInstallSnapshot -Scope Script -ErrorAction SilentlyContinue
+ $installed=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase);$snapshotKnown=$null-ne$snapshotVariable-and$null-ne$snapshotVariable.Value
+ if($snapshotKnown){foreach($name in @($snapshotVariable.Value)){$null=$installed.Add([string]$name)}}
+ $entries=@(if($EntryProvider){&$EntryProvider}else{Get-OwnedInstallEntries $InstallRoot})
+ [Console]::Out.WriteLine(('OWNED_CLEANUP_DIAG phase=leftover-summary entries={0} snapshotKnown={1}' -f $entries.Count,$snapshotKnown.ToString().ToLowerInvariant()))
+ foreach($entry in @($entries|Select-Object -First 30)){
+  $origin=if(-not$snapshotKnown){'unknown'}elseif($installed.Contains([string]$entry.relative)){'installed'}else{'runtime'}
+  [Console]::Out.WriteLine(('OWNED_CLEANUP_DIAG phase=leftover kind={0} bytes={1} origin={2} name={3}' -f $entry.kind,$entry.bytes,$origin,$entry.relative))
+ }
+ if($entries.Count-gt30){[Console]::Out.WriteLine(('OWNED_CLEANUP_DIAG phase=leftover-truncated omitted={0}' -f ($entries.Count-30)))}
+ $root=[IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')+'\'
+ $running=@(if($ProcessProvider){&$ProcessProvider}else{Get-CimInstance Win32_Process -ErrorAction SilentlyContinue|Where-Object{$_.ExecutablePath-and[IO.Path]::GetFullPath([string]$_.ExecutablePath).StartsWith($root,[StringComparison]::OrdinalIgnoreCase)}|ForEach-Object{[IO.Path]::GetFileName([string]$_.ExecutablePath)}})
+ [Console]::Out.WriteLine(('OWNED_CLEANUP_DIAG phase=leftover-processes count={0} names={1}' -f $running.Count,((@($running|Sort-Object -Unique|ForEach-Object{([string]$_)-replace'[^A-Za-z0-9._-]','?'}))-join',')))
+}
+
+function Wait-OwnedUninstallComplete { param([string]$RegistryPath,[string]$InstallRoot,[int]$TimeoutMilliseconds=180000,[scriptblock]$StateProvider,[scriptblock]$SleepProvider,[scriptblock]$LeftoverDiagnostics)
  $started=[Environment]::TickCount64;$remaining=@()
  while($true){
   $remaining=@(if($StateProvider){&$StateProvider}else{Get-OwnedStateRemaining $RegistryPath $InstallRoot ''})
   $elapsed=[Environment]::TickCount64-$started
   if($remaining.Count-eq0){[Console]::Out.WriteLine(('OWNED_CLEANUP_DIAG phase=uninstall-complete waitedMs={0}' -f $elapsed));return}
-  if($elapsed-ge$TimeoutMilliseconds){[Console]::Out.WriteLine(('OWNED_CLEANUP_DIAG phase=uninstall-incomplete waitedMs={0} remaining={1}' -f $elapsed,($remaining-join',')));throw ('The silent uninstaller did not finish; remaining: '+($remaining-join', ')+'.')}
+  if($elapsed-ge$TimeoutMilliseconds){[Console]::Out.WriteLine(('OWNED_CLEANUP_DIAG phase=uninstall-incomplete waitedMs={0} remaining={1}' -f $elapsed,($remaining-join',')));if($remaining-contains'install-folder'){try{if($LeftoverDiagnostics){&$LeftoverDiagnostics}else{Write-OwnedInstallLeftoverDiagnostics $InstallRoot}}catch{[Console]::Out.WriteLine('OWNED_CLEANUP_DIAG phase=leftover-diagnostics-failed')}};throw ('The silent uninstaller did not finish; remaining: '+($remaining-join', ')+'.')}
   if($SleepProvider){&$SleepProvider 500}else{Start-Sleep -Milliseconds 500}
  }
 }
@@ -196,7 +228,7 @@ $fresh=Get-FreshInstallFacts $installRoot $settingsRoot $registry @($installer);
 $baselineProcesses=Get-ConflictingProcessFacts @($installer);Assert-EmptyProcessFacts $baselineProcesses 'Baseline'
 [IO.Directory]::CreateDirectory($work)|Out-Null;$installedOk=$false;$primaryFailure=$null;$cleanupFailure=$null;$sentinel=$null;$sentinelReceipt=$null;$finalProcesses=$null
 try{
- Invoke-BoundedSilentInstaller $installer;$installedOk=$true;$facts=Get-InstallFacts $registry $installRoot;Assert-InstallFacts $facts $TargetVersion $installRoot $receipt.packagedApplication 'Valid' $ExpectedPublisher $true;$resources=Assert-InstalledDefaultResources $installRoot $receipt $sets
+ Invoke-BoundedSilentInstaller $installer;$installedOk=$true;$facts=Get-InstallFacts $registry $installRoot;Assert-InstallFacts $facts $TargetVersion $installRoot $receipt.packagedApplication 'Valid' $ExpectedPublisher $true;$resources=Assert-InstalledDefaultResources $installRoot $receipt $sets;Save-OwnedInstallSnapshot $installRoot
  if(Test-Path $settingsRoot){throw 'Silent install created settings.'};[IO.Directory]::CreateDirectory($settingsRoot)|Out-Null
  $organizerFixture=Join-Path $work 'organizer-source.pdf';$donorFixture=Join-Path $work 'structural-donor.pdf';$organizerReceipt=New-ExpandedPageSequencePdf $organizerFixture TARGET;$donorReceipt=New-ExpandedPageSequencePdf $donorFixture DONOR;$png=Join-Path $work 'image-source.png';$pngReceipt=New-ExpandedSourcePng $png;$split=Join-Path $work 'split-parent';[IO.Directory]::CreateDirectory($split)|Out-Null
  $image=Invoke-InstalledImagePageTools -ApplicationPath $resources.Application.FullName -ApplicationReceipt $receipt.packagedApplication -PdfiumPath $resources.Pdfium.FullName -PdfiumReceipt $sets.Pdfium -WebDriverRoot $drivers -ProfileRoot (Join-Path $work 'image-profile') -SettingsRoot $settingsRoot -SourceImagePath $png -SourceImageReceipt $pngReceipt -CreatedPdfPath (Join-Path $work 'image-source.pdf') -ExportedPngPath (Join-Path $work 'image-source-page-1.png') -ExpectedPublisher $ExpectedPublisher;Assert-ExpandedImageResult $image
