@@ -156,7 +156,7 @@ function Save-OwnedInstallSnapshot { param([string]$InstallRoot,[scriptblock]$En
  }catch{$script:OwnedInstallSnapshot=$null;[Console]::Out.WriteLine('OWNED_CLEANUP_DIAG phase=snapshot-failed')}
 }
 
-function Write-OwnedInstallLeftoverDiagnostics { param([string]$InstallRoot,[scriptblock]$EntryProvider,[scriptblock]$ProcessProvider)
+function Write-OwnedInstallLeftoverDiagnostics { param([string]$InstallRoot,[scriptblock]$EntryProvider,[scriptblock]$ProcessProvider,[scriptblock]$OwnModuleProvider)
  $snapshotVariable=Get-Variable -Name OwnedInstallSnapshot -Scope Script -ErrorAction SilentlyContinue
  $installed=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase);$snapshotKnown=$null-ne$snapshotVariable-and$null-ne$snapshotVariable.Value
  if($snapshotKnown){foreach($name in @($snapshotVariable.Value)){$null=$installed.Add([string]$name)}}
@@ -170,6 +170,8 @@ function Write-OwnedInstallLeftoverDiagnostics { param([string]$InstallRoot,[scr
  $root=[IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')+'\'
  $running=@(if($ProcessProvider){&$ProcessProvider}else{Get-CimInstance Win32_Process -ErrorAction SilentlyContinue|Where-Object{$_.ExecutablePath-and[IO.Path]::GetFullPath([string]$_.ExecutablePath).StartsWith($root,[StringComparison]::OrdinalIgnoreCase)}|ForEach-Object{[IO.Path]::GetFileName([string]$_.ExecutablePath)}})
  [Console]::Out.WriteLine(('OWNED_CLEANUP_DIAG phase=leftover-processes count={0} names={1}' -f $running.Count,((@($running|Sort-Object -Unique|ForEach-Object{([string]$_)-replace'[^A-Za-z0-9._-]','?'}))-join',')))
+ $ownModules=@(try{if($OwnModuleProvider){&$OwnModuleProvider}else{Get-OwnProcessModulesUnder $InstallRoot}}catch{@()})
+ [Console]::Out.WriteLine(('OWNED_CLEANUP_DIAG phase=leftover-own-modules count={0} names={1}' -f $ownModules.Count,((@($ownModules|ForEach-Object{[IO.Path]::GetFileName([string]$_)-replace'[^A-Za-z0-9._-]','?'}|Sort-Object -Unique))-join',')))
 }
 
 function Wait-OwnedUninstallComplete { param([string]$RegistryPath,[string]$InstallRoot,[int]$TimeoutMilliseconds=180000,[scriptblock]$StateProvider,[scriptblock]$SleepProvider,[scriptblock]$LeftoverDiagnostics)
@@ -183,10 +185,25 @@ function Wait-OwnedUninstallComplete { param([string]$RegistryPath,[string]$Inst
  }
 }
 
+function Get-OwnProcessModulesUnder { param([string]$InstallRoot)
+ $root=[IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')+'\'
+ $process=[Diagnostics.Process]::GetCurrentProcess();try{$process.Refresh();return @($process.Modules|ForEach-Object{[string]$_.FileName}|Where-Object{$_-and[IO.Path]::GetFullPath($_).StartsWith($root,[StringComparison]::OrdinalIgnoreCase)}|Sort-Object -Unique)}finally{$process.Dispose()}
+}
+
+function Clear-OwnProcessModules { param([string]$InstallRoot,[scriptblock]$ModuleProvider,[scriptblock]$ReleaseProvider)
+ if(-not$ReleaseProvider-and-not('OwnedModuleRelease'-as[type])){Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public static class OwnedModuleRelease{[DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool GetModuleHandleExW(uint flags,string name,out IntPtr module);[DllImport("kernel32.dll",SetLastError=true)] static extern bool FreeLibrary(IntPtr module);public static int Release(string path,int maximum){int freed=0;for(int i=0;i<maximum;i++){IntPtr module;if(!GetModuleHandleExW(2,path,out module)||module==IntPtr.Zero)break;if(!FreeLibrary(module))break;freed++;}return freed;}}'}
+ $modules=@(if($ModuleProvider){&$ModuleProvider}else{Get-OwnProcessModulesUnder $InstallRoot})
+ $released=0;foreach($module in $modules){$released+=[int]$(if($ReleaseProvider){&$ReleaseProvider $module 256}else{[OwnedModuleRelease]::Release([string]$module,256)})}
+ $names=@($modules|ForEach-Object{[IO.Path]::GetFileName([string]$_)-replace'[^A-Za-z0-9._-]','?'}|Sort-Object -Unique)-join','
+ $remaining=@(if($ModuleProvider){&$ModuleProvider}else{Get-OwnProcessModulesUnder $InstallRoot})
+ [Console]::Out.WriteLine(('OWNED_CLEANUP_DIAG phase=released-own-modules modules={0} references={1} names={2} remaining={3}' -f $modules.Count,$released,$names,$remaining.Count))
+ if($remaining.Count){throw 'The verifier could not release its own loaded copy of an installed module before uninstalling.'}
+}
+
 function Invoke-OwnedCleanup {
- param([bool]$Installed,[string]$InstallRoot,[string]$SettingsRoot,[scriptblock]$UninstallProvider,[scriptblock]$RemoveProvider,[string]$RegistryPath='Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\PDF Workstation',[scriptblock]$UninstallStateProvider)
+ param([bool]$Installed,[string]$InstallRoot,[string]$SettingsRoot,[scriptblock]$UninstallProvider,[scriptblock]$RemoveProvider,[string]$RegistryPath='Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\PDF Workstation',[scriptblock]$UninstallStateProvider,[scriptblock]$ModuleReleaseProvider)
  $uninstaller=Join-Path $InstallRoot 'uninstall.exe'
- if($Installed){if(-not(Test-Path -LiteralPath $uninstaller)){throw 'Owned installation has no uninstaller for cleanup.'};if($UninstallProvider){&$UninstallProvider $uninstaller}else{Invoke-SilentUninstall $uninstaller};Wait-OwnedUninstallComplete -RegistryPath $RegistryPath -InstallRoot $InstallRoot -StateProvider $UninstallStateProvider}
+ if($Installed){if(-not(Test-Path -LiteralPath $uninstaller)){throw 'Owned installation has no uninstaller for cleanup.'};if($ModuleReleaseProvider){&$ModuleReleaseProvider $InstallRoot}else{Clear-OwnProcessModules $InstallRoot};if($UninstallProvider){&$UninstallProvider $uninstaller}else{Invoke-SilentUninstall $uninstaller};Wait-OwnedUninstallComplete -RegistryPath $RegistryPath -InstallRoot $InstallRoot -StateProvider $UninstallStateProvider}
  if(Test-Path -LiteralPath $SettingsRoot){Assert-NoReparseAncestors $SettingsRoot;foreach($entry in @(Get-ChildItem -LiteralPath $SettingsRoot -Recurse -Force)){Assert-NoReparseAncestors $entry.FullName};if($RemoveProvider){&$RemoveProvider $SettingsRoot}else{Remove-Item -LiteralPath $SettingsRoot -Recurse -Force}}
 }
 

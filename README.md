@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- Uninstall leftover fixed at its source: the default verifier itself kept the installed PDFium loaded for its proofs, so the uninstaller could not delete it; the verifier now releases it before uninstalling. The installer and app were not at fault (SM6; scripts and tests only).
 - Uninstall leftover diagnostics hardened after review: a failed snapshot or unreadable entry can no longer fail the run, and enumeration stops at 5,000 entries (SM6; scripts and tests only).
 - Uninstall leftover diagnostics: when the install folder survives the silent uninstall, the default check now lists what is left (relative names, kind, size, whether the installer or the running app created it) and any process still running from there (SM6; scripts and tests only; the check itself is unchanged).
 - Rehearsal fixes, round 8: final cleanup waits for the silent uninstaller to finish (it relaunches itself and returns at once) and names what remains if it does not (SM6; scripts and tests only).

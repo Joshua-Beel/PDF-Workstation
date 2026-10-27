@@ -297,7 +297,7 @@ describe('default Step 2 oracles', () => {
   }, 90_000);
 
   it('waits for the relaunched NSIS uninstaller to finish and names any state that remains', () => {
-    const result = runWithFunctions('verify-default-expanded-page-tools.ps1', ['Get-OwnedStateRemaining', 'Wait-OwnedUninstallComplete', 'Invoke-OwnedCleanup', 'Assert-OwnedCleanupState', 'Assert-EmptyProcessFacts'], [
+    const result = runWithFunctions('verify-default-expanded-page-tools.ps1', ['Get-OwnedStateRemaining', 'Wait-OwnedUninstallComplete', 'Invoke-OwnedCleanup', 'Assert-OwnedCleanupState', 'Assert-EmptyProcessFacts', 'Get-OwnProcessModulesUnder', 'Clear-OwnProcessModules'], [
       "$script:polls = 0; $script:sleeps = 0; $sleep = { param($ms) $script:sleeps++ }",
       "$state = { $script:polls++; if ($script:polls -le 3) { @('uninstall-registry-key', 'install-folder') } elseif ($script:polls -le 5) { @('install-folder') } else { @() } }",
       "Wait-OwnedUninstallComplete -RegistryPath 'x' -InstallRoot 'y' -StateProvider $state -SleepProvider $sleep",
@@ -385,6 +385,57 @@ describe('default Step 2 oracles', () => {
     expect(result.stdout).toContain('OWNED_CLEANUP_DIAG phase=leftover kind=dir bytes=-1 origin=unknown name=resources/ocr');
     expect(result.stdout.match(/OWNED_CLEANUP_DIAG phase=enumeration-capped limit=10/g)?.length).toBe(1);
     expect(readFileSync('scripts/verify-default-expanded-page-tools.ps1', 'utf8')).toContain('[ValidateRange(1,100000)][int]$MaximumEntries=5000');
+  }, 90_000);
+
+  it('releases the verifier\'s own PDFium proof module from the install folder before uninstalling, so the uninstaller can delete it', () => {
+    const result = runWithFunctions('verify-default-expanded-page-tools.ps1', ['Get-OwnProcessModulesUnder', 'Clear-OwnProcessModules', 'Write-OwnedInstallLeftoverDiagnostics', 'Get-OwnedInstallEntries', 'ConvertTo-OwnedRelativeName'], [
+      ". ./scripts/ocr/installer-package.ps1",
+      ". ./scripts/installed-image-page-tools.ps1",
+      "$root = Join-Path (Get-Location) ('target/pdfium-lock-' + [guid]::NewGuid()); $install = Join-Path $root 'PDF Workstation'; $dll = Join-Path $install 'resources/pdfium/bin/pdfium.dll'",
+      "[IO.Directory]::CreateDirectory((Split-Path -Parent $dll)) | Out-Null; [IO.File]::Copy((Resolve-Path ./src-tauri/resources/pdfium/bin/pdfium.dll), $dll)",
+      "try {",
+      "  Initialize-ImagePageRasterProof; $first = [ImagePagePdfiumRasterProof]::new($dll); $second = [ImagePagePdfiumRasterProof]::new($dll)",
+      "  $locked = $false; try { [IO.File]::Delete($dll) } catch { $locked = $true }; if (-not $locked) { throw 'a loaded proof module did not lock the installed file' }",
+      "  $loaded = @(Get-OwnProcessModulesUnder $install); if ($loaded.Count -ne 1 -or [IO.Path]::GetFileName($loaded[0]) -cne 'pdfium.dll') { throw ('own modules: ' + ($loaded -join ',')) }",
+      "  Write-OwnedInstallLeftoverDiagnostics $install -EntryProvider { @() } -ProcessProvider { @() }",
+      "  Clear-OwnProcessModules $install",
+      "  if (@(Get-OwnProcessModulesUnder $install).Count -ne 0) { throw 'module still loaded' }",
+      "  [IO.File]::Delete($dll); if (Test-Path -LiteralPath $dll) { throw 'released module could not be deleted' }",
+      "  Clear-OwnProcessModules $install",
+      "  $message = $null; try { Clear-OwnProcessModules $install -ModuleProvider { @('D:\\x\\pdfium.dll') } -ReleaseProvider { param($path, $maximum) 0 } } catch { $message = $_.Exception.Message }",
+      "  if ($message -notlike '*could not release its own loaded copy*') { throw 'unreleasable module was accepted' }",
+      "} finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }",
+    ].join('\n'));
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(result.stdout).toContain('PASS');
+    expect(result.stdout).toContain('OWNED_CLEANUP_DIAG phase=leftover-own-modules count=1 names=pdfium.dll');
+    expect(result.stdout).toContain('OWNED_CLEANUP_DIAG phase=released-own-modules modules=1 references=2 names=pdfium.dll remaining=0');
+    expect(result.stdout).toContain('OWNED_CLEANUP_DIAG phase=released-own-modules modules=0 references=0 names= remaining=0');
+    expect(result.stdout).not.toMatch(/target[\\/]pdfium-lock|[A-Za-z]:\\/);
+    const expanded = readFileSync('scripts/verify-default-expanded-page-tools.ps1', 'utf8');
+    expect(expanded).toContain("if($ModuleReleaseProvider){&$ModuleReleaseProvider $InstallRoot}else{Clear-OwnProcessModules $InstallRoot};if($UninstallProvider){&$UninstallProvider $uninstaller}else{Invoke-SilentUninstall $uninstaller}");
+    expect(readFileSync('scripts/verify-default-comments-forms.ps1', 'utf8')).toContain("'Get-OwnProcessModulesUnder','Clear-OwnProcessModules'");
+    for (const helper of ['scripts/installed-image-page-tools.ps1', 'scripts/installed-organizer-tools.ps1', 'scripts/installed-structural-page-tools.ps1', 'scripts/installed-print-dialog.ps1']) {
+      expect(readFileSync(helper, 'utf8'), helper).toMatch(/LoadLibraryExW\(Path\.GetFullPath\(path\),\s*IntPtr\.Zero,\s*0x00000100\s*\|\s*0x00001000\)/);
+    }
+  }, 120_000);
+
+  it('releases own modules before running the uninstaller during owned cleanup', () => {
+    const result = runWithFunctions('verify-default-expanded-page-tools.ps1', ['Invoke-OwnedCleanup', 'Get-OwnedStateRemaining', 'Wait-OwnedUninstallComplete'], [
+      ". ./scripts/ocr/installer-package.ps1",
+      "$root = Join-Path (Get-Location) ('target/release-order-' + [guid]::NewGuid()); $install = Join-Path $root 'install'; $settings = Join-Path $root 'settings'",
+      "[IO.Directory]::CreateDirectory($install) | Out-Null; [IO.File]::WriteAllText((Join-Path $install 'uninstall.exe'), 'stub')",
+      "try {",
+      "  $script:order = @()",
+      "  Invoke-OwnedCleanup $true $install $settings -ModuleReleaseProvider { param($path) $script:order += 'release' } -UninstallProvider { param($path) $script:order += 'uninstall' } -RegistryPath (Join-Path $root 'absent') -UninstallStateProvider { $script:order += 'poll'; @() }",
+      "  if (($script:order -join ',') -cne 'release,uninstall,poll') { throw ('order: ' + ($script:order -join ',')) }",
+      "  $script:order = @(); $message = $null",
+      "  try { Invoke-OwnedCleanup $true $install $settings -ModuleReleaseProvider { param($path) $script:order += 'release'; throw 'module pinned' } -UninstallProvider { param($path) $script:order += 'uninstall' } -RegistryPath (Join-Path $root 'absent') -UninstallStateProvider { @() } } catch { $message = $_.Exception.Message }",
+      "  if ($message -cne 'module pinned' -or ($script:order -join ',') -cne 'release') { throw 'uninstall ran after a failed module release' }",
+      "} finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }",
+    ].join('\n'));
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(result.stdout).toContain('PASS');
   }, 90_000);
 
   it('writes the settings sentinel under the exact name the organizer and structural helpers require', () => {
