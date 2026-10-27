@@ -677,34 +677,6 @@ function Invoke-InstalledEngineOcrSmoke {
     }
 }
 
-function New-HostedPublisherUiNotAttemptedEvidence {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)]$Receipt,
-        [Parameter(Mandatory = $true)][ValidateSet('installer','installed-application')][string]$Kind,
-        [Parameter(Mandatory = $true)][string]$ExpectedPublisher,
-        [scriptblock]$SignatureProvider
-    )
-    $canonical = [IO.Path]::GetFullPath($Path)
-    Assert-PublisherUiFileReceipt -Path $canonical -Receipt $Receipt
-    $null = Assert-TrustedWindowsSignature -Path $canonical -SignatureProvider $SignatureProvider -ExpectedPublisher $ExpectedPublisher
-    Assert-PublisherUiFileReceipt -Path $canonical -Receipt $Receipt
-    $null = Assert-TrustedWindowsSignature -Path $canonical -SignatureProvider $SignatureProvider -ExpectedPublisher $ExpectedPublisher
-    return [pscustomobject][ordered]@{
-        kind = $Kind
-        fileName = [IO.Path]::GetFileName($canonical)
-        bytes = [uint64]$Receipt.bytes
-        sha256 = [string]$Receipt.sha256
-        publisher = $ExpectedPublisher
-        authenticodeStatus = 'Valid'
-        trustedTimestampVerified = $true
-        shellPublisherUiAttempted = $false
-        shellPublisherUiVerified = $false
-        notAttemptedReason = 'github-hosted-noninteractive-session'
-        screenshotsUsed = $false
-    }
-}
-
 function Write-SanitizedUpgradeRecord {
     param(
         [Parameter(Mandatory = $true)][string]$OutputRoot,

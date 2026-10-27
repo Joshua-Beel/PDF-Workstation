@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory = $true)][string]$OutputRoot,
     [Parameter(Mandatory = $true)][string]$WebDriverRoot,
     [Parameter(Mandatory = $true)][string]$WebViewProfileRoot,
+    [Parameter(Mandatory = $true)][ValidateSet('HostedNonInteractive')][string]$PublisherUiMode,
     [Parameter(Mandatory = $true)][string]$WorkflowSourceRevision,
     [Parameter(Mandatory = $true)][string]$TargetVersion,
     [Parameter(Mandatory = $true)][string]$TargetTag,
@@ -395,6 +396,24 @@ function Invoke-SilentInstaller {
     Invoke-BoundedProcess -Path $Path -Arguments @('/S') -TimeoutMilliseconds $script:UpdatePins.InstallerDeadlineMilliseconds
 }
 
+function Assert-HostedPublisherUiEvidence {
+    param($Value,[string]$Kind,[string]$FileName,[uint64]$Bytes,[string]$Sha256,[string]$Publisher)
+    $expected = @('kind','fileName','bytes','sha256','publisher','authenticodeStatus','trustedTimestampVerified',
+        'shellPublisherUiAttempted','shellPublisherUiVerified','notAttemptedReason','screenshotsUsed') | Sort-Object -CaseSensitive
+    $actual = @($Value.PSObject.Properties.Name | Sort-Object -CaseSensitive)
+    if ($actual.Count -ne $expected.Count -or (Compare-Object $expected $actual -CaseSensitive) -or
+        [string]$Value.kind -cne $Kind -or [string]$Value.fileName -cne $FileName -or
+        [uint64]$Value.bytes -ne $Bytes -or [string]$Value.sha256 -cne $Sha256 -or
+        [string]$Value.publisher -cne $Publisher -or [string]$Value.authenticodeStatus -cne 'Valid' -or
+        $Value.trustedTimestampVerified -isnot [bool] -or -not $Value.trustedTimestampVerified -or
+        $Value.shellPublisherUiAttempted -isnot [bool] -or $Value.shellPublisherUiAttempted -or
+        $Value.shellPublisherUiVerified -isnot [bool] -or $Value.shellPublisherUiVerified -or
+        [string]$Value.notAttemptedReason -cne 'github-hosted-noninteractive-session' -or
+        $Value.screenshotsUsed -isnot [bool] -or $Value.screenshotsUsed) {
+        throw 'Hosted publisher evidence receipt is incomplete or malformed.'
+    }
+}
+
 function Assert-Sentinel {
     param([string]$Path,[uint64]$Bytes,[string]$Sha256)
     Assert-FileReceipt -Path $Path -Bytes $Bytes -Sha256 $Sha256 -Kind 'Upgrade sentinel'
@@ -419,6 +438,9 @@ $targetManifestAssetIdValue = ConvertTo-ExactUInt64 -Value $TargetManifestAssetI
 $targetManifestBytesValue = ConvertTo-ExactUInt64 -Value $TargetManifestBytes -Kind 'Target manifest bytes'
 
 Assert-HostedRunner
+if ($PublisherUiMode -cne 'HostedNonInteractive') {
+    throw 'GitHub-hosted in-app update verification requires exact HostedNonInteractive publisher UI mode.'
+}
 $runnerTemp = [string]$env:RUNNER_TEMP
 if ([string]::IsNullOrWhiteSpace($runnerTemp)) { throw 'RUNNER_TEMP is unavailable.' }
 $work = Resolve-RunnerPath -Path $WorkRoot -RunnerTemp $runnerTemp -MustBeFresh
@@ -474,7 +496,7 @@ $null = Assert-TrustedWindowsSignature -Path $extractedApp.FullName -ExpectedPub
 $projectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'installed-publisher-ui.ps1')
 $installerUiReceipt = [pscustomobject]([ordered]@{ bytes = $targetInstallerBytesValue; sha256 = $TargetInstallerSha256 })
-$installerPublisherUi = Invoke-InstalledPublisherUiProof -Path $targetInstallerPath -Receipt $installerUiReceipt -Kind installer -ExpectedPublisher $ExpectedPublisher
+$installerPublisherUi = New-HostedPublisherUiNotAttemptedEvidence -Path $targetInstallerPath -Receipt $installerUiReceipt -Kind installer -ExpectedPublisher $ExpectedPublisher
 
 $installRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'PDF Workstation')).TrimEnd('\')
 $settingsRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'local.pdfworkstation.desktop')).TrimEnd('\')
@@ -583,7 +605,7 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
     $postSession = $null
     Stop-ExactProcesses -ApplicationPath ([string]$upgraded.appPath)
 
-    $applicationPublisherUi = Invoke-InstalledPublisherUiProof -Path ([string]$upgraded.appPath) -Receipt ([pscustomobject]$targetApplicationReceipt) -Kind installed-application -ExpectedPublisher $ExpectedPublisher
+    $applicationPublisherUi = New-HostedPublisherUiNotAttemptedEvidence -Path ([string]$upgraded.appPath) -Receipt ([pscustomobject]$targetApplicationReceipt) -Kind installed-application -ExpectedPublisher $ExpectedPublisher
 
     # Model one bounded installer-stage damage state without claiming NSIS transactionality:
     # quarantine the exact installed application, prove it is absent, then use only the
@@ -609,10 +631,12 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
     Stop-ExactProcesses -ApplicationPath ([string]$repaired.appPath)
     if (@(Get-AppProcesses -ApplicationPath ([string]$repaired.appPath)).Count -ne 0) { throw 'Relevant installed application processes remain after verification.' }
 
+    Assert-HostedPublisherUiEvidence -Value $installerPublisherUi -Kind 'installer' -FileName $TargetInstallerName -Bytes $targetInstallerBytesValue -Sha256 $TargetInstallerSha256 -Publisher $ExpectedPublisher
+    Assert-HostedPublisherUiEvidence -Value $applicationPublisherUi -Kind 'installed-application' -FileName 'pdf-workstation.exe' -Bytes ([uint64]$targetApplicationReceipt.bytes) -Sha256 ([string]$targetApplicationReceipt.sha256) -Publisher $ExpectedPublisher
     [IO.Directory]::CreateDirectory($output) | Out-Null
     $record = [ordered]@{
-        schemaVersion = 1
-        scope = 'Ephemeral GitHub-hosted proof of the exact published 0.2.0 UI checking the public latest manifest, deterministic pre-download network failure and retry, signed target install, automatic relaunch, current-version recheck, Explorer publisher UI, sentinel preservation, and standalone signed-installer restoration of a controlled missing-application-executable state; partial-byte interruption and installer transactionality are not established.'
+        schemaVersion = 2
+        scope = 'Ephemeral GitHub-hosted proof of the exact published 0.2.0 UI checking the public latest manifest, deterministic pre-download network failure and retry, signed target install, automatic relaunch, current-version recheck, exact Authenticode publisher and trusted-timestamp verification, sentinel preservation, and standalone signed-installer restoration of a controlled missing-application-executable state; the noninteractive hosted session does not attempt or verify Windows Explorer Digital Signatures UI, and partial-byte interruption and installer transactionality are not established.'
         mode = 'published-stable-in-app-update'
         workflowSourceRevision = $WorkflowSourceRevision
         targetSourceRevision = $TargetSourceRevision
@@ -630,7 +654,15 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
         }
         installedTarget = [ordered]@{
             application = $targetApplicationReceipt
-            publisherUi = [ordered]@{ installer = $installerPublisherUi; installedApplication = $applicationPublisherUi }
+            publisherUi = [ordered]@{
+                mode = 'hosted-noninteractive'
+                attempted = $false
+                verified = $false
+                reason = 'github-hosted-noninteractive-session'
+                screenshotsUsed = $false
+                installer = $installerPublisherUi
+                installedApplication = $applicationPublisherUi
+            }
             recovery = [ordered]@{ damageKind = 'missing-application-executable'; quarantinedReceiptPreserved = $true; restoredApplicationReceiptMatched = $true }
         }
         updater = [ordered]@{
@@ -646,7 +678,8 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
             retryThroughSameUiVerified = $true; updaterSignatureVerified = $true; targetPublisherSignatureVerified = $true
             registryVersionUpdated = $true; installedApplicationReceiptMatched = $true; automaticRelaunchVerified = $true
             postUpdateLatestCheckVerified = $true; settingsSentinelPreserved = $true; documentSentinelPreserved = $true
-            installerShellPublisherUiVerified = $true; installedApplicationShellPublisherUiVerified = $true
+            publisherUiMode = 'hosted-noninteractive'; publisherUiAttempted = $false
+            installerShellPublisherUiVerified = $false; installedApplicationShellPublisherUiVerified = $false
             publisherUiScreenshotsUsed = $false; standaloneSignedInstallerRepairVerified = $true
             partialByteDownloadInterruptionVerified = $false; appKillMidDownloadVerified = $false
             installerStageInterruptionVerified = $false; installerTransactionalityVerified = $false

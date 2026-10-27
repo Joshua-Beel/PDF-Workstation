@@ -9,11 +9,12 @@ function normalizeNewlines(value: string) {
   return value.replace(/\r\n?/g, '\n');
 }
 
-function verifierHarness(names: string[], body: string) {
+function verifierHarness(names: string[], body: string, preamble = '') {
   return String.raw`
     $ErrorActionPreference='Stop'
     Set-StrictMode -Version Latest
     Set-Location -LiteralPath '${process.cwd().replaceAll("'", "''")}'
+    ${preamble}
     $tokens=$null;$errors=$null
     $ast=[Management.Automation.Language.Parser]::ParseFile((Resolve-Path '${scriptPath}'),[ref]$tokens,[ref]$errors)
     if($errors.Count){throw 'In-app updater verifier did not parse.'}
@@ -54,6 +55,8 @@ describe('published in-app update verification infrastructure', () => {
     expect(workflow).toContain('$tagRevision -cne $env:TARGET_SOURCE_REVISION');
     expect(workflow).toContain('persist-credentials: false');
     expect(workflow).toContain('./scripts/verify-in-app-update.ps1');
+    expect(workflow).toContain('-PublisherUiMode HostedNonInteractive `');
+    expect(workflow.match(/^ {6}[a-z_]+:\n {8}description:/gm)).toHaveLength(requiredInputs.length);
     expect(workflow).toContain('in-app-update-verification.json');
     expect(workflow).not.toMatch(/gh release|release create|release edit|--draft=false|--latest/);
   });
@@ -99,9 +102,73 @@ describe('published in-app update verification infrastructure', () => {
     expect(script).toContain('automatically relaunch');
     expect(script).toContain('Wait-CurrentVersionUi');
     expect(script).toContain("'You have the latest released version.'");
-    expect(script).toContain('Invoke-InstalledPublisherUiProof');
     expect(script).toContain('settingsSentinelPreserved = $true');
     expect(script).toContain('documentSentinelPreserved = $true');
+  });
+
+  it('requires hosted noninteractive publisher mode and records false shell-UI claims', () => {
+    const script = readFileSync(scriptPath, 'utf8');
+    expect(script).toContain("[ValidateSet('HostedNonInteractive')][string]$PublisherUiMode");
+    expect(script).toContain("$PublisherUiMode -cne 'HostedNonInteractive'");
+    expect(script).not.toContain('Invoke-InstalledPublisherUiProof');
+    expect(script.match(/= New-HostedPublisherUiNotAttemptedEvidence -Path/g)).toHaveLength(2);
+    expect(script.match(/Assert-HostedPublisherUiEvidence -Value \$/g)).toHaveLength(2);
+    expect(script).toContain('schemaVersion = 2');
+    expect(script).toContain("mode = 'hosted-noninteractive'");
+    expect(script).toContain("reason = 'github-hosted-noninteractive-session'");
+    expect(script).toContain("publisherUiMode = 'hosted-noninteractive'; publisherUiAttempted = $false");
+    expect(script).toContain('installerShellPublisherUiVerified = $false; installedApplicationShellPublisherUiVerified = $false');
+    expect(script).toContain('publisherUiScreenshotsUsed = $false');
+    expect(script).not.toMatch(/ShellPublisherUiVerified\s*=\s*\$true|publisherUiAttempted\s*=\s*\$true/);
+    expect(script).toContain('does not attempt or verify Windows Explorer Digital Signatures UI');
+    expect(script).toMatch(/\nAssert-HostedRunner\r?\nif \(\$PublisherUiMode -cne 'HostedNonInteractive'\) \{/);
+    expect(script.indexOf("$PublisherUiMode -cne 'HostedNonInteractive'")).toBeLessThan(script.indexOf('$null = Invoke-PublicDownload -Uri'));
+  });
+
+  it('keeps exact receipts and trusted timestamped signatures in hosted publisher evidence', () => {
+    const fixture = `target/in-app-hosted-publisher-${process.pid}-${Date.now()}.exe`;
+    const source = verifierHarness(
+      ['Assert-NoReparseAncestors', 'Get-WindowsSignatureFacts', 'Assert-TrustedWindowsSignature', 'Assert-HostedPublisherUiEvidence'],
+      String.raw`
+        $path=[IO.Path]::GetFullPath('${fixture}')
+        [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($path))|Out-Null
+        [IO.File]::WriteAllText($path,'signed fixture',[Text.UTF8Encoding]::new($false))
+        try{
+          $receipt=[pscustomobject]@{bytes=[uint64](Get-Item -LiteralPath $path).Length;sha256=Get-PublisherUiSha256 -Path $path}
+          $script:calls=0
+          $good={param($p)$script:calls++;[pscustomobject]@{Status='Valid';Publisher='Joshua Beel';HasTimestamp=$true}}
+          $evidence=New-HostedPublisherUiNotAttemptedEvidence -Path $path -Receipt $receipt -Kind installer -ExpectedPublisher 'Joshua Beel' -SignatureProvider $good
+          if($script:calls-ne2){throw 'Hosted evidence did not verify the signature twice.'}
+          Assert-HostedPublisherUiEvidence -Value $evidence -Kind installer -FileName ([IO.Path]::GetFileName($path)) -Bytes $receipt.bytes -Sha256 $receipt.sha256 -Publisher 'Joshua Beel'
+          foreach($bad in @(
+            [pscustomobject]@{Status='Valid';Publisher='Joshua Beel';HasTimestamp=$false},
+            [pscustomobject]@{Status='Valid';Publisher='Someone Else';HasTimestamp=$true},
+            [pscustomobject]@{Status='NotSigned';Publisher='Joshua Beel';HasTimestamp=$true})){
+            $rejected=$false;try{$null=New-HostedPublisherUiNotAttemptedEvidence -Path $path -Receipt $receipt -Kind installer -ExpectedPublisher 'Joshua Beel' -SignatureProvider {param($p)$bad}.GetNewClosure()}catch{$rejected=$true}
+            if(-not$rejected){throw 'Hosted evidence accepted an untrusted signature.'}
+          }
+          $wrongReceipt=[pscustomobject]@{bytes=$receipt.bytes;sha256=('A'*64)}
+          $rejected=$false;try{$null=New-HostedPublisherUiNotAttemptedEvidence -Path $path -Receipt $wrongReceipt -Kind installer -ExpectedPublisher 'Joshua Beel' -SignatureProvider $good}catch{$rejected=$true}
+          if(-not$rejected){throw 'Hosted evidence accepted a wrong byte receipt.'}
+          foreach($mutation in @('shellPublisherUiAttempted','shellPublisherUiVerified','screenshotsUsed')){
+            $copy=$evidence.PSObject.Copy();$copy.$mutation=$true
+            $rejected=$false;try{Assert-HostedPublisherUiEvidence -Value $copy -Kind installer -FileName ([IO.Path]::GetFileName($path)) -Bytes $receipt.bytes -Sha256 $receipt.sha256 -Publisher 'Joshua Beel'}catch{$rejected=$true}
+            if(-not$rejected){throw ('Hosted evidence accepted a true '+$mutation+' claim.')}
+          }
+          $copy=$evidence.PSObject.Copy();$copy.notAttemptedReason='other'
+          $rejected=$false;try{Assert-HostedPublisherUiEvidence -Value $copy -Kind installer -FileName ([IO.Path]::GetFileName($path)) -Bytes $receipt.bytes -Sha256 $receipt.sha256 -Publisher 'Joshua Beel'}catch{$rejected=$true}
+          if(-not$rejected){throw 'Hosted evidence accepted another reason.'}
+          $rejected=$false;try{Assert-HostedPublisherUiEvidence -Value $evidence -Kind installed-application -FileName ([IO.Path]::GetFileName($path)) -Bytes $receipt.bytes -Sha256 $receipt.sha256 -Publisher 'Joshua Beel'}catch{$rejected=$true}
+          if(-not$rejected){throw 'Hosted evidence accepted the wrong kind.'}
+          $copy=$evidence.PSObject.Copy();$copy|Add-Member -NotePropertyName extra -NotePropertyValue 1
+          $rejected=$false;try{Assert-HostedPublisherUiEvidence -Value $copy -Kind installer -FileName ([IO.Path]::GetFileName($path)) -Bytes $receipt.bytes -Sha256 $receipt.sha256 -Publisher 'Joshua Beel'}catch{$rejected=$true}
+          if(-not$rejected){throw 'Hosted evidence accepted an extra property.'}
+        } finally { [IO.File]::Delete($path) }
+      `,
+      '. ./scripts/installed-publisher-ui.ps1',
+    );
+    const result = spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', source], { encoding: 'utf8', timeout: 30_000 });
+    expect(result.status, result.stderr || result.stdout).toBe(0);
   });
 
   it('rechecks PID identity and limits interruption claims to observed evidence', () => {

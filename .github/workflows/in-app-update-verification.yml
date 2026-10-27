@@ -153,6 +153,7 @@ jobs:
             -OutputRoot $env:UPDATE_OUTPUT_ROOT `
             -WebDriverRoot $env:WEBDRIVER_ROOT `
             -WebViewProfileRoot $env:WEBVIEW_PROFILE_ROOT `
+            -PublisherUiMode HostedNonInteractive `
             -WorkflowSourceRevision $env:GITHUB_SHA `
             -TargetVersion $env:TARGET_VERSION `
             -TargetTag $env:TARGET_TAG `

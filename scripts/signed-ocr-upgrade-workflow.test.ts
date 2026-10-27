@@ -491,8 +491,16 @@ describe('manual signed OCR installer upgrade workflow', () => {
     expect(helper).toContain('$script:PublisherUiChildCategory = $primaryFailureCategory');
     expect(helper).not.toContain('[Delegate]::CreateDelegate');
     expect(helper).not.toContain('[scriptblock]$SurfaceProvider');
-    expect(helper.match(/Assert-PublisherUiFileReceipt -Path \$canonical/g)).toHaveLength(2);
-    expect(helper.match(/Assert-TrustedWindowsSignature -Path \$canonical/g)).toHaveLength(2);
+    const interactiveProof = helper.slice(helper.indexOf('function Invoke-InstalledPublisherUiProof'), helper.indexOf('function New-HostedPublisherUiNotAttemptedEvidence'));
+    const hostedEvidence = helper.slice(helper.indexOf('function New-HostedPublisherUiNotAttemptedEvidence'), helper.indexOf('function Invoke-PublisherUiChild'));
+    expect(interactiveProof).toContain('Invoke-PublisherUiHelperProcess');
+    expect(hostedEvidence).not.toContain('Invoke-PublisherUiHelperProcess');
+    for (const body of [interactiveProof, hostedEvidence]) {
+      expect(body.match(/Assert-PublisherUiFileReceipt -Path \$canonical/g)).toHaveLength(2);
+      expect(body.match(/Assert-TrustedWindowsSignature -Path \$canonical/g)).toHaveLength(2);
+    }
+    expect(helper.match(/Assert-PublisherUiFileReceipt -Path \$canonical/g)).toHaveLength(4);
+    expect(helper.match(/Assert-TrustedWindowsSignature -Path \$canonical/g)).toHaveLength(4);
     expect(helper).not.toMatch(/AZURE_|TAURI_SIGNING|CopyFromScreen|Bitmap|Save\(/i);
 
     const parentStart = helper.indexOf('function Invoke-PublisherUiHelperProcess');
@@ -586,7 +594,7 @@ describe('manual signed OCR installer upgrade workflow', () => {
 
   it('enforces bounded process and installed-registry facts and writes one sanitized record', () => {
     const check = functionHarness(
-      ['Assert-ExactProperties', 'Invoke-BoundedSilentInstaller', 'Assert-InstallFacts', 'New-HostedPublisherUiNotAttemptedEvidence', 'Write-SanitizedUpgradeRecord'],
+      ['Assert-ExactProperties', 'Invoke-BoundedSilentInstaller', 'Assert-InstallFacts', 'Write-SanitizedUpgradeRecord'],
       String.raw`
         $called=$false
         $provider={param($path,$arguments,$timeout)$script:called=$true;if($arguments -cne '/S' -or $timeout -ne 1234){throw 'Process provider contract changed.'};[pscustomobject]@{TimedOut=$false;ExitCode=[int]0}}
