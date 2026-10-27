@@ -137,14 +137,23 @@ function ConvertTo-OwnedRelativeName { param([string]$Root,[string]$FullName)
  $relative=($full.Substring($base.Length).Replace('\','/')-replace'[^\x21-\x7E ]','?');if($relative.Length-gt120){$relative=$relative.Substring(0,117)+'...'};return $relative
 }
 
-function Get-OwnedInstallEntries { param([string]$InstallRoot)
- if(-not(Test-Path -LiteralPath $InstallRoot -PathType Container)){return @()}
- return @(Get-ChildItem -LiteralPath $InstallRoot -Recurse -Force -ErrorAction SilentlyContinue|Sort-Object FullName|ForEach-Object{[pscustomobject][ordered]@{relative=ConvertTo-OwnedRelativeName $InstallRoot $_.FullName;kind=$(if($_.PSIsContainer){'dir'}else{'file'});bytes=$(if($_.PSIsContainer){-1}else{[int64]$_.Length})}})
+function Get-OwnedInstallEntries { param([string]$InstallRoot,[ValidateRange(1,100000)][int]$MaximumEntries=5000,[scriptblock]$ItemProvider)
+ if(-not$ItemProvider-and-not(Test-Path -LiteralPath $InstallRoot -PathType Container)){return @()}
+ $items=@(if($ItemProvider){&$ItemProvider|Select-Object -First ($MaximumEntries+1)}else{Get-ChildItem -LiteralPath $InstallRoot -Recurse -Force -ErrorAction SilentlyContinue|Select-Object -First ($MaximumEntries+1)})
+ if($items.Count-gt$MaximumEntries){[Console]::Out.WriteLine(('OWNED_CLEANUP_DIAG phase=enumeration-capped limit={0}' -f $MaximumEntries));$items=@($items|Select-Object -First $MaximumEntries)}
+ $entries=foreach($item in $items){
+  try{[pscustomobject][ordered]@{relative=ConvertTo-OwnedRelativeName $InstallRoot ([string]$item.FullName);kind=$(if($item.PSIsContainer){'dir'}else{'file'});bytes=$(if($item.PSIsContainer){-1}else{[int64]$item.Length})}}
+  catch{[pscustomobject][ordered]@{relative='<unreadable>';kind='unknown';bytes=-1}}
+ }
+ return @($entries|Sort-Object relative)
 }
 
-function Save-OwnedInstallSnapshot { param([string]$InstallRoot)
- $script:OwnedInstallSnapshot=[string[]]@(Get-OwnedInstallEntries $InstallRoot|ForEach-Object{[string]$_.relative})
- [Console]::Out.WriteLine(('OWNED_CLEANUP_DIAG phase=installed-snapshot entries={0}' -f $script:OwnedInstallSnapshot.Count))
+function Save-OwnedInstallSnapshot { param([string]$InstallRoot,[scriptblock]$EntryProvider)
+ try{
+  $snapshotEntries=@(if($EntryProvider){&$EntryProvider}else{Get-OwnedInstallEntries $InstallRoot})
+  $script:OwnedInstallSnapshot=[string[]]@($snapshotEntries|ForEach-Object{[string]$_.relative})
+  [Console]::Out.WriteLine(('OWNED_CLEANUP_DIAG phase=installed-snapshot entries={0}' -f $script:OwnedInstallSnapshot.Count))
+ }catch{$script:OwnedInstallSnapshot=$null;[Console]::Out.WriteLine('OWNED_CLEANUP_DIAG phase=snapshot-failed')}
 }
 
 function Write-OwnedInstallLeftoverDiagnostics { param([string]$InstallRoot,[scriptblock]$EntryProvider,[scriptblock]$ProcessProvider)

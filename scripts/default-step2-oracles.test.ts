@@ -361,6 +361,32 @@ describe('default Step 2 oracles', () => {
     expect(expanded).toContain("if($remaining-contains'install-folder'){try{if($LeftoverDiagnostics){&$LeftoverDiagnostics}else{Write-OwnedInstallLeftoverDiagnostics $InstallRoot}}");
   }, 90_000);
 
+  it('never lets the leftover diagnostics fail the run: snapshot failures, unreadable entries and huge trees degrade to bounded output', () => {
+    const result = runWithFunctions('verify-default-expanded-page-tools.ps1', ['ConvertTo-OwnedRelativeName', 'Get-OwnedInstallEntries', 'Save-OwnedInstallSnapshot', 'Write-OwnedInstallLeftoverDiagnostics'], [
+      "$root = 'D:\\install'",
+      "$script:OwnedInstallSnapshot = [string[]]@('stale')",
+      "Save-OwnedInstallSnapshot $root -EntryProvider { throw 'enumeration exploded' }",
+      "if ($null -ne $script:OwnedInstallSnapshot) { throw 'failed snapshot was kept' }",
+      "Write-OwnedInstallLeftoverDiagnostics $root -EntryProvider { [pscustomobject]@{ relative = 'resources/ocr'; kind = 'dir'; bytes = -1 } } -ProcessProvider { @() }",
+      "function New-Item([string]$Name, [bool]$Throws = $false) { $item = [pscustomobject]@{ PSIsContainer = $false; Length = [int64]3; Name = $Name }; if ($Throws) { $item | Add-Member -MemberType ScriptProperty -Name FullName -Value { throw 'unreadable path' } } else { $item | Add-Member -MemberType NoteProperty -Name FullName -Value ('D:\\install\\' + $Name) }; $item }",
+      "$entries = @(Get-OwnedInstallEntries $root -ItemProvider { New-Item 'a.dll'; New-Item 'bad' $true; New-Item 'b.dll' })",
+      "if ($entries.Count -ne 3 -or @($entries | Where-Object { $_.relative -ceq '<unreadable>' -and $_.kind -ceq 'unknown' -and $_.bytes -eq -1 }).Count -ne 1 -or @($entries | Where-Object relative -in @('a.dll','b.dll')).Count -ne 2) { throw ('placeholder: ' + ($entries | ConvertTo-Json -Compress)) }",
+      "$script:produced = 0",
+      "$capped = @(Get-OwnedInstallEntries $root -MaximumEntries 10 -ItemProvider { foreach ($index in 1..1000) { $script:produced++; New-Item ('f' + $index + '.tmp') } })",
+      "if ($capped.Count -ne 10 -or $script:produced -gt 50) { throw ('cap: count=' + $capped.Count + ' produced=' + $script:produced) }",
+      "$uncapped = @(Get-OwnedInstallEntries $root -MaximumEntries 10 -ItemProvider { foreach ($index in 1..10) { New-Item ('g' + $index + '.tmp') } })",
+      "if ($uncapped.Count -ne 10) { throw 'exactly-at-limit listing was truncated' }",
+    ].join('\n'));
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(result.stdout).toContain('PASS');
+    expect(result.stdout).toContain('OWNED_CLEANUP_DIAG phase=snapshot-failed');
+    expect(result.stdout).not.toContain('enumeration exploded');
+    expect(result.stdout).toContain('OWNED_CLEANUP_DIAG phase=leftover-summary entries=1 snapshotKnown=false');
+    expect(result.stdout).toContain('OWNED_CLEANUP_DIAG phase=leftover kind=dir bytes=-1 origin=unknown name=resources/ocr');
+    expect(result.stdout.match(/OWNED_CLEANUP_DIAG phase=enumeration-capped limit=10/g)?.length).toBe(1);
+    expect(readFileSync('scripts/verify-default-expanded-page-tools.ps1', 'utf8')).toContain('[ValidateRange(1,100000)][int]$MaximumEntries=5000');
+  }, 90_000);
+
   it('writes the settings sentinel under the exact name the organizer and structural helpers require', () => {
     const expanded = readFileSync('scripts/verify-default-expanded-page-tools.ps1', 'utf8');
     expect(expanded).toContain("$sentinel=Join-Path $settingsRoot 'upgrade-sentinel.json'");
