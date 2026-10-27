@@ -92,7 +92,7 @@ describe('default comments and forms workflow', () => {
       function Assert-ExactProperties{param($Value,[string[]]$Expected,[string]$Kind)$a=@($Value.PSObject.Properties.Name|Sort-Object);$e=@($Expected|Sort-Object);if($a.Count-ne$e.Count-or(Compare-Object $a $e)){throw 'shape'}}
       function Receipt{[pscustomobject]@{bytes=[uint64]10;sha256='A'*64}}
       function Common{[ordered]@{nativeDriverVersion='1.2.3.4';returnedRuntimeVersion='1.2.3.9';profileBinding='session-capability-requested-profile'}}
-      function New-Value{$pins=@{mixed=@('Original|false','Installed Mixed|true');radio=@('Preference: Choice B, page 1','Preference: Choice A, page 1');choice=@('south-002|email-002','north-001|print-001')};$forms=@();foreach($kind in @('mixed','radio','choice')){$write=Common;$write.kind=$kind;$write.sourceValues=$pins[$kind][0];$write.expectedOutputValues=$pins[$kind][1];$write.output=Receipt;$write.saveDialogVerified=$true;$write.sessionDeleted=$true;$write.ownedProcessTreeStopped=$true;$write.relevantProcessesRemaining=0;$reopen=Common;$reopen.kind=$kind;$reopen.initial=$pins[$kind][1];$reopen.reopenedValuesMatched=$true;$reopen.pixelAppearanceVerified=$false;$reopen.nativePdfSemanticVerified=$false;$reopen.sessionDeleted=$true;$reopen.ownedProcessTreeStopped=$true;$reopen.relevantProcessesRemaining=0;$forms+=[pscustomobject][ordered]@{kind=$kind;source=Receipt;write=[pscustomobject]$write;reopen=[pscustomobject]$reopen}};$commentWrite=Common;$commentWrite.nativeFilenameControlCategory='edit-1001';$commentWrite.output=Receipt;$commentWrite.stickyCreated=$true;$commentWrite.areaHighlightCreated=$true;$commentWrite.sessionDeleted=$true;$commentWrite.ownedProcessTreeStopped=$true;$commentWrite.relevantProcessesRemaining=0;$commentReopen=Common;$commentReopen.stickyCount=1;$commentReopen.areaHighlightCount=1;$commentReopen.page=1;$commentReopen.pixelAppearanceVerified=$false;$commentReopen.nativePdfSemanticVerified=$false;$commentReopen.selectedTextHighlightVerified=$false;$commentReopen.sessionDeleted=$true;$commentReopen.ownedProcessTreeStopped=$true;$commentReopen.relevantProcessesRemaining=0;[pscustomobject]@{comments=[pscustomobject][ordered]@{source=Receipt;write=[pscustomobject]$commentWrite;reopen=[pscustomobject]$commentReopen};forms=$forms}}
+      function New-Value{$pins=@{mixed=@('Original|false','Installed Mixed|true');radio=@('Preference: Choice B, page 1','Preference: Choice A, page 1');choice=@('South Hub|Email copy','North Hub|Print copy')};$forms=@();foreach($kind in @('mixed','radio','choice')){$write=Common;$write.kind=$kind;$write.sourceValues=$pins[$kind][0];$write.expectedOutputValues=$pins[$kind][1];$write.output=Receipt;$write.saveDialogVerified=$true;$write.sessionDeleted=$true;$write.ownedProcessTreeStopped=$true;$write.relevantProcessesRemaining=0;$reopen=Common;$reopen.kind=$kind;$reopen.initial=$pins[$kind][1];$reopen.reopenedValuesMatched=$true;$reopen.pixelAppearanceVerified=$false;$reopen.nativePdfSemanticVerified=$false;$reopen.sessionDeleted=$true;$reopen.ownedProcessTreeStopped=$true;$reopen.relevantProcessesRemaining=0;$forms+=[pscustomobject][ordered]@{kind=$kind;source=Receipt;write=[pscustomobject]$write;reopen=[pscustomobject]$reopen}};$commentWrite=Common;$commentWrite.nativeFilenameControlCategory='edit-1001';$commentWrite.output=Receipt;$commentWrite.stickyCreated=$true;$commentWrite.areaHighlightCreated=$true;$commentWrite.sessionDeleted=$true;$commentWrite.ownedProcessTreeStopped=$true;$commentWrite.relevantProcessesRemaining=0;$commentReopen=Common;$commentReopen.stickyCount=1;$commentReopen.areaHighlightCount=1;$commentReopen.page=1;$commentReopen.pixelAppearanceVerified=$false;$commentReopen.nativePdfSemanticVerified=$false;$commentReopen.selectedTextHighlightVerified=$false;$commentReopen.sessionDeleted=$true;$commentReopen.ownedProcessTreeStopped=$true;$commentReopen.relevantProcessesRemaining=0;[pscustomobject]@{comments=[pscustomobject][ordered]@{source=Receipt;write=[pscustomobject]$commentWrite;reopen=[pscustomobject]$commentReopen};forms=$forms}}
       $null=Assert-CommentsFormsRuntimeReceipt (New-Value)
       function Reject($value,[string]$kind){$bad=$false;try{Assert-CommentsFormsRuntimeReceipt $value}catch{$bad=$true};if(-not$bad){throw ($kind+' was accepted')}}
       $missing=New-Value;$missing.forms[1].reopen.reopenedValuesMatched=$false;Reject $missing 'missing reopen'
@@ -116,30 +116,107 @@ describe('default comments and forms workflow', () => {
     expect(source).toContain("-ButtonLabel 'Save filled copy'");
   });
 
-  it('polls for the page image, comment layer and enabled creation button before clicking, and names what is missing on timeout', () => {
+  it('drives every comments/forms step through one polled helper with no one-shot WebDriver action left', () => {
     const source = readFileSync(verifierPath, 'utf8');
+    const stages = source.slice(source.indexOf('function Invoke-CommentsFormsPoll'), source.indexOf('function Invoke-InstalledCommentsFormsRuntime'));
+    expect(stages.match(/Invoke-WebDriverScript/g)?.length).toBe(1);
     expect(source).not.toContain("throw 'Exact sticky-comment creation controls were unavailable.'");
-    expect(source).toContain("Invoke-CommentsCreationControl $Context 'Add comment' 'sticky-comment'");
-    expect(source).toContain("Invoke-CommentsCreationControl $Context 'Add area highlight' 'area-highlight'");
-    expect(source).toContain("-Kind 'sticky comment placement'");
-    expect(source).toContain("-Kind 'area highlight placement'");
-    const result = runPowerShell(extractFunctions(['Get-CommentsCreationControlScript', 'Invoke-CommentsCreationControl'], String.raw`
-      $probe=Get-CommentsCreationControlScript 'Add comment'
-      foreach($marker in @('img[alt="Page 1"]','[data-testid="comment-layer"]','x.getAttribute(''aria-label'')==="Add comment"','!x.disabled','b.length!==1','b[0].click()')){if(-not$probe.Contains($marker,[StringComparison]::Ordinal)){throw ('Probe lacks '+$marker)}}
-      if($probe.IndexOf('b[0].click()')-lt$probe.IndexOf('if(m.length)return')){throw 'Probe clicks before all three conditions hold.'}
+    expect(source).toContain("-ButtonLabel 'Save a copy' -ButtonMatch 'aria-label'");
+    expect(source).toContain("-ButtonLabel 'Save filled copy' -ButtonMatch 'text'");
+    const result = runPowerShell(extractFunctions(['Invoke-CommentsFormsPoll'], String.raw`
       $script:calls=0;$script:replies=@()
       function Invoke-WebDriverScript{param($SessionId,$Deadline,$Script)$script:calls++;$reply=$script:replies[[Math]::Min($script:calls,$script:replies.Count)-1];return ($reply|ConvertFrom-Json)}
-      $context=[pscustomobject]@{SessionId='s';Deadline=[datetime]::UtcNow.AddSeconds(20)}
-      $script:replies=@('{"clicked":false,"missing":["page-image","comment-layer"]}','{"clicked":false,"missing":["comment-layer"]}','{"clicked":false,"missing":["enabled-button"]}','{"clicked":true,"missing":[]}')
-      Invoke-CommentsCreationControl $context 'Add comment' 'sticky-comment';if($script:calls-ne4){throw ('Expected four polls, saw '+$script:calls)}
-      $script:calls=0;$script:replies=@('{"clicked":false,"missing":["enabled-button"]}');$context.Deadline=[datetime]::UtcNow.AddMilliseconds(900);$message=$null
-      try{Invoke-CommentsCreationControl $context 'Add area highlight' 'area-highlight'}catch{$message=$_.Exception.Message}
-      if($message-cne'Exact area-highlight creation controls were unavailable. Missing: enabled-button.'){throw ('Unexpected timeout message: '+$message)};if($script:calls-lt2){throw 'Timeout path did not poll.'}
-      foreach($bad in @('{"clicked":false,"missing":[]}','{"clicked":true,"missing":["page-image"]}','{"clicked":false,"missing":["C:\\Users\\x"]}','{"clicked":"yes","missing":[]}','null')){$script:calls=0;$script:replies=@($bad);$context.Deadline=[datetime]::UtcNow.AddSeconds(5);$message=$null;try{Invoke-CommentsCreationControl $context 'Add comment' 'sticky-comment'}catch{$message=$_.Exception.Message};if($message-cne'Exact sticky-comment creation control probe returned an unexpected shape.'){throw ('Bad probe reply accepted: '+$bad+' -> '+$message)}}
+      $allowed=@('page-image','comment-layer','enabled-button')
+      $script:replies=@('{"done":false,"missing":["page-image","comment-layer"]}','{"done":false,"missing":["comment-layer"]}','{"done":false,"missing":["enabled-button"]}','{"done":true,"missing":[],"value":"x"}')
+      $value=Invoke-CommentsFormsPoll -SessionId 's' -Deadline ([datetime]::UtcNow.AddSeconds(20)) -Script 'probe' -Allowed $allowed -Kind 'Exact sticky-comment creation controls';if($script:calls-ne4-or$value.value-cne'x'){throw ('Expected four polls and the final value, saw '+$script:calls)}
+      $script:calls=0;$script:replies=@('{"done":false,"missing":["enabled-button"]}');$message=$null
+      try{$null=Invoke-CommentsFormsPoll -SessionId 's' -Deadline ([datetime]::UtcNow.AddMilliseconds(900)) -Script 'probe' -Allowed $allowed -Kind 'Exact area-highlight creation controls'}catch{$message=$_.Exception.Message}
+      if($message-cne'Exact area-highlight creation controls did not become ready before the session deadline. Missing: enabled-button.'){throw ('Unexpected timeout message: '+$message)};if($script:calls-lt2){throw 'Timeout path did not poll.'}
+      foreach($bad in @('{"done":false,"missing":[]}','{"done":true,"missing":["page-image"]}','{"done":false,"missing":["C:\\Users\\x"]}','{"done":"yes","missing":[]}','{"missing":[]}','null')){$script:calls=0;$script:replies=@($bad);$message=$null;try{$null=Invoke-CommentsFormsPoll -SessionId 's' -Deadline ([datetime]::UtcNow.AddSeconds(5)) -Script 'probe' -Allowed $allowed -Kind 'Probe'}catch{$message=$_.Exception.Message};if($message-cne'Probe probe returned an unexpected shape.'){throw ('Bad probe reply accepted: '+$bad+' -> '+$message)}}
       'PASS'
     `));
     expect(result.status, result.stderr || result.stdout).toBe(0);
     expect(result.stdout).toContain('PASS');
+  });
+
+  it('runs the generated WebDriver scripts against the 96b0521 control shapes', () => {
+    const names = ['Get-CommentsFormsSaveControlScript', 'Get-CommentsPageOneScript', 'Get-CommentsCreationControlScript', 'Get-CommentsPlacementScript', 'Get-CommentsEditorSaveScript', 'Get-CommentsReopenScript', 'Get-FormSpec', 'Get-FormSessionScript'];
+    const result = runPowerShell(extractFunctions(names, String.raw`
+      $out=[ordered]@{saveAria=Get-CommentsFormsSaveControlScript 'Save a copy' 'aria-label';saveText=Get-CommentsFormsSaveControlScript 'Save filled copy' 'text';create=Get-CommentsCreationControlScript 'Add comment';place=Get-CommentsPlacementScript 'Comment text';edit=Get-CommentsEditorSaveScript 'Comment text' 'Installed sticky receipt' 'Save comment';reopen=Get-CommentsReopenScript}
+      foreach($k in 'mixed','radio','choice'){foreach($p in 'read','reopen','write'){$out["$k-$p"]=Get-FormSessionScript $k $p}}
+      [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);[Console]::Out.Write(($out|ConvertTo-Json -Compress))
+    `));
+    expect(result.status, result.stderr).toBe(0);
+    const scripts: Record<string, string> = JSON.parse(result.stdout);
+    class FakeEvent { constructor(public type: string) {} }
+    class Input { attrs: Record<string, string>; events: string[] = []; _value = ''; checked = false; disabled = false; type: string; clicks = 0; group?: Input[]; textContent = '';
+      constructor(attrs: Record<string, string>, type = 'text') { this.attrs = attrs; this.type = type; }
+      getAttribute(name: string) { return this.attrs[name] ?? null; }
+      dispatchEvent(event: FakeEvent) { this.events.push(event.type); return true; }
+      click() { this.clicks++; if (this.type === 'checkbox') this.checked = !this.checked; if (this.type === 'radio') for (const peer of this.group ?? [this]) peer.checked = peer === this; }
+    }
+    Object.defineProperty(Input.prototype, 'value', { get(this: Input) { return this._value; }, set(this: Input, value: string) { this._value = value; } });
+    class Select extends Input { options: { value: string; textContent: string }[]; selectedIndex: number;
+      constructor(attrs: Record<string, string>, options: [string, string][], selected: number) { super(attrs, 'select'); this.options = [{ value: '', textContent: 'Choose an option' }, ...options.map(([value, textContent]) => ({ value, textContent }))]; this.selectedIndex = selected + 1; }
+    }
+    Object.defineProperty(Select.prototype, 'value', { get(this: Select) { return this.options[this.selectedIndex]?.value ?? ''; }, set(this: Select, value: string) { this.selectedIndex = this.options.findIndex(x => x.value === value); } });
+    const run = (script: string, document: unknown) => new Function('document', 'HTMLInputElement', 'HTMLSelectElement', 'HTMLTextAreaElement', 'Event', 'PointerEvent', script)(document, Input, Select, Input, FakeEvent, FakeEvent);
+    const page = (controls: Input[], radios: Input[] = [], open = true) => { const fill = new Input({ 'aria-label': 'Fill existing fields' }, 'button'); const dialog = { querySelectorAll: (selector: string) => selector === 'input,select' ? controls : selector === 'input[type=radio]' ? radios : [] };
+      const doc = { opened: open, fill, querySelector: (selector: string) => selector === 'dialog[aria-labelledby="fill-forms-title"]' && doc.opened ? dialog : null, querySelectorAll: (selector: string) => selector === 'button' ? [fill] : [] }; return doc; };
+
+    const closed = page([], [], false);
+    expect(run(scripts['mixed-read'], closed)).toEqual({ done: false, missing: ['form-dialog'] });
+    expect(closed.fill.clicks).toBe(1);
+    expect(run(scripts['mixed-read'], page([]))).toEqual({ done: false, missing: ['Name', 'Consent, page 1'] });
+
+    const name = new Input({ 'aria-label': 'Name' }); name.value = 'Original'; const consent = new Input({ 'aria-label': 'Consent, page 1' }, 'checkbox');
+    const mixed = page([name, consent]);
+    expect(run(scripts['mixed-read'], mixed)).toEqual({ done: true, missing: [], value: 'Original|false' });
+    expect(run(scripts['mixed-reopen'], mixed)).toEqual({ done: false, missing: ['reopened-values'] });
+    expect(run(scripts['mixed-write'], mixed)).toEqual({ done: false, missing: ['field-values'] });
+    expect(run(scripts['mixed-write'], mixed)).toEqual({ done: true, missing: [], value: 'Installed Mixed|true' });
+    expect([name.events, consent.clicks]).toEqual([['input'], 1]);
+    expect(run(scripts['mixed-reopen'], mixed)).toEqual({ done: true, missing: [], value: 'Installed Mixed|true' });
+    name.disabled = true; expect(run(scripts['mixed-read'], mixed)).toEqual({ done: false, missing: ['enabled-fields'] });
+
+    const radios = ['A', 'B', 'C'].map(x => new Input({ 'aria-label': `Preference: Choice ${x}, page 1` }, 'radio')); radios.forEach(x => { x.group = radios; }); radios[1].checked = true;
+    const radio = page(radios, radios);
+    expect(run(scripts['radio-read'], radio)).toEqual({ done: true, missing: [], value: 'Preference: Choice B, page 1' });
+    expect(run(scripts['radio-write'], radio).done).toBe(false);
+    expect(run(scripts['radio-write'], radio)).toEqual({ done: true, missing: [], value: 'Preference: Choice A, page 1' });
+
+    const destination = new Select({ 'aria-label': 'Destination, page 1' }, [['choice-7-0-0', 'North Hub'], ['choice-7-0-1', 'South Hub'], ['choice-7-0-2', 'Local Hub']], 1);
+    const delivery = new Select({ 'aria-label': 'Delivery, page 1' }, [['choice-8-0-0', 'Print copy'], ['choice-8-0-1', 'Email copy'], ['choice-8-0-2', 'Local copy']], 1);
+    const choice = page([destination, delivery]);
+    expect(run(scripts['choice-read'], choice)).toEqual({ done: true, missing: [], value: 'South Hub|Email copy' });
+    expect(run(scripts['choice-write'], choice).done).toBe(false);
+    expect(run(scripts['choice-write'], choice)).toEqual({ done: true, missing: [], value: 'North Hub|Print copy' });
+    expect([destination.value, delivery.value, destination.events, delivery.events]).toEqual(['choice-7-0-0', 'choice-8-0-0', ['change'], ['change']]);
+
+    const iconSave = new Input({ 'aria-label': 'Save a copy' }, 'button'); const filled = new Input({}, 'button'); filled.textContent = ' Save filled copy ';
+    const buttons = (list: Input[]) => ({ querySelectorAll: (selector: string) => selector === 'button' ? list : [], querySelector: () => null });
+    iconSave.disabled = true; expect(run(scripts.saveAria, buttons([iconSave]))).toEqual({ done: false, missing: ['enabled-save-control'] });
+    iconSave.disabled = false; expect(run(scripts.saveAria, buttons([iconSave]))).toEqual({ done: true, missing: [] }); expect(iconSave.clicks).toBe(1);
+    expect(run(scripts.saveText, buttons([iconSave]))).toEqual({ done: false, missing: ['save-control'] });
+    expect(run(scripts.saveText, buttons([filled]))).toEqual({ done: true, missing: [] });
+
+    const comments = new Input({ 'aria-label': 'Comments' }, 'button'); let aside: { querySelectorAll: () => { textContent: string }[] } | null = null;
+    const reopenDoc = { querySelector: (selector: string) => selector === 'aside[aria-label="Comments"]' ? aside : null, querySelectorAll: (selector: string) => selector === 'button' ? [comments] : [] };
+    expect(run(scripts.reopen, reopenDoc)).toEqual({ sticky: 0, area: 0 }); expect(comments.clicks).toBe(1);
+    aside = { querySelectorAll: () => [{ textContent: 'Comment · Page 1Installed sticky receipt' }, { textContent: 'Highlight · Page 1Installed area receipt' }] };
+    expect(run(scripts.reopen, reopenDoc)).toEqual({ sticky: 1, area: 1 }); expect(comments.clicks).toBe(1);
+
+    const layer = new Input({ 'data-testid': 'comment-layer' }, 'div'); const image = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 200 }), parentElement: { querySelector: (selector: string) => selector === ':scope>[data-testid="comment-layer"]' ? layer : null } };
+    const add = new Input({ 'aria-label': 'Add comment' }, 'button'); let editor: Input | null = null; let save = new Input({}, 'button'); save.textContent = 'Save comment';
+    const commentDoc = { querySelector: (selector: string) => selector === 'img[alt="Page 1"]' ? image : null, querySelectorAll: (selector: string) => selector === 'button' ? [add, save] : selector === 'textarea' || selector === 'textarea[aria-label="Comment text"]' ? (editor ? [editor] : []) : [] };
+    expect(run(scripts.create, { querySelector: () => null, querySelectorAll: () => [add] })).toEqual({ done: false, missing: ['page-image', 'comment-layer'] });
+    expect(run(scripts.create, commentDoc)).toEqual({ done: true, missing: [] }); expect(add.clicks).toBe(1);
+    expect(run(scripts.place, commentDoc)).toEqual({ done: false, missing: ['editor'] }); expect(layer.events).toEqual(['pointerdown']);
+    editor = new Input({ 'aria-label': 'Comment text' }, 'textarea');
+    expect(run(scripts.place, commentDoc)).toEqual({ done: true, missing: [] }); expect(layer.events.length).toBe(1);
+    expect(run(scripts.edit, commentDoc)).toEqual({ done: false, missing: ['typed-text'] }); expect(save.clicks).toBe(0);
+    save.disabled = true; expect(run(scripts.edit, commentDoc)).toEqual({ done: false, missing: ['enabled-save-button'] });
+    save.disabled = false; expect(run(scripts.edit, commentDoc)).toEqual({ done: true, missing: [] }); expect([editor.value, save.clicks]).toEqual(['Installed sticky receipt', 1]);
   });
 
   it('projects the validated runtime to bounded public counts, booleans, categories, and hashes only', () => {

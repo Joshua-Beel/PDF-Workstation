@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- Comments/forms verifier sweep: every step now polls; fixed four checks that could never have passed (icon Save control, toggled Comments panel, checkbox/radio entry, choice option ids). No app change (SM3; scripts and tests only).
 - Comments/forms rehearsal fix: the verifier probed the sticky-comment controls once, right after the open dialog closed, before page 1 had rendered; it now polls for them and names any that stay missing. No app change (SM3; scripts and tests only).
 - Uninstall leftover fixed at its source: the default verifier itself kept the installed PDFium loaded for its proofs, so the uninstaller could not delete it; the verifier now releases it before uninstalling. The installer and app were not at fault (SM6; scripts and tests only).
 - Uninstall leftover diagnostics hardened after review: a failed snapshot or unreadable entry can no longer fail the run, and enumeration stops at 5,000 entries (SM6; scripts and tests only).

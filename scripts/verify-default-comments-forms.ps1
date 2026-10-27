@@ -30,11 +30,27 @@ function Get-CommentsFormsReceipt { param([string]$Path)
  $item=Get-Item -LiteralPath $Path -Force;if($item.Attributes-band[IO.FileAttributes]::ReparsePoint-or$item.Length-lt1){throw 'A comments/forms file receipt is unsafe.'};return [pscustomobject][ordered]@{bytes=[uint64]$item.Length;sha256=Get-ExactSha256 -Path $Path}
 }
 
-function Invoke-CommentsFormsNativeSave { param([string]$SessionId,[int]$ProcessId,[long]$ProcessStartUtcTicks,[string]$OutputPath,[string]$ButtonLabel,[datetime]$Deadline)
+function Invoke-CommentsFormsPoll { param([string]$SessionId,[datetime]$Deadline,[string]$Script,[string[]]$Allowed,[string]$Kind)
+ $missing=@('not-observed')
+ while([datetime]::UtcNow-lt$Deadline){
+  $value=Invoke-WebDriverScript -SessionId $SessionId -Deadline $Deadline -Script $Script
+  if($null-eq$value-or$null-eq$value.PSObject.Properties['done']-or$null-eq$value.PSObject.Properties['missing']-or$value.done-isnot[bool]){throw "$Kind probe returned an unexpected shape."}
+  $observed=@($value.missing|ForEach-Object{[string]$_});foreach($item in $observed){if($Allowed-cnotcontains$item){throw "$Kind probe returned an unexpected shape."}}
+  if($value.done){if($observed.Count-ne0){throw "$Kind probe returned an unexpected shape."};return $value}
+  if($observed.Count-lt1){throw "$Kind probe returned an unexpected shape."};$missing=$observed;Start-Sleep -Milliseconds 200
+ }
+ throw "$Kind did not become ready before the session deadline. Missing: $($missing-join', ')."
+}
+
+function Get-CommentsFormsSaveControlScript { param([ValidateSet('Save a copy','Save filled copy')][string]$ButtonLabel,[ValidateSet('aria-label','text')][string]$ButtonMatch)
+ $test=if($ButtonMatch-ceq'aria-label'){"x.getAttribute('aria-label')===n"}else{'x.textContent.trim()===n'}
+ return ("const n=__LABEL__,a=[...document.querySelectorAll('button')].filter(x=>__TEST__);if(a.length!==1)return {done:false,missing:['save-control']};if(a[0].disabled)return {done:false,missing:['enabled-save-control']};a[0].click();return {done:true,missing:[]};").Replace('__LABEL__',($ButtonLabel|ConvertTo-Json -Compress)).Replace('__TEST__',$test)
+}
+
+function Invoke-CommentsFormsNativeSave { param([string]$SessionId,[int]$ProcessId,[long]$ProcessStartUtcTicks,[string]$OutputPath,[string]$ButtonLabel,[ValidateSet('aria-label','text')][string]$ButtonMatch,[datetime]$Deadline)
  if(Test-Path -LiteralPath $OutputPath){throw 'A comments/forms output path must be fresh.'};Assert-NoReparseAncestors -Path $OutputPath
  $baseline=@(Get-ProcessNativeWindowSnapshot -ProcessId $ProcessId -Deadline $Deadline -TopLevelOnly);if($baseline.Count-lt1){throw 'Comments/forms native Save baseline was empty.'}
- $label=$ButtonLabel|ConvertTo-Json -Compress;$clicked=Invoke-WebDriverScript -SessionId $SessionId -Deadline $Deadline -Script "const n=$label,b=[...document.querySelectorAll('button')].filter(x=>x.textContent.trim()===n&&!x.disabled);if(b.length===1)b[0].click();return b.length===1;"
- if($clicked-isnot[bool]-or-not$clicked){throw 'The exact comments/forms Save control was unavailable.'}
+ $null=Invoke-CommentsFormsPoll -SessionId $SessionId -Deadline $Deadline -Script (Get-CommentsFormsSaveControlScript $ButtonLabel $ButtonMatch) -Allowed @('save-control','enabled-save-control') -Kind 'The exact comments/forms Save control'
  $binding=Wait-NewProcessNativeWindowSurface -ProcessId $ProcessId -Baseline $baseline -AnchorNames @('Save') -AnchorControlTypes @('ControlType.Button') -Stage 'save-output-dialog' -Deadline $Deadline
  $roles=Get-ValidatedBindingNativeRoles -Binding $binding;if($null-eq$roles-or$null-eq$roles.PSObject.Properties['save']-or$null-eq$roles.PSObject.Properties['filenameEdit']){throw 'Comments/forms Save dialog lacked exact native roles.'}
  $remaining=[int][Math]::Min(120000,[Math]::Max(1,[Math]::Ceiling(($Deadline-[datetime]::UtcNow).TotalMilliseconds)));$tick=[Environment]::TickCount64+$remaining
@@ -49,49 +65,69 @@ function Open-CommentsFormsFile { param($Context,[string]$Path)
  return Open-ReadingUserFile -SessionId $Context.SessionId -ApplicationProcessId $Context.ApplicationProcessId -ApplicationProcessStartUtcTicks $Context.ApplicationProcessStartUtcTicks -Path $Path -Deadline $Context.Deadline
 }
 
+function Get-CommentsPageOneScript { return "const p=document.querySelector('img[alt=`"Page 1`"]'),l=p?.parentElement?.querySelector(':scope>[data-testid=`"comment-layer`"]'),m=[];if(!p)m.push('page-image');if(!l)m.push('comment-layer');" }
+
 function Get-CommentsCreationControlScript { param([ValidateSet('Add comment','Add area highlight')][string]$Label)
- $name=$Label|ConvertTo-Json -Compress
- return "const p=document.querySelector('img[alt=`"Page 1`"]'),l=document.querySelector('[data-testid=`"comment-layer`"]'),b=[...document.querySelectorAll('button')].filter(x=>x.getAttribute('aria-label')===$name&&!x.disabled),m=[];if(!p)m.push('page-image');if(!l)m.push('comment-layer');if(b.length!==1)m.push('enabled-button');if(m.length)return {clicked:false,missing:m};b[0].click();return {clicked:true,missing:[]};"
+ return (Get-CommentsPageOneScript)+("const b=[...document.querySelectorAll('button')].filter(x=>x.getAttribute('aria-label')===__LABEL__&&!x.disabled);if(b.length!==1)m.push('enabled-button');if(m.length)return {done:false,missing:m};b[0].click();return {done:true,missing:[]};").Replace('__LABEL__',($Label|ConvertTo-Json -Compress))
 }
 
-function Invoke-CommentsCreationControl { param($Context,[ValidateSet('Add comment','Add area highlight')][string]$Label,[string]$Kind)
- $script=Get-CommentsCreationControlScript $Label;$allowed=@('page-image','comment-layer','enabled-button');$missing=@('not-observed')
- while([datetime]::UtcNow-lt$Context.Deadline){
-  $value=Invoke-WebDriverScript -SessionId $Context.SessionId -Deadline $Context.Deadline -Script $script
-  if($null-eq$value-or$null-eq$value.PSObject.Properties['clicked']-or$null-eq$value.PSObject.Properties['missing']-or$value.clicked-isnot[bool]){throw "Exact $Kind creation control probe returned an unexpected shape."}
-  $observed=@($value.missing|ForEach-Object{[string]$_});foreach($item in $observed){if($allowed-cnotcontains$item){throw "Exact $Kind creation control probe returned an unexpected shape."}}
-  if($value.clicked){if($observed.Count-ne0){throw "Exact $Kind creation control probe returned an unexpected shape."};return}
-  if($observed.Count-lt1){throw "Exact $Kind creation control probe returned an unexpected shape."};$missing=$observed;Start-Sleep -Milliseconds 200
- }
- throw "Exact $Kind creation controls were unavailable. Missing: $($missing-join', ')."
+function Get-CommentsPlacementScript { param([ValidateSet('Comment text','Highlight description')][string]$Editor)
+ $place=if($Editor-ceq'Comment text'){"l.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,button:0,buttons:1,clientX:r.left+r.width*.25,clientY:r.top+r.height*.25,pointerId:11,pointerType:'mouse'}));"}else{"const e=(t,x,y)=>l.dispatchEvent(new PointerEvent(t,{bubbles:true,button:0,buttons:t==='pointerup'?0:1,clientX:x,clientY:y,pointerId:12,pointerType:'mouse'}));e('pointerdown',r.left+r.width*.55,r.top+r.height*.55);e('pointermove',r.left+r.width*.75,r.top+r.height*.7);e('pointerup',r.left+r.width*.75,r.top+r.height*.7);"}
+ return ("if(document.querySelectorAll('textarea[aria-label=__EDITOR__]').length===1)return {done:true,missing:[]};").Replace('__EDITOR__',($Editor|ConvertTo-Json -Compress))+(Get-CommentsPageOneScript)+"if(m.length)return {done:false,missing:m};const r=p.getBoundingClientRect();$place return {done:false,missing:['editor']};"
+}
+
+function Get-CommentsEditorSaveScript { param([ValidateSet('Comment text','Highlight description')][string]$Editor,[ValidateSet('Installed sticky receipt','Installed area receipt')][string]$Text,[ValidateSet('Save comment','Save area highlight')][string]$Button)
+ return ("const t=[...document.querySelectorAll('textarea')].filter(x=>x.getAttribute('aria-label')===__EDITOR__),v=__TEXT__;if(t.length!==1)return {done:false,missing:['editor']};if(t[0].value!==v){Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(t[0],v);t[0].dispatchEvent(new Event('input',{bubbles:true}));return {done:false,missing:['typed-text']};}const b=[...document.querySelectorAll('button')].filter(x=>x.textContent.trim()===__BUTTON__);if(b.length!==1||b[0].disabled)return {done:false,missing:['enabled-save-button']};b[0].click();return {done:true,missing:[]};").Replace('__EDITOR__',($Editor|ConvertTo-Json -Compress)).Replace('__TEXT__',($Text|ConvertTo-Json -Compress)).Replace('__BUTTON__',($Button|ConvertTo-Json -Compress))
+}
+
+function Invoke-CommentsCreateAnnotation { param($Context,[ValidateSet('note','area')][string]$Type)
+ if($Type-ceq'note'){$label='Add comment';$editor='Comment text';$text='Installed sticky receipt';$button='Save comment';$kind='sticky-comment'}else{$label='Add area highlight';$editor='Highlight description';$text='Installed area receipt';$button='Save area highlight';$kind='area-highlight'}
+ $null=Invoke-CommentsFormsPoll -SessionId $Context.SessionId -Deadline $Context.Deadline -Script (Get-CommentsCreationControlScript $label) -Allowed @('page-image','comment-layer','enabled-button') -Kind "Exact $kind creation controls"
+ $null=Invoke-CommentsFormsPoll -SessionId $Context.SessionId -Deadline $Context.Deadline -Script (Get-CommentsPlacementScript $editor) -Allowed @('page-image','comment-layer','editor') -Kind "Exact $kind placement"
+ $null=Invoke-CommentsFormsPoll -SessionId $Context.SessionId -Deadline $Context.Deadline -Script (Get-CommentsEditorSaveScript $editor $text $button) -Allowed @('editor','typed-text','enabled-save-button') -Kind "Exact $kind editor"
+ $textJson=$text|ConvertTo-Json -Compress
+ $null=Wait-WebDriverOracle -SessionId $Context.SessionId -Deadline $Context.Deadline -Kind "$kind persisted" -Script "return [...document.querySelectorAll('aside[aria-label=`"Comments`"] span')].some(x=>x.textContent.trim()===$textJson);" -Predicate {param($v)$v-is[bool]-and$v}
 }
 
 function Invoke-CommentsCreateSession { param($Context,[string]$SourcePath,[string]$OutputPath)
  $category=Open-CommentsFormsFile $Context $SourcePath
- Invoke-CommentsCreationControl $Context 'Add comment' 'sticky-comment'
- $null=Wait-WebDriverOracle -SessionId $Context.SessionId -Deadline $Context.Deadline -Kind 'sticky comment placement' -Script "if(document.querySelector('textarea[aria-label=`"Comment text`"]'))return true;const p=document.querySelector('img[alt=`"Page 1`"]'),l=document.querySelector('[data-testid=`"comment-layer`"]');if(!p||!l)return false;const r=p.getBoundingClientRect();l.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,button:0,buttons:1,clientX:r.left+r.width*.25,clientY:r.top+r.height*.25,pointerId:11,pointerType:'mouse'}));return false;" -Predicate {param($v)$v-is[bool]-and$v}
- $null=Wait-WebDriverOracle -SessionId $Context.SessionId -Deadline $Context.Deadline -Kind 'sticky comment editor' -Script "const t=document.querySelector('textarea[aria-label=`"Comment text`"]');if(t){Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(t,'Installed sticky receipt');t.dispatchEvent(new Event('input',{bubbles:true}));}const b=[...document.querySelectorAll('button')].find(x=>x.textContent.trim()==='Save comment'&&!x.disabled);if(b)b.click();return !!t&&!!b;" -Predicate {param($v)$v-is[bool]-and$v}
- $null=Wait-WebDriverOracle -SessionId $Context.SessionId -Deadline $Context.Deadline -Kind 'sticky persisted' -Script "return [...document.querySelectorAll('aside[aria-label=`"Comments`"] span')].some(x=>x.textContent.trim()==='Installed sticky receipt');" -Predicate {param($v)$v-is[bool]-and$v}
- Invoke-CommentsCreationControl $Context 'Add area highlight' 'area-highlight'
- $null=Wait-WebDriverOracle -SessionId $Context.SessionId -Deadline $Context.Deadline -Kind 'area highlight placement' -Script "if(document.querySelector('textarea[aria-label=`"Highlight description`"]'))return true;const p=document.querySelector('img[alt=`"Page 1`"]'),l=document.querySelector('[data-testid=`"comment-layer`"]');if(!p||!l)return false;const r=p.getBoundingClientRect(),e=(t,x,y)=>l.dispatchEvent(new PointerEvent(t,{bubbles:true,button:0,buttons:t==='pointerup'?0:1,clientX:x,clientY:y,pointerId:12,pointerType:'mouse'}));e('pointerdown',r.left+r.width*.55,r.top+r.height*.55);e('pointermove',r.left+r.width*.75,r.top+r.height*.7);e('pointerup',r.left+r.width*.75,r.top+r.height*.7);return false;" -Predicate {param($v)$v-is[bool]-and$v}
- $null=Wait-WebDriverOracle -SessionId $Context.SessionId -Deadline $Context.Deadline -Kind 'area highlight editor' -Script "const t=document.querySelector('textarea[aria-label=`"Highlight description`"]');if(t){Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(t,'Installed area receipt');t.dispatchEvent(new Event('input',{bubbles:true}));}const b=[...document.querySelectorAll('button')].find(x=>x.textContent.trim()==='Save area highlight'&&!x.disabled);if(b)b.click();return !!t&&!!b;" -Predicate {param($v)$v-is[bool]-and$v}
- $null=Wait-WebDriverOracle -SessionId $Context.SessionId -Deadline $Context.Deadline -Kind 'area persisted' -Script "return [...document.querySelectorAll('aside[aria-label=`"Comments`"] span')].some(x=>x.textContent.trim()==='Installed area receipt');" -Predicate {param($v)$v-is[bool]-and$v}
- $receipt=Invoke-CommentsFormsNativeSave -SessionId $Context.SessionId -ProcessId $Context.ApplicationProcessId -ProcessStartUtcTicks $Context.ApplicationProcessStartUtcTicks -OutputPath $OutputPath -ButtonLabel 'Save a copy' -Deadline $Context.Deadline
+ Invoke-CommentsCreateAnnotation $Context 'note'
+ Invoke-CommentsCreateAnnotation $Context 'area'
+ $receipt=Invoke-CommentsFormsNativeSave -SessionId $Context.SessionId -ProcessId $Context.ApplicationProcessId -ProcessStartUtcTicks $Context.ApplicationProcessStartUtcTicks -OutputPath $OutputPath -ButtonLabel 'Save a copy' -ButtonMatch 'aria-label' -Deadline $Context.Deadline
  return [pscustomobject][ordered]@{nativeFilenameControlCategory=$category;output=$receipt;stickyCreated=$true;areaHighlightCreated=$true}
 }
 
+function Get-CommentsReopenScript {
+ return "const a=document.querySelector('aside[aria-label=`"Comments`"]');if(!a){const b=[...document.querySelectorAll('button')].filter(x=>x.getAttribute('aria-label')==='Comments'&&!x.disabled);if(b.length===1)b[0].click();return {sticky:0,area:0};}const rows=[...a.querySelectorAll('button')];return {sticky:rows.filter(x=>x.textContent.includes('Installed sticky receipt')&&x.textContent.includes('Comment · Page 1')).length,area:rows.filter(x=>x.textContent.includes('Installed area receipt')&&x.textContent.includes('Highlight · Page 1')).length};"
+}
+
 function Invoke-CommentsReopenSession { param($Context,[string]$Path)
- $null=Open-CommentsFormsFile $Context $Path;$state=Wait-WebDriverOracle -SessionId $Context.SessionId -Deadline $Context.Deadline -Kind 'reopened comments' -Script "const b=document.querySelector('button[aria-label=`"Comments`"]');if(b&&!b.disabled)b.click();const rows=[...document.querySelectorAll('aside[aria-label=`"Comments`"] button')];return {sticky:rows.filter(x=>x.textContent.includes('Installed sticky receipt')&&x.textContent.includes('Comment · Page 1')).length,area:rows.filter(x=>x.textContent.includes('Installed area receipt')&&x.textContent.includes('Highlight · Page 1')).length};" -Predicate {param($v)[int]$v.sticky-eq1-and[int]$v.area-eq1}
+ $null=Open-CommentsFormsFile $Context $Path;$state=Wait-WebDriverOracle -SessionId $Context.SessionId -Deadline $Context.Deadline -Kind 'reopened comments' -Script (Get-CommentsReopenScript) -Predicate {param($v)[int]$v.sticky-eq1-and[int]$v.area-eq1}
  return [pscustomobject][ordered]@{stickyCount=[int]$state.sticky;areaHighlightCount=[int]$state.area;page=1;pixelAppearanceVerified=$false;nativePdfSemanticVerified=$false;selectedTextHighlightVerified=$false}
 }
 
-function Invoke-FormSession { param($Context,[string]$SourcePath,[string]$OutputPath,[string]$Kind,[bool]$Reopen)
+function Get-FormSpec { param([ValidateSet('mixed','radio','choice')][string]$Kind)
+ $specs=@{
+ mixed=[ordered]@{controls=@('Name','Consent, page 1');read="c[0].value+'|'+c[1].checked";write="if(c[0].value!=='Installed Mixed'){Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(c[0],'Installed Mixed');c[0].dispatchEvent(new Event('input',{bubbles:true}));}if(!c[1].checked)c[1].click();";source='Original|false';expected='Installed Mixed|true'}
+ radio=[ordered]@{controls=@('Preference: Choice A, page 1');read="[...d.querySelectorAll('input[type=radio]')].filter(x=>x.checked).map(x=>x.getAttribute('aria-label')).join('|')";write='if(!c[0].checked)c[0].click();';source='Preference: Choice B, page 1';expected='Preference: Choice A, page 1'}
+ choice=[ordered]@{controls=@('Destination, page 1','Delivery, page 1');read="c.map(x=>x.selectedIndex<0?'':x.options[x.selectedIndex].textContent).join('|')";write="[['North Hub',0],['Print copy',1]].forEach(([n,i])=>{const o=[...c[i].options].filter(x=>x.textContent===n);if(o.length===1&&c[i].value!==o[0].value){Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(c[i],o[0].value);c[i].dispatchEvent(new Event('change',{bubbles:true}));}});";source='South Hub|Email copy';expected='North Hub|Print copy'}
+ }
+ return $specs[$Kind]
+}
+
+function Get-FormSessionScript { param([ValidateSet('mixed','radio','choice')][string]$Kind,[ValidateSet('read','reopen','write')][string]$Phase)
+ $spec=Get-FormSpec $Kind;$finish=switch($Phase){'read'{'return {done:true,missing:[],value:v};'}'reopen'{"if(v!==e)return {done:false,missing:['reopened-values']};return {done:true,missing:[],value:v};"}'write'{"if(v===e)return {done:true,missing:[],value:v};$($spec.write)return {done:false,missing:['field-values']};"}}
+ return ("const d=document.querySelector('dialog[aria-labelledby=`"fill-forms-title`"]');if(!d){const b=[...document.querySelectorAll('button')].filter(x=>x.getAttribute('aria-label')==='Fill existing fields'&&!x.disabled);if(b.length===1)b[0].click();return {done:false,missing:['form-dialog']};}const names=__NAMES__,e=__EXPECTED__,c=names.map(n=>{const a=[...d.querySelectorAll('input,select')].filter(x=>x.getAttribute('aria-label')===n);return a.length===1?a[0]:null;});if(c.some(x=>!x))return {done:false,missing:names.filter((n,i)=>!c[i])};if(c.some(x=>x.disabled))return {done:false,missing:['enabled-fields']};const v=").Replace('__NAMES__',(ConvertTo-Json -InputObject @($spec.controls) -Compress)).Replace('__EXPECTED__',($spec.expected|ConvertTo-Json -Compress))+$spec.read+';'+$finish
+}
+
+function Invoke-FormSession { param($Context,[string]$SourcePath,[string]$OutputPath,[ValidateSet('mixed','radio','choice')][string]$Kind,[bool]$Reopen)
  $null=Open-CommentsFormsFile $Context $SourcePath
- $kindJson=$Kind|ConvertTo-Json -Compress;$reopenJson=if($Reopen){'true'}else{'false'}
- $state=Wait-WebDriverOracle -SessionId $Context.SessionId -Deadline $Context.Deadline -Kind 'form fields' -Script "const kind=$kindJson,reopen=$reopenJson,b=document.querySelector('button[aria-label=`"Fill existing fields`"]');if(b&&!b.disabled)b.click();const d=document.querySelector('dialog[aria-labelledby=`"fill-forms-title`"]');if(!d)return null;const set=(e,v)=>{const p=e.tagName==='SELECT'?HTMLSelectElement.prototype:e.type==='checkbox'?HTMLInputElement.prototype:e.type==='radio'?HTMLInputElement.prototype:HTMLInputElement.prototype;const key=e.type==='checkbox'||e.type==='radio'?'checked':'value';Object.getOwnPropertyDescriptor(p,key).set.call(e,v);e.dispatchEvent(new Event('change',{bubbles:true}));e.dispatchEvent(new Event('input',{bubbles:true}));};let initial='',expected='';if(kind==='mixed'){const n=d.querySelector('input[aria-label=`"Name`"]'),c=d.querySelector('input[aria-label=`"Consent, page 1`"]');initial=(n?.value||'')+'|'+!!c?.checked;expected='Installed Mixed|true';if(!reopen){set(n,'Installed Mixed');set(c,true)}}else if(kind==='radio'){const chosen=[...d.querySelectorAll('input[type=radio]')].find(x=>x.checked);initial=chosen?.getAttribute('aria-label')||'';expected='Preference: Choice A, page 1';if(!reopen){const e=d.querySelector('input[aria-label=`"Preference: Choice A, page 1`"]');if(e)set(e,true)}}else{const fields=[...d.querySelectorAll('select')];initial=fields.map(x=>x.value).join('|');expected='north-001|print-001';if(!reopen&&fields.length===2){set(fields[0],'north-001');set(fields[1],'print-001')}}return {initial,expected,ready:initial.length>0,matched:reopen&&initial===expected};" -Predicate {param($v)$null-ne$v-and[bool]$v.ready-and(-not$Reopen-or[bool]$v.matched)}
- if($Reopen){return [pscustomobject][ordered]@{kind=$Kind;initial=[string]$state.initial;reopenedValuesMatched=$true;pixelAppearanceVerified=$false;nativePdfSemanticVerified=$false}}
- $receipt=Invoke-CommentsFormsNativeSave -SessionId $Context.SessionId -ProcessId $Context.ApplicationProcessId -ProcessStartUtcTicks $Context.ApplicationProcessStartUtcTicks -OutputPath $OutputPath -ButtonLabel 'Save filled copy' -Deadline $Context.Deadline
- return [pscustomobject][ordered]@{kind=$Kind;sourceValues=[string]$state.initial;expectedOutputValues=[string]$state.expected;output=$receipt;saveDialogVerified=$true}
+ $spec=Get-FormSpec $Kind;$allowed=@('form-dialog','enabled-fields','reopened-values','field-values')+@($spec.controls)
+ $state=Invoke-CommentsFormsPoll -SessionId $Context.SessionId -Deadline $Context.Deadline -Script (Get-FormSessionScript $Kind $(if($Reopen){'reopen'}else{'read'})) -Allowed $allowed -Kind "Exact $Kind form fields"
+ if($Reopen){return [pscustomobject][ordered]@{kind=$Kind;initial=[string]$state.value;reopenedValuesMatched=$true;pixelAppearanceVerified=$false;nativePdfSemanticVerified=$false}}
+ $null=Invoke-CommentsFormsPoll -SessionId $Context.SessionId -Deadline $Context.Deadline -Script (Get-FormSessionScript $Kind 'write') -Allowed $allowed -Kind "Exact $Kind form entry"
+ $receipt=Invoke-CommentsFormsNativeSave -SessionId $Context.SessionId -ProcessId $Context.ApplicationProcessId -ProcessStartUtcTicks $Context.ApplicationProcessStartUtcTicks -OutputPath $OutputPath -ButtonLabel 'Save filled copy' -ButtonMatch 'text' -Deadline $Context.Deadline
+ return [pscustomobject][ordered]@{kind=$Kind;sourceValues=[string]$state.value;expectedOutputValues=[string]$spec.expected;output=$receipt;saveDialogVerified=$true}
 }
 
 function Invoke-InstalledCommentsFormsRuntime { param([string]$ApplicationPath,[string]$TauriDriverPath,[string]$EdgeDriverPath,[string]$SettingsRoot,[string]$Work,[string]$ExpectedEdgeDriverVersion,$CommentFixture,[object[]]$Fixtures)
@@ -110,7 +146,7 @@ function Assert-CommentsFormsRuntimeReceipt { param($Value)
  Assert-ExactProperties $Value.comments.write @('nativeDriverVersion','returnedRuntimeVersion','profileBinding','nativeFilenameControlCategory','output','stickyCreated','areaHighlightCreated','sessionDeleted','ownedProcessTreeStopped','relevantProcessesRemaining') 'Comments write session';Assert-BoundedFileReceipt $Value.comments.write.output 'Comments output receipt';Assert-SessionCleanup $Value.comments.write 'Comments write session'
  Assert-ExactProperties $Value.comments.reopen @('nativeDriverVersion','returnedRuntimeVersion','profileBinding','stickyCount','areaHighlightCount','page','pixelAppearanceVerified','nativePdfSemanticVerified','selectedTextHighlightVerified','sessionDeleted','ownedProcessTreeStopped','relevantProcessesRemaining') 'Comments reopen session';Assert-SessionCleanup $Value.comments.reopen 'Comments reopen session'
  if(-not[bool]$Value.comments.write.stickyCreated-or-not[bool]$Value.comments.write.areaHighlightCreated-or[bool]$Value.comments.reopen.pixelAppearanceVerified-or[bool]$Value.comments.reopen.nativePdfSemanticVerified-or[bool]$Value.comments.reopen.selectedTextHighlightVerified-or[int]$Value.comments.reopen.stickyCount-ne1-or[int]$Value.comments.reopen.areaHighlightCount-ne1){throw 'Comments runtime receipt exceeded or missed its exact claim.'}
- $expected=@{mixed=@('Original|false','Installed Mixed|true');radio=@('Preference: Choice B, page 1','Preference: Choice A, page 1');choice=@('south-002|email-002','north-001|print-001')}
+ $expected=@{mixed=@('Original|false','Installed Mixed|true');radio=@('Preference: Choice B, page 1','Preference: Choice A, page 1');choice=@('South Hub|Email copy','North Hub|Print copy')}
  $kinds=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
  foreach($form in @($Value.forms)){
   Assert-ExactProperties $form @('kind','source','write','reopen') 'Form runtime';Assert-BoundedFileReceipt $form.source 'Form source receipt'
