@@ -49,20 +49,31 @@ function Open-CommentsFormsFile { param($Context,[string]$Path)
  return Open-ReadingUserFile -SessionId $Context.SessionId -ApplicationProcessId $Context.ApplicationProcessId -ApplicationProcessStartUtcTicks $Context.ApplicationProcessStartUtcTicks -Path $Path -Deadline $Context.Deadline
 }
 
+function Get-CommentsCreationControlScript { param([ValidateSet('Add comment','Add area highlight')][string]$Label)
+ $name=$Label|ConvertTo-Json -Compress
+ return "const p=document.querySelector('img[alt=`"Page 1`"]'),l=document.querySelector('[data-testid=`"comment-layer`"]'),b=[...document.querySelectorAll('button')].filter(x=>x.getAttribute('aria-label')===$name&&!x.disabled),m=[];if(!p)m.push('page-image');if(!l)m.push('comment-layer');if(b.length!==1)m.push('enabled-button');if(m.length)return {clicked:false,missing:m};b[0].click();return {clicked:true,missing:[]};"
+}
+
+function Invoke-CommentsCreationControl { param($Context,[ValidateSet('Add comment','Add area highlight')][string]$Label,[string]$Kind)
+ $script=Get-CommentsCreationControlScript $Label;$allowed=@('page-image','comment-layer','enabled-button');$missing=@('not-observed')
+ while([datetime]::UtcNow-lt$Context.Deadline){
+  $value=Invoke-WebDriverScript -SessionId $Context.SessionId -Deadline $Context.Deadline -Script $script
+  if($null-eq$value-or$null-eq$value.PSObject.Properties['clicked']-or$null-eq$value.PSObject.Properties['missing']-or$value.clicked-isnot[bool]){throw "Exact $Kind creation control probe returned an unexpected shape."}
+  $observed=@($value.missing|ForEach-Object{[string]$_});foreach($item in $observed){if($allowed-cnotcontains$item){throw "Exact $Kind creation control probe returned an unexpected shape."}}
+  if($value.clicked){if($observed.Count-ne0){throw "Exact $Kind creation control probe returned an unexpected shape."};return}
+  if($observed.Count-lt1){throw "Exact $Kind creation control probe returned an unexpected shape."};$missing=$observed;Start-Sleep -Milliseconds 200
+ }
+ throw "Exact $Kind creation controls were unavailable. Missing: $($missing-join', ')."
+}
+
 function Invoke-CommentsCreateSession { param($Context,[string]$SourcePath,[string]$OutputPath)
  $category=Open-CommentsFormsFile $Context $SourcePath
- $script=@'
-const button=n=>[...document.querySelectorAll('button')].find(x=>x.getAttribute('aria-label')===n&&!x.disabled);
-const fire=(element,type,x,y,id)=>element.dispatchEvent(new PointerEvent(type,{bubbles:true,button:0,buttons:type==='pointerup'?0:1,clientX:x,clientY:y,pointerId:id,pointerType:'mouse'}));
-const input=(element,value)=>{Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(element,value);element.dispatchEvent(new Event('input',{bubbles:true}));};
-const page=document.querySelector('img[alt="Page 1"]'),layer=document.querySelector('[data-testid="comment-layer"]');if(!page||!layer||!button('Add comment'))return false;
-button('Add comment').click();let r=page.getBoundingClientRect();fire(layer,'pointerdown',r.left+r.width*.25,r.top+r.height*.25,11);return true;
-'@
- $started=Invoke-WebDriverScript -SessionId $Context.SessionId -Deadline $Context.Deadline -Script $script;if($started-isnot[bool]-or-not$started){throw 'Exact sticky-comment creation controls were unavailable.'}
+ Invoke-CommentsCreationControl $Context 'Add comment' 'sticky-comment'
+ $null=Wait-WebDriverOracle -SessionId $Context.SessionId -Deadline $Context.Deadline -Kind 'sticky comment placement' -Script "if(document.querySelector('textarea[aria-label=`"Comment text`"]'))return true;const p=document.querySelector('img[alt=`"Page 1`"]'),l=document.querySelector('[data-testid=`"comment-layer`"]');if(!p||!l)return false;const r=p.getBoundingClientRect();l.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,button:0,buttons:1,clientX:r.left+r.width*.25,clientY:r.top+r.height*.25,pointerId:11,pointerType:'mouse'}));return false;" -Predicate {param($v)$v-is[bool]-and$v}
  $null=Wait-WebDriverOracle -SessionId $Context.SessionId -Deadline $Context.Deadline -Kind 'sticky comment editor' -Script "const t=document.querySelector('textarea[aria-label=`"Comment text`"]');if(t){Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(t,'Installed sticky receipt');t.dispatchEvent(new Event('input',{bubbles:true}));}const b=[...document.querySelectorAll('button')].find(x=>x.textContent.trim()==='Save comment'&&!x.disabled);if(b)b.click();return !!t&&!!b;" -Predicate {param($v)$v-is[bool]-and$v}
  $null=Wait-WebDriverOracle -SessionId $Context.SessionId -Deadline $Context.Deadline -Kind 'sticky persisted' -Script "return [...document.querySelectorAll('aside[aria-label=`"Comments`"] span')].some(x=>x.textContent.trim()==='Installed sticky receipt');" -Predicate {param($v)$v-is[bool]-and$v}
- $area=Invoke-WebDriverScript -SessionId $Context.SessionId -Deadline $Context.Deadline -Script "const b=[...document.querySelectorAll('button')].find(x=>x.getAttribute('aria-label')==='Add area highlight'&&!x.disabled);if(!b)return false;b.click();const p=document.querySelector('img[alt=`"Page 1`"]'),l=document.querySelector('[data-testid=`"comment-layer`"]');if(!p||!l)return false;const r=p.getBoundingClientRect(),e=(t,x,y)=>l.dispatchEvent(new PointerEvent(t,{bubbles:true,button:0,buttons:t==='pointerup'?0:1,clientX:x,clientY:y,pointerId:12,pointerType:'mouse'}));e('pointerdown',r.left+r.width*.55,r.top+r.height*.55);e('pointermove',r.left+r.width*.75,r.top+r.height*.7);e('pointerup',r.left+r.width*.75,r.top+r.height*.7);return true;"
- if($area-isnot[bool]-or-not$area){throw 'Exact area-highlight creation controls were unavailable.'}
+ Invoke-CommentsCreationControl $Context 'Add area highlight' 'area-highlight'
+ $null=Wait-WebDriverOracle -SessionId $Context.SessionId -Deadline $Context.Deadline -Kind 'area highlight placement' -Script "if(document.querySelector('textarea[aria-label=`"Highlight description`"]'))return true;const p=document.querySelector('img[alt=`"Page 1`"]'),l=document.querySelector('[data-testid=`"comment-layer`"]');if(!p||!l)return false;const r=p.getBoundingClientRect(),e=(t,x,y)=>l.dispatchEvent(new PointerEvent(t,{bubbles:true,button:0,buttons:t==='pointerup'?0:1,clientX:x,clientY:y,pointerId:12,pointerType:'mouse'}));e('pointerdown',r.left+r.width*.55,r.top+r.height*.55);e('pointermove',r.left+r.width*.75,r.top+r.height*.7);e('pointerup',r.left+r.width*.75,r.top+r.height*.7);return false;" -Predicate {param($v)$v-is[bool]-and$v}
  $null=Wait-WebDriverOracle -SessionId $Context.SessionId -Deadline $Context.Deadline -Kind 'area highlight editor' -Script "const t=document.querySelector('textarea[aria-label=`"Highlight description`"]');if(t){Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(t,'Installed area receipt');t.dispatchEvent(new Event('input',{bubbles:true}));}const b=[...document.querySelectorAll('button')].find(x=>x.textContent.trim()==='Save area highlight'&&!x.disabled);if(b)b.click();return !!t&&!!b;" -Predicate {param($v)$v-is[bool]-and$v}
  $null=Wait-WebDriverOracle -SessionId $Context.SessionId -Deadline $Context.Deadline -Kind 'area persisted' -Script "return [...document.querySelectorAll('aside[aria-label=`"Comments`"] span')].some(x=>x.textContent.trim()==='Installed area receipt');" -Predicate {param($v)$v-is[bool]-and$v}
  $receipt=Invoke-CommentsFormsNativeSave -SessionId $Context.SessionId -ProcessId $Context.ApplicationProcessId -ProcessStartUtcTicks $Context.ApplicationProcessStartUtcTicks -OutputPath $OutputPath -ButtonLabel 'Save a copy' -Deadline $Context.Deadline

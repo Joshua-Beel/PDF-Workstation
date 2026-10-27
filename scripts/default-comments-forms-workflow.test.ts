@@ -116,6 +116,32 @@ describe('default comments and forms workflow', () => {
     expect(source).toContain("-ButtonLabel 'Save filled copy'");
   });
 
+  it('polls for the page image, comment layer and enabled creation button before clicking, and names what is missing on timeout', () => {
+    const source = readFileSync(verifierPath, 'utf8');
+    expect(source).not.toContain("throw 'Exact sticky-comment creation controls were unavailable.'");
+    expect(source).toContain("Invoke-CommentsCreationControl $Context 'Add comment' 'sticky-comment'");
+    expect(source).toContain("Invoke-CommentsCreationControl $Context 'Add area highlight' 'area-highlight'");
+    expect(source).toContain("-Kind 'sticky comment placement'");
+    expect(source).toContain("-Kind 'area highlight placement'");
+    const result = runPowerShell(extractFunctions(['Get-CommentsCreationControlScript', 'Invoke-CommentsCreationControl'], String.raw`
+      $probe=Get-CommentsCreationControlScript 'Add comment'
+      foreach($marker in @('img[alt="Page 1"]','[data-testid="comment-layer"]','x.getAttribute(''aria-label'')==="Add comment"','!x.disabled','b.length!==1','b[0].click()')){if(-not$probe.Contains($marker,[StringComparison]::Ordinal)){throw ('Probe lacks '+$marker)}}
+      if($probe.IndexOf('b[0].click()')-lt$probe.IndexOf('if(m.length)return')){throw 'Probe clicks before all three conditions hold.'}
+      $script:calls=0;$script:replies=@()
+      function Invoke-WebDriverScript{param($SessionId,$Deadline,$Script)$script:calls++;$reply=$script:replies[[Math]::Min($script:calls,$script:replies.Count)-1];return ($reply|ConvertFrom-Json)}
+      $context=[pscustomobject]@{SessionId='s';Deadline=[datetime]::UtcNow.AddSeconds(20)}
+      $script:replies=@('{"clicked":false,"missing":["page-image","comment-layer"]}','{"clicked":false,"missing":["comment-layer"]}','{"clicked":false,"missing":["enabled-button"]}','{"clicked":true,"missing":[]}')
+      Invoke-CommentsCreationControl $context 'Add comment' 'sticky-comment';if($script:calls-ne4){throw ('Expected four polls, saw '+$script:calls)}
+      $script:calls=0;$script:replies=@('{"clicked":false,"missing":["enabled-button"]}');$context.Deadline=[datetime]::UtcNow.AddMilliseconds(900);$message=$null
+      try{Invoke-CommentsCreationControl $context 'Add area highlight' 'area-highlight'}catch{$message=$_.Exception.Message}
+      if($message-cne'Exact area-highlight creation controls were unavailable. Missing: enabled-button.'){throw ('Unexpected timeout message: '+$message)};if($script:calls-lt2){throw 'Timeout path did not poll.'}
+      foreach($bad in @('{"clicked":false,"missing":[]}','{"clicked":true,"missing":["page-image"]}','{"clicked":false,"missing":["C:\\Users\\x"]}','{"clicked":"yes","missing":[]}','null')){$script:calls=0;$script:replies=@($bad);$context.Deadline=[datetime]::UtcNow.AddSeconds(5);$message=$null;try{Invoke-CommentsCreationControl $context 'Add comment' 'sticky-comment'}catch{$message=$_.Exception.Message};if($message-cne'Exact sticky-comment creation control probe returned an unexpected shape.'){throw ('Bad probe reply accepted: '+$bad+' -> '+$message)}}
+      'PASS'
+    `));
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(result.stdout).toContain('PASS');
+  });
+
   it('projects the validated runtime to bounded public counts, booleans, categories, and hashes only', () => {
     const source = readFileSync(verifierPath, 'utf8');
     expect(source).toContain('runtime=ConvertTo-CommentsFormsPublicRuntime $runtime');
