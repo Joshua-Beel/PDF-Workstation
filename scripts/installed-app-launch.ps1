@@ -161,7 +161,23 @@ function Invoke-BoundedLoopbackJson {
     try {
         $remaining = Get-LaunchRemainingMilliseconds -Deadline $requestDeadline -MaximumMilliseconds $timeout
         $pendingResponse = $request.GetResponseAsync()
-        if (-not $pendingResponse.Wait($remaining)) { throw 'WebDriver response headers exceeded their deadline.' }
+        $completed = $false
+        try { $completed = $pendingResponse.Wait($remaining) } catch {
+            $failure = $_.Exception; while ($null -ne $failure -and $failure -isnot [Net.WebException]) { $failure = $failure.InnerException }
+            if ($null -eq $failure -or $failure.Response -isnot [Net.HttpWebResponse]) { throw }
+            $errorResponse = [Net.HttpWebResponse]$failure.Response
+            try {
+                $bodyText = ''
+                if ($errorResponse.ContentLength -le $script:LaunchPins.RequestBytesMaximum) {
+                    $errorStream = $errorResponse.GetResponseStream()
+                    try { $bodyText = Read-BoundedLoopbackResponseText -Stream $errorStream -Deadline $requestDeadline } catch { $bodyText = '' } finally { $errorStream.Dispose() }
+                }
+                $sanitized = ConvertTo-SanitizedWebDriverError -StatusCode ([int]$errorResponse.StatusCode) -BodyText $bodyText
+            } finally { $errorResponse.Dispose() }
+            [Console]::Out.WriteLine(('WEBDRIVER_ERROR_DIAG status={0} error={1} message={2}' -f $sanitized.status,$sanitized.error,$sanitized.message))
+            throw ('WebDriver returned HTTP {0} ({1}): {2}' -f $sanitized.status,$sanitized.error,$sanitized.message)
+        }
+        if (-not $completed) { throw 'WebDriver response headers exceeded their deadline.' }
         $response = [Net.HttpWebResponse]$pendingResponse.GetAwaiter().GetResult()
         $null = Get-LaunchRemainingMilliseconds -Deadline $requestDeadline -MaximumMilliseconds $timeout
         if ([int]$response.StatusCode -ne 200) { throw 'WebDriver returned an unexpected HTTP status.' }
@@ -367,6 +383,23 @@ function Get-UniqueOwnedLaunchProcesses {
         if ($seen.Add($key)) { $unique.Add($process) }
     }
     return @($unique)
+}
+
+function ConvertTo-SanitizedWebDriverError {
+    param([int]$StatusCode,[string]$BodyText)
+    $code = 'unparsed'; $message = ''
+    try {
+        $parsed = $BodyText | ConvertFrom-Json -ErrorAction Stop
+        $value = if ($null -ne $parsed -and $null -ne $parsed.PSObject.Properties['value']) { $parsed.value } else { $parsed }
+        if ($null -ne $value -and $null -ne $value.PSObject.Properties['error']) { $code = [string]$value.error }
+        if ($null -ne $value -and $null -ne $value.PSObject.Properties['message']) { $message = [string]$value.message }
+    } catch { $code = 'unparsed' }
+    if ($code -cnotmatch '^[a-z][a-z ]{0,39}$') { $code = 'unrecognized' }
+    $message = (($message -split "`r?`n")[0])
+    $message = $message -replace '(?i)[a-z]:\\[^\s''"<>|]*','<path>' -replace '\\\\[^\s''"<>|]+','<path>' -replace '(?i)file:///\S*','<path>' -replace '(?i)\b(users|runneradmin)\b','<redacted>'
+    $message = ($message -replace '[^\x20-\x7E]',' ').Trim()
+    if ($message.Length -gt 200) { $message = $message.Substring(0,200) }
+    return [pscustomobject][ordered]@{ status = $StatusCode; error = $code; message = $message }
 }
 
 function Invoke-WebDriverScript {

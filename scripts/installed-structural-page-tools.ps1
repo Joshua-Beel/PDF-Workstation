@@ -238,14 +238,14 @@ function Wait-StructuralToolDialog {
     $clicked = Invoke-WebDriverScript -SessionId $SessionId -Deadline $Deadline -Script "const n=$launchJson,b=[...document.querySelectorAll('button')].filter(x=>x.textContent.trim()===n&&!x.disabled);if(b.length===1)b[0].click();return b.length===1;"
     if ($clicked -isnot [bool] -or -not $clicked) { throw "The exact $($contract.launch) control was unavailable or ambiguous." }
     $titleJson = $contract.title | ConvertTo-Json -Compress
-    $null = Wait-WebDriverOracle -SessionId $SessionId -Deadline $Deadline -Kind "$Tool dialog" -Script "const id=$titleJson,d=document.querySelector('dialog[aria-labelledby=\"'+id+'\"]');return !!d&&d.open;" -Predicate { param($v) $v -is [bool] -and $v }
+    $null = Wait-WebDriverOracle -SessionId $SessionId -Deadline $Deadline -Kind "$Tool dialog" -Script "const id=$titleJson,d=[...document.querySelectorAll('dialog')].filter(x=>x.getAttribute('aria-labelledby')===id);return d.length===1&&d[0].open;" -Predicate { param($v) $v -is [bool] -and $v }
     return $contract
 }
 
 function Set-StructuralDialogInput {
     param([string]$SessionId,[string]$Label,[string]$Value,[datetime]$Deadline)
     $labelJson = $Label | ConvertTo-Json -Compress; $valueJson = $Value | ConvertTo-Json -Compress
-    $set = Invoke-WebDriverScript -SessionId $SessionId -Deadline $Deadline -Script "const a=$labelJson,v=$valueJson,i=document.querySelector('input[aria-label=\"'+a+'\"]');if(!i||i.disabled)return false;Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(i,v);i.dispatchEvent(new Event('input',{bubbles:true}));return true;"
+    $set = Invoke-WebDriverScript -SessionId $SessionId -Deadline $Deadline -Script "const a=$labelJson,v=$valueJson,m=[...document.querySelectorAll('dialog[open] input')].filter(x=>x.getAttribute('aria-label')===a),i=m.length===1?m[0]:null;if(!i||i.disabled)return false;Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(i,v);i.dispatchEvent(new Event('input',{bubbles:true}));return true;"
     if ($set -isnot [bool] -or -not $set) { throw 'An exact structural dialog input was unavailable.' }
 }
 

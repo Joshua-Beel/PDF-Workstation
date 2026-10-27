@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- Rehearsal fixes, round 7: two structural-check scripts sent truncated JavaScript because of PowerShell quoting, and every WebDriver HTTP error now logs a sanitized error code and message (SM6; scripts and tests only).
 - Rehearsal fixes, round 6: the structural page-tools check accepts and fully verifies the signed PDFium resource record and the pinned WebDriver records the earlier stages pass to it (SM6; scripts and tests only).
 - Rehearsal fixes, round 5: the default page-tools check writes the settings sentinel the organizer expects, and the split check drives the real folder picker (Folder box, existing parent, `Split PDFs` inside) (SM6; scripts and tests only).
 - Intermittent native-dialog test failures fixed: tests that needed one observation before a 20–250 ms wall-clock deadline now warm up first and use budgets that slow runners can meet (SM6; tests only).
