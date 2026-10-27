@@ -296,6 +296,37 @@ describe('default Step 2 oracles', () => {
     expect(readFileSync('scripts/verify-signed-ocr-upgrade.ps1', 'utf8')).toContain("@('target','bytes','sha256','unsignedBytes','unsignedSha256')");
   }, 90_000);
 
+  it('waits for the relaunched NSIS uninstaller to finish and names any state that remains', () => {
+    const result = runWithFunctions('verify-default-expanded-page-tools.ps1', ['Get-OwnedStateRemaining', 'Wait-OwnedUninstallComplete', 'Invoke-OwnedCleanup', 'Assert-OwnedCleanupState', 'Assert-EmptyProcessFacts'], [
+      "$script:polls = 0; $script:sleeps = 0; $sleep = { param($ms) $script:sleeps++ }",
+      "$state = { $script:polls++; if ($script:polls -le 3) { @('uninstall-registry-key', 'install-folder') } elseif ($script:polls -le 5) { @('install-folder') } else { @() } }",
+      "Wait-OwnedUninstallComplete -RegistryPath 'x' -InstallRoot 'y' -StateProvider $state -SleepProvider $sleep",
+      "if ($script:polls -ne 6 -or $script:sleeps -ne 5) { throw ('polls=' + $script:polls + ' sleeps=' + $script:sleeps) }",
+      "$message = $null; try { Wait-OwnedUninstallComplete -RegistryPath 'x' -InstallRoot 'y' -TimeoutMilliseconds 1 -StateProvider { @('install-folder') } -SleepProvider { param($ms) Start-Sleep -Milliseconds 5 } } catch { $message = $_.Exception.Message }",
+      "if ($message -cne 'The silent uninstaller did not finish; remaining: install-folder.') { throw ('timeout: ' + $message) }",
+      "$root = Join-Path (Get-Location) ('target/owned-cleanup-' + [guid]::NewGuid()); $install = Join-Path $root 'install'; $settings = Join-Path $root 'settings'",
+      "[IO.Directory]::CreateDirectory($install) | Out-Null; [IO.File]::WriteAllText((Join-Path $install 'uninstall.exe'), 'stub'); [IO.Directory]::CreateDirectory($settings) | Out-Null; [IO.File]::WriteAllText((Join-Path $settings 'upgrade-sentinel.json'), '{}')",
+      ". ./scripts/ocr/installer-package.ps1",
+      "try {",
+      "  $script:order = @(); $uninstall = { param($path) $script:order += 'stub-exited'; $script:pending = 2 }",
+      "  $pendingState = { $script:order += 'poll'; if ($script:pending -gt 0) { $script:pending--; @('install-folder') } else { Remove-Item -LiteralPath $install -Recurse -Force -ErrorAction SilentlyContinue; @() } }",
+      "  Invoke-OwnedCleanup $true $install $settings -UninstallProvider $uninstall -RegistryPath (Join-Path $root 'absent-registry') -UninstallStateProvider $pendingState",
+      "  if (($script:order -join ',') -cne 'stub-exited,poll,poll,poll' -or (Test-Path -LiteralPath $settings)) { throw ('cleanup order: ' + ($script:order -join ',')) }",
+      "  Assert-OwnedCleanupState (Join-Path $root 'absent-registry') $install $settings ([pscustomobject]@{ applicationProcessPresent = $false; installerProcessPresent = $false })",
+      "  [IO.Directory]::CreateDirectory($settings) | Out-Null; $message = $null; try { Assert-OwnedCleanupState (Join-Path $root 'absent-registry') $install $settings ([pscustomobject]@{ applicationProcessPresent = $false; installerProcessPresent = $false }) } catch { $message = $_.Exception.Message }",
+      "  if ($message -cne 'Owned installed state remains after cleanup: settings-folder.') { throw ('category: ' + $message) }",
+      "} finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }",
+    ].join('\n'));
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(result.stdout).toContain('PASS');
+    expect(result.stdout).toMatch(/OWNED_CLEANUP_DIAG phase=uninstall-complete waitedMs=\d+/);
+    expect(result.stdout).toMatch(/OWNED_CLEANUP_DIAG phase=uninstall-incomplete waitedMs=\d+ remaining=install-folder/);
+    expect(result.stdout).not.toMatch(/target[\\/]owned-cleanup/);
+    const expanded = readFileSync('scripts/verify-default-expanded-page-tools.ps1', 'utf8');
+    expect(expanded).toContain('else{Invoke-SilentUninstall $uninstaller};Wait-OwnedUninstallComplete -RegistryPath $RegistryPath -InstallRoot $InstallRoot -StateProvider $UninstallStateProvider}');
+    expect(readFileSync('scripts/verify-default-comments-forms.ps1', 'utf8')).toContain("'Invoke-OwnedCleanup','Invoke-SilentUninstall','Wait-OwnedUninstallComplete','Get-OwnedStateRemaining',");
+  }, 90_000);
+
   it('writes the settings sentinel under the exact name the organizer and structural helpers require', () => {
     const expanded = readFileSync('scripts/verify-default-expanded-page-tools.ps1', 'utf8');
     expect(expanded).toContain("$sentinel=Join-Path $settingsRoot 'upgrade-sentinel.json'");

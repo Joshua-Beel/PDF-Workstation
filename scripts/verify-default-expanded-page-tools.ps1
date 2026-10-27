@@ -127,10 +127,25 @@ function Invoke-SilentUninstall { param([string]$Path)
  $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$Path;$null=$start.ArgumentList.Add('/S');$start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.WindowStyle='Hidden';$process=[Diagnostics.Process]::new();$process.StartInfo=$start;try{if(-not$process.Start()){throw 'Uninstaller did not start.'};if(-not$process.WaitForExit(240000)){try{$process.Kill($true)}catch{};throw 'Uninstaller timed out.'};if($process.ExitCode-ne0){throw 'Uninstaller failed.'}}finally{$process.Dispose()}
 }
 
+function Get-OwnedStateRemaining { param([string]$RegistryPath,[string]$InstallRoot,[string]$SettingsRoot)
+ $remaining=@();if(Test-Path -LiteralPath $RegistryPath){$remaining+='uninstall-registry-key'};if(Test-Path -LiteralPath $InstallRoot){$remaining+='install-folder'};if($SettingsRoot-and(Test-Path -LiteralPath $SettingsRoot)){$remaining+='settings-folder'};return $remaining
+}
+
+function Wait-OwnedUninstallComplete { param([string]$RegistryPath,[string]$InstallRoot,[int]$TimeoutMilliseconds=180000,[scriptblock]$StateProvider,[scriptblock]$SleepProvider)
+ $started=[Environment]::TickCount64;$remaining=@()
+ while($true){
+  $remaining=@(if($StateProvider){&$StateProvider}else{Get-OwnedStateRemaining $RegistryPath $InstallRoot ''})
+  $elapsed=[Environment]::TickCount64-$started
+  if($remaining.Count-eq0){[Console]::Out.WriteLine(('OWNED_CLEANUP_DIAG phase=uninstall-complete waitedMs={0}' -f $elapsed));return}
+  if($elapsed-ge$TimeoutMilliseconds){[Console]::Out.WriteLine(('OWNED_CLEANUP_DIAG phase=uninstall-incomplete waitedMs={0} remaining={1}' -f $elapsed,($remaining-join',')));throw ('The silent uninstaller did not finish; remaining: '+($remaining-join', ')+'.')}
+  if($SleepProvider){&$SleepProvider 500}else{Start-Sleep -Milliseconds 500}
+ }
+}
+
 function Invoke-OwnedCleanup {
- param([bool]$Installed,[string]$InstallRoot,[string]$SettingsRoot,[scriptblock]$UninstallProvider,[scriptblock]$RemoveProvider)
+ param([bool]$Installed,[string]$InstallRoot,[string]$SettingsRoot,[scriptblock]$UninstallProvider,[scriptblock]$RemoveProvider,[string]$RegistryPath='Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\PDF Workstation',[scriptblock]$UninstallStateProvider)
  $uninstaller=Join-Path $InstallRoot 'uninstall.exe'
- if($Installed){if(-not(Test-Path -LiteralPath $uninstaller)){throw 'Owned installation has no uninstaller for cleanup.'};if($UninstallProvider){&$UninstallProvider $uninstaller}else{Invoke-SilentUninstall $uninstaller}}
+ if($Installed){if(-not(Test-Path -LiteralPath $uninstaller)){throw 'Owned installation has no uninstaller for cleanup.'};if($UninstallProvider){&$UninstallProvider $uninstaller}else{Invoke-SilentUninstall $uninstaller};Wait-OwnedUninstallComplete -RegistryPath $RegistryPath -InstallRoot $InstallRoot -StateProvider $UninstallStateProvider}
  if(Test-Path -LiteralPath $SettingsRoot){Assert-NoReparseAncestors $SettingsRoot;foreach($entry in @(Get-ChildItem -LiteralPath $SettingsRoot -Recurse -Force)){Assert-NoReparseAncestors $entry.FullName};if($RemoveProvider){&$RemoveProvider $SettingsRoot}else{Remove-Item -LiteralPath $SettingsRoot -Recurse -Force}}
 }
 
@@ -139,7 +154,7 @@ function Assert-EmptyProcessFacts { param($Facts,[string]$Kind)
 }
 
 function Assert-OwnedCleanupState { param([string]$RegistryPath,[string]$InstallRoot,[string]$SettingsRoot,$ProcessFacts)
- if((Test-Path -LiteralPath $RegistryPath)-or(Test-Path -LiteralPath $InstallRoot)-or(Test-Path -LiteralPath $SettingsRoot)){throw 'Owned installed state remains after cleanup.'};Assert-EmptyProcessFacts $ProcessFacts 'Final'
+ $remaining=@(Get-OwnedStateRemaining $RegistryPath $InstallRoot $SettingsRoot);if($remaining.Count){throw ('Owned installed state remains after cleanup: '+($remaining-join', ')+'.')};Assert-EmptyProcessFacts $ProcessFacts 'Final'
 }
 
 function Complete-PrimaryAndCleanup { param($Primary,$Cleanup)
