@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- In-app update check: the installed-facts check now expects Tauri's quoted InstallLocation and names any mismatched field (no paths). Run 40596111704 failed there (SM6; script and tests).
 - In-app update check: hosted noninteractive publisher mode, as in the OCR upgrade check; Explorer dialog not attempted, signatures still verified. Run 40588308128 failed there (SM6; scripts, workflow, tests).
 - Comments/forms verifier sweep: every step now polls; fixed four checks that could never have passed (icon Save control, toggled Comments panel, checkbox/radio entry, choice option ids). No app change (SM3; scripts and tests only).
 - Comments/forms rehearsal fix: the verifier probed the sticky-comment controls once, right after the open dialog closed, before page 1 had rendered; it now polls for them and names any that stay missing. No app change (SM3; scripts and tests only).

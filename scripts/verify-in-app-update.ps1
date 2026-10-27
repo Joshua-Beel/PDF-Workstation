@@ -230,15 +230,54 @@ function Get-InstallFacts {
     }
 }
 
+function Get-InstallLocationForm {
+    param([AllowEmptyString()][string]$Value)
+    if ($Value.Length -ge 3 -and $Value.StartsWith('"',[StringComparison]::Ordinal) -and $Value.EndsWith('"',[StringComparison]::Ordinal) -and
+        $Value.IndexOf('"',1) -eq ($Value.Length - 1)) { return 'quoted' }
+    if ($Value.Length -gt 0 -and $Value.IndexOf('"') -lt 0) { return 'unquoted' }
+    return 'other'
+}
+
+function Test-InstallLocation {
+    param([AllowEmptyString()][string]$Value,[string]$InstallRoot)
+    # Tauri's NSIS template writes InstallLocation as "$INSTDIR" with literal quotes.
+    if ((Get-InstallLocationForm -Value $Value) -cne 'quoted') { return $false }
+    $inner = $Value.Substring(1,$Value.Length - 2)
+    if ($inner -cne $inner.Trim() -or -not [IO.Path]::IsPathFullyQualified($inner)) { return $false }
+    return [IO.Path]::GetFullPath($inner).TrimEnd('\').Equals([IO.Path]::GetFullPath($InstallRoot).TrimEnd('\'),[StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-SafeFactValue {
+    param([AllowEmptyString()][string]$Value)
+    if ($Value -cmatch '^[A-Za-z0-9.+-]{1,32}$') { return $Value }
+    if ($Value.Length -eq 0) { return '<empty>' }
+    return '<unprintable>'
+}
+
+function Get-InstallFactMismatches {
+    param($Facts,[string]$Version,[string]$InstallRoot,$ApplicationReceipt,[string]$Publisher,[string]$SignatureStatus)
+    $fields = [Collections.Generic.List[string]]::new()
+    if ([string]$Facts.displayName -cne 'PDF Workstation') { $fields.Add('displayName') }
+    if ([string]$Facts.displayVersion -cne $Version) { $fields.Add('displayVersion(actual=' + (Get-SafeFactValue ([string]$Facts.displayVersion)) + ')') }
+    if (-not (Test-InstallLocation -Value ([string]$Facts.installLocation) -InstallRoot $InstallRoot)) { $fields.Add('installLocation(form=' + (Get-InstallLocationForm -Value ([string]$Facts.installLocation)) + ')') }
+    if ([uint64]$Facts.appBytes -ne [uint64]$ApplicationReceipt.bytes) { $fields.Add('appBytes') }
+    if ([string]$Facts.appSha256 -cne [string]$ApplicationReceipt.sha256) { $fields.Add('appSha256') }
+    if ([string]$Facts.fileVersion -cne $Version) { $fields.Add('fileVersion(actual=' + (Get-SafeFactValue ([string]$Facts.fileVersion)) + ')') }
+    if ([string]$Facts.productVersion -cne $Version) { $fields.Add('productVersion(actual=' + (Get-SafeFactValue ([string]$Facts.productVersion)) + ')') }
+    if ([string]$Facts.signatureStatus -cne $SignatureStatus) { $fields.Add('signatureStatus(actual=' + (Get-SafeFactValue ([string]$Facts.signatureStatus)) + ')') }
+    return @($fields)
+}
+
 function Assert-InstallFacts {
     param($Facts,[string]$Version,[string]$InstallRoot,$ApplicationReceipt,[string]$Publisher,[string]$SignatureStatus)
-    if ([string]$Facts.displayName -cne 'PDF Workstation' -or [string]$Facts.displayVersion -cne $Version -or
-        [IO.Path]::GetFullPath([string]$Facts.installLocation).TrimEnd('\') -cne [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\') -or
-        [uint64]$Facts.appBytes -ne [uint64]$ApplicationReceipt.bytes -or [string]$Facts.appSha256 -cne [string]$ApplicationReceipt.sha256 -or
-        [string]$Facts.fileVersion -cne $Version -or [string]$Facts.productVersion -cne $Version -or [string]$Facts.signatureStatus -cne $SignatureStatus) {
-        throw 'Installed application facts do not match the exact expected version and receipt.'
+    $mismatches = @(Get-InstallFactMismatches -Facts $Facts -Version $Version -InstallRoot $InstallRoot -ApplicationReceipt $ApplicationReceipt -Publisher $Publisher -SignatureStatus $SignatureStatus)
+    if ($mismatches.Count -ne 0) {
+        throw ('Installed application facts do not match the exact expected version and receipt: ' + ($mismatches -join ', ') + '.')
     }
-    if ($SignatureStatus -ceq 'Valid' -and ([string]$Facts.publisher -cne $Publisher -or -not [bool]$Facts.hasTimestamp)) { throw 'Installed application publisher signature facts are incomplete.' }
+    if ($SignatureStatus -ceq 'Valid' -and ([string]$Facts.publisher -cne $Publisher -or -not [bool]$Facts.hasTimestamp)) {
+        $fields = @(); if ([string]$Facts.publisher -cne $Publisher) { $fields += 'publisher' }; if (-not [bool]$Facts.hasTimestamp) { $fields += 'hasTimestamp' }
+        throw ('Installed application publisher signature facts are incomplete: ' + ($fields -join ', ') + '.')
+    }
 }
 
 function Get-AppProcesses {

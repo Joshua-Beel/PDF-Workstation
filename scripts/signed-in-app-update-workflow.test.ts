@@ -201,7 +201,7 @@ describe('published in-app update verification infrastructure', () => {
 
   it('parses and rejects ambiguous numeric and installed-file receipts', () => {
     const source = verifierHarness(
-      ['ConvertTo-ExactUInt64', 'Get-TextReceipt', 'Assert-InstallFacts'],
+      ['ConvertTo-ExactUInt64', 'Get-TextReceipt', 'Get-InstallLocationForm', 'Test-InstallLocation', 'Get-SafeFactValue', 'Get-InstallFactMismatches', 'Assert-InstallFacts'],
       String.raw`
         if((ConvertTo-ExactUInt64 -Value '42' -Kind id)-ne[uint64]42){throw 'Exact integer failed.'}
         foreach($bad in @('0','-1',' 1','1.0','1e2','18446744073709551616')){
@@ -212,11 +212,37 @@ describe('published in-app update verification infrastructure', () => {
         if($text.bytes-ne2-or$text.sha256-cnotmatch'^[A-F0-9]{64}$'){throw 'UTF-8 text receipt failed.'}
         $root=[IO.Path]::GetFullPath('target/mock-installed')
         $receipt=[pscustomobject]@{bytes=[uint64]10;sha256=('A'*64)}
-        $facts=[pscustomobject]@{displayName='PDF Workstation';displayVersion='1.2.3';installLocation=$root;appBytes=[uint64]10;appSha256=('A'*64);fileVersion='1.2.3';productVersion='1.2.3';signatureStatus='Valid';publisher='Joshua Beel';hasTimestamp=$true}
+        $facts=[pscustomobject]@{displayName='PDF Workstation';displayVersion='1.2.3';installLocation=('"'+$root+'"');appBytes=[uint64]10;appSha256=('A'*64);fileVersion='1.2.3';productVersion='1.2.3';signatureStatus='Valid';publisher='Joshua Beel';hasTimestamp=$true}
         Assert-InstallFacts -Facts $facts -Version '1.2.3' -InstallRoot $root -ApplicationReceipt $receipt -Publisher 'Joshua Beel' -SignatureStatus 'Valid'
         $wrong=$facts.PSObject.Copy();$wrong.appSha256=('B'*64)
         $rejected=$false;try{Assert-InstallFacts -Facts $wrong -Version '1.2.3' -InstallRoot $root -ApplicationReceipt $receipt -Publisher 'Joshua Beel' -SignatureStatus 'Valid'}catch{$rejected=$true}
         if(-not$rejected){throw 'Wrong installed receipt passed.'}
+        function Get-Failure($f,[string]$version='1.2.3',[string]$status='Valid'){try{Assert-InstallFacts -Facts $f -Version $version -InstallRoot $root -ApplicationReceipt $receipt -Publisher 'Joshua Beel' -SignatureStatus $status;return ''}catch{return $_.Exception.Message}}
+        $unsigned=$facts.PSObject.Copy();$unsigned.signatureStatus='NotSigned';$unsigned.publisher='';$unsigned.hasTimestamp=$false
+        if((Get-Failure $unsigned '1.2.3' 'NotSigned')-ne''){throw 'Exact unsigned baseline facts were rejected.'}
+        $mixed=$facts.PSObject.Copy();$mixed.installLocation=('"'+$root.ToUpperInvariant()+'\"')
+        if((Get-Failure $mixed)-ne''){throw 'Case-only or trailing-separator install root difference was rejected.'}
+        foreach($case in @(
+          @{field='installLocation';value=$root;expect='installLocation(form=unquoted)'},
+          @{field='installLocation';value=('"'+$root+'\other"');expect='installLocation(form=quoted)'},
+          @{field='installLocation';value=('""'+$root+'""');expect='installLocation(form=other)'},
+          @{field='installLocation';value=('" '+$root+'"');expect='installLocation(form=quoted)'},
+          @{field='installLocation';value='"relative\PDF Workstation"';expect='installLocation(form=quoted)'},
+          @{field='displayName';value='PDF Workstation ';expect='displayName'},
+          @{field='displayVersion';value='1.2.3.0';expect='displayVersion(actual=1.2.3.0)'},
+          @{field='fileVersion';value='1.2.3.0';expect='fileVersion(actual=1.2.3.0)'},
+          @{field='productVersion';value='C:\secret path';expect='productVersion(actual=<unprintable>)'},
+          @{field='signatureStatus';value='HashMismatch';expect='signatureStatus(actual=HashMismatch)'})){
+          $copy=$facts.PSObject.Copy();$copy.($case.field)=$case.value
+          $message=Get-Failure $copy
+          if(-not$message.StartsWith('Installed application facts do not match the exact expected version and receipt: ')-or-not$message.Contains($case.expect)){throw ('Mismatch was not named: '+$case.expect+' got '+$message)}
+          if($message.Contains($root)-or$message.Contains('secret')){throw 'Mismatch message leaked a path or raw value.'}
+        }
+        $two=$facts.PSObject.Copy();$two.displayVersion='9.9.9';$two.appBytes=[uint64]11
+        $message=Get-Failure $two
+        if(-not$message.Contains('displayVersion(actual=9.9.9)')-or-not$message.Contains('appBytes')-or$message.Contains('fileVersion')){throw 'Multiple mismatches were not listed exactly.'}
+        $noTs=$facts.PSObject.Copy();$noTs.hasTimestamp=$false
+        if((Get-Failure $noTs)-cne'Installed application publisher signature facts are incomplete: hasTimestamp.'){throw 'Missing timestamp was not named.'}
       `,
     );
     const result = spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', source], { encoding: 'utf8', timeout: 20_000 });
