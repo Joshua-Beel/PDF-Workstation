@@ -110,6 +110,7 @@ pub struct EditSession {
     comments_reason: Option<String>,
     text_extraction_permission: Result<(), String>,
     next_note: u64,
+    pub outline: crate::outline_edit::OutlineEdits,
 }
 
 pub(crate) struct EditSessionSnapshot {
@@ -150,9 +151,22 @@ impl EditSession {
         };
         let next_note = source_notes.iter().flatten().filter_map(|note| crate::comments::number(&note.id).ok()).max().unwrap_or(0).saturating_add(1);
         let plan: Vec<_> = (0..count).map(|source| PageSpec { source, turns: 0, crop: None, notes: source_notes[source].clone() }).collect();
-        Self { source, source_page_count: count, saved: plan.clone(), plan, undo: VecDeque::new(), redo: VecDeque::new(), history_bytes: 0, history_budget: HISTORY_BUDGET, revision: 0, source_notes, comments_reason, text_extraction_permission, next_note }
+        Self { source, source_page_count: count, saved: plan.clone(), plan, undo: VecDeque::new(), redo: VecDeque::new(), history_bytes: 0, history_budget: HISTORY_BUDGET, revision: 0, source_notes, comments_reason, text_extraction_permission, next_note, outline: Default::default() }
     }
     pub fn dirty(&self) -> bool { self.plan != self.saved }
+    /// Unsaved page edits or bookmark edits. Bookmark edits are not part of the page plan or of recovery points.
+    pub fn unsaved(&self) -> bool { self.dirty() || self.outline.changed() }
+    fn load_outline(&mut self) {
+        if self.outline.loaded() { return; }
+        let result = self.load_source().and_then(|document| { check_supported(&document, false, false)?; crate::outline_edit::read(&document) });
+        self.outline.load(result);
+    }
+    pub fn bookmark_view(&mut self) -> crate::outline_edit::EditView { self.load_outline(); self.outline.view(&self.plan) }
+    pub fn bookmark_edit(&mut self, version: u64, op: crate::outline_edit::BookmarkOp) -> Result<crate::outline_edit::EditView, String> {
+        self.load_outline();
+        self.outline.apply(version, op, &self.plan)?;
+        Ok(self.outline.view(&self.plan))
+    }
     pub fn can_undo(&self) -> bool { !self.undo.is_empty() }
     pub fn can_redo(&self) -> bool { !self.redo.is_empty() }
     pub fn mark_saved(&mut self) { self.saved = self.plan.clone(); }
@@ -350,6 +364,10 @@ impl EditSession {
         if plan.iter().any(|p| p.source >= original.len()) { return Err("Source page mapping is invalid.".into()); }
         let structural = plan.len() != original.len() || plan.iter().enumerate().any(|(i, p)| p.source != i);
         check_supported(&document, structural, plan.len() < original.len())?;
+        if let Some(entries) = self.outline.pending() {
+            let kept: HashSet<usize> = plan.iter().map(|spec| spec.source).collect();
+            crate::outline_edit::write(&mut document, entries, &|source| kept.contains(&source).then(|| original.get(source).copied()).flatten())?;
+        }
         let new_root = structural.then(|| document.new_object_id());
         let mut kids = Vec::new();
         for spec in &plan {

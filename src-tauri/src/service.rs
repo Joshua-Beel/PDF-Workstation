@@ -42,7 +42,9 @@ pub struct PageImageReceipt { path: String, document_id: u64, revision: u64, pag
 #[derive(Serialize)]
 pub struct BookmarkInfo { title: String, page: Option<usize>, depth: usize, destination: Option<crate::bookmark_destinations::BookmarkDestination> }
 #[derive(Serialize)]
-pub struct BookmarkList { items: Vec<BookmarkInfo>, truncated: bool }
+pub struct BookmarkList { items: Vec<BookmarkInfo>, truncated: bool, edited: bool }
+#[derive(Serialize)]
+pub struct BookmarkEditResult { view: crate::outline_edit::EditView, document: DocumentInfo }
 const MAX_READ_TEXT_BYTES: usize = 1_048_576;
 const MAX_PASSWORD_BYTES: usize = 1024;
 const STALE_PAGE_PLAN: &str = "Document changed. Reload the page list and try again.";
@@ -155,6 +157,7 @@ enum Request {
     Text(u64, u16, u64, Reply<String>),
     TextGeometry(u64, u16, u64, Reply<crate::text_geometry::PageTextGeometry>),
     Bookmarks(u64, u64, Reply<BookmarkList>),
+    BookmarkEdit(u64, u64, Option<(u64, crate::outline_edit::BookmarkOp)>, Reply<BookmarkEditResult>),
     PageLabels(u64, u64, Reply<crate::page_labels::DocumentPageLabels>),
     Properties(u64, u64, Reply<crate::document_properties::DocumentProperties>),
     FormFields(u64, u64, Reply<crate::forms::FormFields>),
@@ -744,7 +747,7 @@ impl PdfService {
                             let (session, original) = sessions.get(&id).ok_or("Document is closed")?;
                             if recovery_locked.contains_key(&id) { return Err(format!("{RECOVERY_COMMITTED_REOPEN_REQUIRED}: Close and reopen this PDF before updating recovery.")); }
                             if session.revision != revision { return Err("Document changed. Save recovery again.".into()); }
-                            if !session.dirty() { return Err("Only unsaved edits can be stored for recovery.".into()); }
+                            if !session.dirty() { return Err(if session.unsaved() { "Bookmark edits are not included in recovery points. Save a copy to keep them." } else { "Only unsaved edits can be stored for recovery." }.into()); }
                             if current_page as usize >= session.plan.len() { return Err("Current page is out of range.".into()); }
                             ensure_recovery_owner(Some(&root), &recovery_heads, &mut recovery_floors, id, session)?;
                             if recovery_checkpoint_current(&root, recovery_heads.get(&id), session, original, current_page)? { return Ok(()); }
@@ -830,7 +833,7 @@ impl PdfService {
                     Request::DiscardRecovery(id, revision, reply) => {
                         if reply.is_closed() { continue; }
                         let result = (|| {
-                            let (session, original) = sessions.get(&id).ok_or("Document is closed")?;
+                            let (session, original) = sessions.get_mut(&id).ok_or("Document is closed")?;
                             if let Some(lock) = recovery_locked.get(&id).cloned() {
                                 if revision != lock.requested_revision { return Err(format!("Recovery discard is stale ({revision} != {}).", lock.requested_revision)); }
                                 let root = recovery_root.as_deref().ok_or("Recovery is unavailable.")?;
@@ -847,7 +850,7 @@ impl PdfService {
                                 return Ok(());
                             }
                             if session.revision != revision { return Err("Document changed. Discard again.".into()); }
-                            if !session.dirty() { return Err("Only unsaved edits can be discarded.".into()); }
+                            if !session.dirty() { if session.unsaved() { session.outline.discard(); return Ok(()); } return Err("Only unsaved edits can be discarded.".into()); }
                             let root = recovery_root.as_deref().ok_or("Recovery is unavailable.")?;
                             let source = recovery_source_identity(&session.source)?;
                             if recovery_heads.iter().any(|(owner, (identity, _))| *owner != id && *identity == source) { return Err("Another open tab owns recovery for this PDF.".into()); }
@@ -952,7 +955,20 @@ impl PdfService {
                                 items.push(BookmarkInfo { title, page, depth, destination });
                                 Ok(std::ops::ControlFlow::Continue(()))
                             })?;
-                            Ok(BookmarkList { items, truncated })
+                            Ok(BookmarkList { items, truncated, edited: session.outline.changed() })
+                        })();
+                        let _ = reply.send(result);
+                    }
+                    Request::BookmarkEdit(id, revision, change, reply) => {
+                        if reply.is_closed() { continue; }
+                        let result = (|| {
+                            if change.is_some() && recovery_locked.contains_key(&id) { return Err(format!("{RECOVERY_COMMITTED_REOPEN_REQUIRED}: Close and reopen this PDF before making more edits.")); }
+                            if change.is_some() && recovery_offers.contains_key(&id) { return Err("Choose whether to keep the recovered edits before editing this PDF.".into()); }
+                            let (session, original) = sessions.get_mut(&id).ok_or("Document is closed")?;
+                            if session.revision != revision { return Err("Document changed. Reopen bookmarks.".into()); }
+                            let document = documents.get(&id).ok_or("Document is closed")?;
+                            let view = match change { None => session.bookmark_view(), Some((version, op)) => session.bookmark_edit(version, op)? };
+                            Ok(BookmarkEditResult { view, document: current_info(session, original, document)? })
                         })();
                         let _ = reply.send(result);
                     }
@@ -1570,6 +1586,9 @@ impl PdfService {
     pub async fn bookmarks(&self, id: u64, revision: u64) -> Result<BookmarkList, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Bookmarks(id, revision, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
     }
+    pub async fn edit_bookmarks(&self, id: u64, revision: u64, change: Option<(u64, crate::outline_edit::BookmarkOp)>) -> Result<BookmarkEditResult, String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::BookmarkEdit(id, revision, change, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
+    }
     pub async fn page_labels(&self, id: u64, revision: u64) -> Result<crate::page_labels::DocumentPageLabels, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::PageLabels(id, revision, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
     }
@@ -2116,12 +2135,15 @@ fn current_info(session: &EditSession, original: &DocumentInfo, document: &Engin
         let size = &original.pages[spec.source];
         Ok(if spec.turns % 2 == 0 { size.clone() } else { PageSize { width: size.height, height: size.width } })
     }).collect::<Result<_, String>>()?;
-    info.revision = session.revision; info.dirty = session.dirty(); info.can_undo = session.can_undo(); info.can_redo = session.can_redo(); Ok(info)
+    info.revision = session.revision; info.dirty = session.unsaved(); info.can_undo = session.can_undo(); info.can_redo = session.can_redo(); Ok(info)
 }
 
 #[cfg(test)]
 #[path = "recovery_restart_tests.rs"]
 mod recovery_restart_tests;
+#[cfg(test)]
+#[path = "outline_edit_tests.rs"]
+mod outline_edit_tests;
 
 #[cfg(test)]
 mod tests {
