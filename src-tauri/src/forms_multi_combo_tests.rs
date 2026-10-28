@@ -125,3 +125,21 @@ fn typed_combo_text_matches_labels_only_never_another_options_export() {
     assert_eq!(read(&filled, id, b"V").unwrap().as_str().unwrap(), options[1].export.as_bytes(), "the stored value is option 1's own export");
     assert!(fill(&source, FieldValue::Combo { field_id, text: options[1].export.clone() }).unwrap_err().contains("stored value"), "text equal to an export but to no label is refused rather than guessed");
 }
+
+#[test]
+fn the_independent_multi_combo_fixture_parses_fills_and_round_trips_the_installed_verifier_values() {
+    let bytes = include_bytes!("../tests/fixtures/reportlab-multi-combo-fields.pdf").to_vec(); let parsed = FormDocument::parse(&session(bytes.clone())).unwrap();
+    let by_name = |name: &str| parsed.fields.iter().find(|field| field.dto.name == name).unwrap();
+    let (services, carrier, priority) = (by_name("Services"), by_name("Carrier"), by_name("Priority"));
+    let (s, c, p) = (services.dto.choice.as_ref().unwrap(), carrier.dto.choice.as_ref().unwrap(), priority.dto.choice.as_ref().unwrap());
+    assert!(s.multiple && !s.editable && c.editable && !c.multiple && p.editable && !p.multiple);
+    let label_of = |choice: &ChoiceInfo, id: &Option<String>| choice.options.iter().find(|option| Some(&option.option_id) == id.as_ref()).map(|option| option.label.clone());
+    assert_eq!(s.selected_option_ids.len(), 1); assert_eq!(label_of(c, &c.selected_option_id).as_deref(), Some("Atlas Freight")); assert_eq!(label_of(p, &p.selected_option_id).as_deref(), Some("Standard"));
+    let id_of = |choice: &ChoiceInfo, label: &str| choice.options.iter().find(|option| option.label == label).unwrap().option_id.clone();
+    let values = [FieldValue::Choices { field_id: services.dto.field_id.clone(), option_ids: vec![id_of(s, "Delivery"), id_of(s, "Insurance")] }, FieldValue::Combo { field_id: carrier.dto.field_id.clone(), text: "Handled by ACME".into() }, FieldValue::Combo { field_id: priority.dto.field_id.clone(), text: "Rush".into() }];
+    let (filled, _) = FormDocument::parse(&session(bytes)).unwrap().prepare(&values).unwrap(); let again = FormDocument::parse(&session(filled)).unwrap();
+    let (s, c, p) = (again.fields.iter().find(|f| f.dto.name == "Services").unwrap(), again.fields.iter().find(|f| f.dto.name == "Carrier").unwrap(), again.fields.iter().find(|f| f.dto.name == "Priority").unwrap());
+    let (sc, cc, pc) = (s.dto.choice.as_ref().unwrap(), c.dto.choice.as_ref().unwrap(), p.dto.choice.as_ref().unwrap());
+    assert_eq!(sc.selected_option_ids.iter().map(|id| label_of(sc, &Some(id.clone())).unwrap()).collect::<Vec<_>>(), ["Delivery", "Insurance"]);
+    assert_eq!(c.dto.value, "Handled by ACME"); assert!(cc.selected_option_id.is_none() && cc.text == "Handled by ACME"); assert_eq!(label_of(pc, &pc.selected_option_id).as_deref(), Some("Rush"));
+}

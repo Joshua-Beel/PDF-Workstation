@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Installed comments/forms verifier: a fourth controlled fixture (multi-select list plus two editable combos) sets two list options, types a custom combo value and picks a listed one, saves, reopens in a fresh process and asserts the exact values; tests only, hosted run still to do (SM3).
 - Accessibility audit and fixes (SM5; branch `sm5/a11y-audit`; `App.tsx`, `Viewer.tsx`, `PageList.tsx`, `Workspace.module.css`): focus ring on search fields, toggle and selected state exposed (`aria-pressed`/`aria-current`), Menu Escape and `aria-controls`, keyboard-focusable page scroller, labelled landmarks, hidden document heading. Tests added; no screen-reader or browser pass yet.
 - Render-cancel review follow-ups (SM5; branch `sm5/render-p3s-2`; `service.rs`): epoch bump and enqueue now happen under one lock, a late cancelled ticket can no longer join and supersede a queued render, reusing a spare fails fast if the worker is gone, stale-epoch spares dropped at the bump. Local, unreviewed.
 - Render-cancel follow-ups and page-size check (SM5; branch `sm5/render-p3s`; `service.rs`, `pdf_engine.rs`, `viewer_perf.rs`): a cancelled viewer render's channel marker is reused by the next render (markers stay at the 32-render limit), a cancel that beats its render sticks (256 recent tickets remembered); `page_sizes` was already on `FPDF_GetPageSizeByIndexF` (`bb09ea1`): 65,536 pages 0.5-0.6 s vs 11-15 s loading each page. Local, unreviewed.
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - Release scripts: the installed print-dialog diagnostic keeps its last completed native-window receipt when the final poll is cut short by the deadline (fixes a CI flake), and the `WEBDRIVER_ERROR_DIAG` sanitizer now also redacts `file://server/share` and a UNC path glued to a word (SM6; scripts and tests only).
 - Text replacement and selected-text highlights now pass the same two-reader copy-permission check as search and copy (SM3).
 - In-app update test file gets a 60 s per-test timeout, so pwsh start-up on a busy CI runner no longer trips the 5 s default (SM0; test only).
-- Text search, selection, copy and OCR now also need PDFium's own copy permission (`/P` bit 5), so a file whose readers pick different trailers cannot bypass a restriction (SM3).

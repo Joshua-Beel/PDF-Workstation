@@ -75,13 +75,13 @@ describe('default comments and forms workflow', () => {
     expect(source).not.toMatch(/SUPABASE|AZURE_CLIENT_SECRET|TAURI_SIGNING_PRIVATE_KEY|gh auth|git push/i);
   });
 
-  it('pins exactly 17 product and fixture source blobs and only the three controlled form PDFs', () => {
+  it('pins exactly 19 product and fixture source blobs and only the four controlled form PDFs', () => {
     const source = readFileSync(verifierPath, 'utf8');
     const list = source.match(/\$script:CommentsFormsPaths=@\((.*?)\)\r?\n/s)?.[1] ?? '';
-    expect([...list.matchAll(/'([^']+)'/g)].map(match => match[1])).toHaveLength(17);
-    for (const fixture of ['reportlab-mixed-fields.pdf','reportlab-radio-fields.pdf','reportlab-choice-fields.pdf']) expect(source).toContain(fixture);
+    expect([...list.matchAll(/'([^']+)'/g)].map(match => match[1])).toHaveLength(19);
+    for (const fixture of ['reportlab-mixed-fields.pdf','reportlab-radio-fields.pdf','reportlab-choice-fields.pdf','reportlab-multi-combo-fields.pdf']) expect(source).toContain(fixture);
     expect(source).not.toContain('reportlab-choice-blank-fields.pdf');
-    expect(source).toContain('featureBlobCount=17');
+    expect(source).toContain('featureBlobCount=19');
     expect(source).toContain('selectedTextHighlight=$false');
     expect(source).toContain('pixelAppearanceVerified=$false');
     expect(source).toContain('nativePdfSemanticVerified=$false');
@@ -92,7 +92,7 @@ describe('default comments and forms workflow', () => {
       function Assert-ExactProperties{param($Value,[string[]]$Expected,[string]$Kind)$a=@($Value.PSObject.Properties.Name|Sort-Object);$e=@($Expected|Sort-Object);if($a.Count-ne$e.Count-or(Compare-Object $a $e)){throw 'shape'}}
       function Receipt{[pscustomobject]@{bytes=[uint64]10;sha256='A'*64}}
       function Common{[ordered]@{nativeDriverVersion='1.2.3.4';returnedRuntimeVersion='1.2.3.9';profileBinding='session-capability-requested-profile'}}
-      function New-Value{$pins=@{mixed=@('Original|false','Installed Mixed|true');radio=@('Preference: Choice B, page 1','Preference: Choice A, page 1');choice=@('South Hub|Email copy','North Hub|Print copy')};$forms=@();foreach($kind in @('mixed','radio','choice')){$write=Common;$write.kind=$kind;$write.sourceValues=$pins[$kind][0];$write.expectedOutputValues=$pins[$kind][1];$write.output=Receipt;$write.saveDialogVerified=$true;$write.sessionDeleted=$true;$write.ownedProcessTreeStopped=$true;$write.relevantProcessesRemaining=0;$reopen=Common;$reopen.kind=$kind;$reopen.initial=$pins[$kind][1];$reopen.reopenedValuesMatched=$true;$reopen.pixelAppearanceVerified=$false;$reopen.nativePdfSemanticVerified=$false;$reopen.sessionDeleted=$true;$reopen.ownedProcessTreeStopped=$true;$reopen.relevantProcessesRemaining=0;$forms+=[pscustomobject][ordered]@{kind=$kind;source=Receipt;write=[pscustomobject]$write;reopen=[pscustomobject]$reopen}};$commentWrite=Common;$commentWrite.nativeFilenameControlCategory='edit-1001';$commentWrite.output=Receipt;$commentWrite.stickyCreated=$true;$commentWrite.areaHighlightCreated=$true;$commentWrite.sessionDeleted=$true;$commentWrite.ownedProcessTreeStopped=$true;$commentWrite.relevantProcessesRemaining=0;$commentReopen=Common;$commentReopen.stickyCount=1;$commentReopen.areaHighlightCount=1;$commentReopen.page=1;$commentReopen.pixelAppearanceVerified=$false;$commentReopen.nativePdfSemanticVerified=$false;$commentReopen.selectedTextHighlightVerified=$false;$commentReopen.sessionDeleted=$true;$commentReopen.ownedProcessTreeStopped=$true;$commentReopen.relevantProcessesRemaining=0;[pscustomobject]@{comments=[pscustomobject][ordered]@{source=Receipt;write=[pscustomobject]$commentWrite;reopen=[pscustomobject]$commentReopen};forms=$forms}}
+      function New-Value{$pins=@{mixed=@('Original|false','Installed Mixed|true');radio=@('Preference: Choice B, page 1','Preference: Choice A, page 1');choice=@('South Hub|Email copy','North Hub|Print copy');multicombo=@('Pickup|Atlas Freight|Standard','Delivery,Insurance|Handled by ACME|Rush')};$forms=@();foreach($kind in @('mixed','radio','choice','multicombo')){$write=Common;$write.kind=$kind;$write.sourceValues=$pins[$kind][0];$write.expectedOutputValues=$pins[$kind][1];$write.output=Receipt;$write.saveDialogVerified=$true;$write.sessionDeleted=$true;$write.ownedProcessTreeStopped=$true;$write.relevantProcessesRemaining=0;$reopen=Common;$reopen.kind=$kind;$reopen.initial=$pins[$kind][1];$reopen.reopenedValuesMatched=$true;$reopen.pixelAppearanceVerified=$false;$reopen.nativePdfSemanticVerified=$false;$reopen.sessionDeleted=$true;$reopen.ownedProcessTreeStopped=$true;$reopen.relevantProcessesRemaining=0;$forms+=[pscustomobject][ordered]@{kind=$kind;source=Receipt;write=[pscustomobject]$write;reopen=[pscustomobject]$reopen}};$commentWrite=Common;$commentWrite.nativeFilenameControlCategory='edit-1001';$commentWrite.output=Receipt;$commentWrite.stickyCreated=$true;$commentWrite.areaHighlightCreated=$true;$commentWrite.sessionDeleted=$true;$commentWrite.ownedProcessTreeStopped=$true;$commentWrite.relevantProcessesRemaining=0;$commentReopen=Common;$commentReopen.stickyCount=1;$commentReopen.areaHighlightCount=1;$commentReopen.page=1;$commentReopen.pixelAppearanceVerified=$false;$commentReopen.nativePdfSemanticVerified=$false;$commentReopen.selectedTextHighlightVerified=$false;$commentReopen.sessionDeleted=$true;$commentReopen.ownedProcessTreeStopped=$true;$commentReopen.relevantProcessesRemaining=0;[pscustomobject]@{comments=[pscustomobject][ordered]@{source=Receipt;write=[pscustomobject]$commentWrite;reopen=[pscustomobject]$commentReopen};forms=$forms}}
       $null=Assert-CommentsFormsRuntimeReceipt (New-Value)
       function Reject($value,[string]$kind){$bad=$false;try{Assert-CommentsFormsRuntimeReceipt $value}catch{$bad=$true};if(-not$bad){throw ($kind+' was accepted')}}
       $missing=New-Value;$missing.forms[1].reopen.reopenedValuesMatched=$false;Reject $missing 'missing reopen'
@@ -101,6 +101,8 @@ describe('default comments and forms workflow', () => {
       $selected=New-Value;$selected.comments.reopen.selectedTextHighlightVerified=$true;Reject $selected 'selected text claim'
       $wrong=New-Value;$wrong.forms[0].write.sourceValues='guessed';Reject $wrong 'guessed source value'
       $duplicate=New-Value;$duplicate.forms[2].kind='radio';$duplicate.forms[2].write.kind='radio';$duplicate.forms[2].reopen.kind='radio';Reject $duplicate 'duplicate form kind'
+      $short=New-Value;$short.forms=@($short.forms[0],$short.forms[1],$short.forms[2]);Reject $short 'missing multi-select and combo fixture'
+      $wrongMulti=New-Value;$wrongMulti.forms[3].reopen.initial='Delivery|Handled by ACME|Rush';Reject $wrongMulti 'partial multi-select reopen value'
       $badHash=New-Value;$badHash.forms[1].write.output.sha256='bad';Reject $badHash 'malformed output hash'
     `));
     expect(result.status, result.stderr || result.stdout).toBe(0);
@@ -143,7 +145,7 @@ describe('default comments and forms workflow', () => {
     const names = ['Get-CommentsFormsSaveControlScript', 'Get-CommentsPageOneScript', 'Get-CommentsCreationControlScript', 'Get-CommentsPlacementScript', 'Get-CommentsEditorSaveScript', 'Get-CommentsReopenScript', 'Get-FormSpec', 'Get-FormSessionScript'];
     const result = runPowerShell(extractFunctions(names, String.raw`
       $out=[ordered]@{saveAria=Get-CommentsFormsSaveControlScript 'Save a copy' 'aria-label';saveText=Get-CommentsFormsSaveControlScript 'Save filled copy' 'text';create=Get-CommentsCreationControlScript 'Add comment';place=Get-CommentsPlacementScript 'Comment text';edit=Get-CommentsEditorSaveScript 'Comment text' 'Installed sticky receipt' 'Save comment';reopen=Get-CommentsReopenScript}
-      foreach($k in 'mixed','radio','choice'){foreach($p in 'read','reopen','write'){$out["$k-$p"]=Get-FormSessionScript $k $p}}
+      foreach($k in 'mixed','radio','choice','multicombo'){foreach($p in 'read','reopen','write'){$out["$k-$p"]=Get-FormSessionScript $k $p}}
       [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);[Console]::Out.Write(($out|ConvertTo-Json -Compress))
     `));
     expect(result.status, result.stderr).toBe(0);
@@ -192,6 +194,23 @@ describe('default comments and forms workflow', () => {
     expect(run(scripts['choice-write'], choice).done).toBe(false);
     expect(run(scripts['choice-write'], choice)).toEqual({ done: true, missing: [], value: 'North Hub|Print copy' });
     expect([destination.value, delivery.value, destination.events, delivery.events]).toEqual(['choice-7-0-0', 'choice-8-0-0', ['change'], ['change']]);
+
+    const service = (label: string, checked = false) => { const box = new Input({ 'aria-label': `Services: ${label}, page 1` }, 'checkbox'); box.checked = checked; return box; };
+    const [pickup, deliveryService, storage, insurance] = [service('Pickup', true), service('Delivery'), service('Storage'), service('Insurance')];
+    const carrier = new Input({ 'aria-label': 'Carrier, page 1' }); carrier.value = 'Atlas Freight'; const priority = new Input({ 'aria-label': 'Priority, page 1' }); priority.value = 'Standard';
+    const multi = page([pickup, deliveryService, storage, insurance, carrier, priority]);
+    expect(run(scripts['multicombo-read'], page([pickup, deliveryService, storage, insurance, carrier]))).toEqual({ done: false, missing: ['Priority, page 1'] });
+    expect(run(scripts['multicombo-read'], multi)).toEqual({ done: true, missing: [], value: 'Pickup|Atlas Freight|Standard' });
+    expect(run(scripts['multicombo-reopen'], multi)).toEqual({ done: false, missing: ['reopened-values'] });
+    expect(run(scripts['multicombo-write'], multi)).toEqual({ done: false, missing: ['field-values'] });
+    expect([pickup.checked, deliveryService.checked, storage.checked, insurance.checked]).toEqual([false, true, false, true]);
+    expect([pickup.clicks, deliveryService.clicks, storage.clicks, insurance.clicks]).toEqual([1, 1, 0, 1]);
+    expect([carrier.value, priority.value, carrier.events, priority.events]).toEqual(['Handled by ACME', 'Rush', ['input'], ['input']]);
+    expect(run(scripts['multicombo-write'], multi)).toEqual({ done: true, missing: [], value: 'Delivery,Insurance|Handled by ACME|Rush' });
+    expect([pickup.clicks, deliveryService.clicks, insurance.clicks, carrier.events.length, priority.events.length]).toEqual([1, 1, 1, 1, 1]);
+    expect(run(scripts['multicombo-reopen'], multi)).toEqual({ done: true, missing: [], value: 'Delivery,Insurance|Handled by ACME|Rush' });
+    storage.checked = true; expect(run(scripts['multicombo-reopen'], multi)).toEqual({ done: false, missing: ['reopened-values'] }); storage.checked = false;
+    carrier.disabled = true; expect(run(scripts['multicombo-read'], multi)).toEqual({ done: false, missing: ['enabled-fields'] });
 
     const iconSave = new Input({ 'aria-label': 'Save a copy' }, 'button'); const filled = new Input({}, 'button'); filled.textContent = ' Save filled copy ';
     const buttons = (list: Input[]) => ({ querySelectorAll: (selector: string) => selector === 'button' ? list : [], querySelector: () => null });
