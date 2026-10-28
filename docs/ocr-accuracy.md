@@ -8,7 +8,7 @@ The harness runs the built opt-in OCR engine the way the app does and scores the
 
 `scripts/ocr-accuracy.mjs` (library: `scripts/ocr/accuracy-lib.mjs`) starts the engine with the arguments from `src-tauri/src/ocr_process.rs`:
 
-`tesseract stdin stdout --tessdata-dir <engine>/tessdata -l eng --oem 1 --psm 6 --dpi 150 --loglevel ERROR`
+`tesseract stdin stdout --tessdata-dir <engine>/tessdata -l eng --oem 1 --psm 3 --dpi 150 --loglevel ERROR`
 
 The image is decoded, flattened onto white, and sent on stdin as a binary P6 image, as the app sends a rendered page. A unit test checks the argument string against `ocr_process.rs` and the pins against `src-tauri/ocr_build.rs`, so a change on either side fails the test.
 
@@ -18,7 +18,7 @@ The images fed to the engine are used at their own pixel size with `--dpi 150`. 
 
 ## App preprocessing, and measuring through the app path
 
-Since 2026-10-28 the app cleans every OCR input before the engine sees it (`src-tauri/src/ocr_preprocess.rs`, called from `ocr_process.rs` for current-page OCR, searchable copies and the large-document job). On a copy of the rendered page it converts to grayscale, divides out uneven lighting (the paper level is the 90th percentile of 48-pixel blocks, widened by a 3x3 block maximum and interpolated), and, when a projection-profile estimate finds a tilt between 1 and 5 degrees, rotates the copy level. The page image kept in a searchable copy is not changed. Recognised word boxes from a rotated copy are rotated back onto the page before the text layer is written: each word keeps its own bounding box and its line band becomes the part of its line under that word. The page segmentation mode stays `--psm 6`.
+Since 2026-10-28 the app cleans every OCR input before the engine sees it (`src-tauri/src/ocr_preprocess.rs`, called from `ocr_process.rs` for current-page OCR, searchable copies and the large-document job). On a copy of the rendered page it converts to grayscale, divides out uneven lighting (the paper level is the 90th percentile of 48-pixel blocks, widened by a 3x3 block maximum and interpolated), and, when a projection-profile estimate finds a tilt between 1 and 5 degrees, rotates the copy level. The page image kept in a searchable copy is not changed. Recognised word boxes from a rotated copy are rotated back onto the page before the text layer is written: each word keeps its own bounding box and its line band becomes the part of its line under that word. The page segmentation mode is `--psm 3` (automatic layout) since the same date, with an exact allowlist for the engine diagnostics it writes to stderr (`ocr_process.rs`).
 
 Run as above, the harness scores the engine on the image without this preprocessing. To score what the app recognises, write the app path's text with the ignored Rust test, then score that text:
 
@@ -40,7 +40,7 @@ What was tried and kept, measured on ten real work pages whose ground truth was 
 | background flattening | 25.40% | 40.74% |
 | flattening + deskew (shipped) | 25.29% | 40.49% |
 
-On the six synthetic fixtures the shipped configuration moved total CER from 2.25% to 1.15%, all of it on the 1.5 degree skewed, noisy fixture (11.60% to 5.02%). Tried and not kept: 1st-99th percentile contrast stretching (26.70% on its own, but 25.39% with flattening against 25.40% without, so it adds nothing once the background is flattened); automatic inversion of mostly dark pages (no change); and, because they made the real-page total worse, global Otsu and Sauvola binarisation, a 3x3 median denoise, and upscaling to about 195 DPI (a stand-in for a higher render DPI, which at 300 DPI would not fit the 16 MiB P6 input cap for a letter page; an earlier benchmark that rendered real sources at 300 DPI also found no gain). `--psm 3` read better on these pages (23.22% CER with flattening and deskew) but makes the engine write diagnostics such as "Detected 60 diacritics" and Leptonica box errors to stderr on several real pages, which the app treats as a failed recognition, so it was not adopted. The full per-page table is in the SM4 log, not in this repository.
+On the six synthetic fixtures the shipped configuration moved total CER from 2.25% to 1.15%, all of it on the 1.5 degree skewed, noisy fixture (11.60% to 5.02%). Tried and not kept: 1st-99th percentile contrast stretching (26.70% on its own, but 25.39% with flattening against 25.40% without, so it adds nothing once the background is flattened); automatic inversion of mostly dark pages (no change); and, because they made the real-page total worse, global Otsu and Sauvola binarisation, a 3x3 median denoise, and upscaling to about 195 DPI (a stand-in for a higher render DPI, which at 300 DPI would not fit the 16 MiB P6 input cap for a letter page; an earlier benchmark that rendered real sources at 300 DPI also found no gain). `--psm 3` read better on these pages (23.22% CER with flattening and deskew) but makes the engine write diagnostics such as "Detected 60 diacritics" and Leptonica box errors to stderr on several real pages, which the app treated as a failed recognition; it was adopted together with an exact stderr allowlist (SM7 conditions), see the changelog. The full per-page table is in the SM4 log, not in this repository.
 
 ## What the harness cannot do
 
