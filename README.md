@@ -119,6 +119,11 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 Full history: [docs/changelog.md](docs/changelog.md)
 
 - Release scripts: the `WEBDRIVER_ERROR_DIAG` sanitizer now redacts forward-slash and mixed-slash Windows paths, UNC paths and paths containing spaces to the end of the token, with negative controls and a planted-offender control for the backslash-quote scan (SM6; test/script only).
+- Large-document OCR review round 2: deterministic pause test, safer startup cleanup, Save elsewhere clears the old temp copy and never uses another document (SM4).
+- Large-document OCR review fixes: crash-safe after finalize, panics degrade one page instead of hanging, Save elsewhere, bounded final check, stale-folder cleanup (SM4).
+- Large-document OCR, step 3 (source build): documents over 32 pages get a background searchable OCR copy (up to 10,000 pages) with a progress panel, Pause, Cancel and Resume; not in any release (SM4).
+- Large-document OCR, step 2: job engine with a bounded worker pool, retry-then-degrade per page, a five-in-a-row breaker, pause, cancel and resume; not wired to the app yet (SM4).
+- Large-document OCR, step 1: a streaming, resumable searchable-PDF writer (lossless images, journal, final check from disk); not wired to the app yet (SM4; no user-visible change).
 - Debug builds only: `SMACROBAT_TEST_DATA_DIR=<absolute folder>` puts recovery records, the update-attempt note and the WebView2 profile under that folder instead of the user profile; compiled out of release (SM5).
 - Docs: OCR packaging evidence in `docs/features.md` and `docs/ocr-feasibility.md` now cites only what `docs/releases.md` states (SM4; docs only).
 - Docs: OCR wording in `docs/features.md` and `docs/ocr-feasibility.md` now says 0.3.1 includes the engine; recognition on the published installer remains unverified (SM4; docs only).
@@ -128,8 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - In-app update check now starts from published, publisher-signed 0.3.1 (not 0.2.0) and answers its native install confirmation: No keeps 0.3.1, then Yes installs; record schema 5. Tests only until the next release (SM6).
 - Workflows: every `actions/*` step moved off Node 20 to Node 24 releases (checkout 7.0.1, upload-artifact 7.0.2, download-artifact 7.0.0, setup-node 7.1.0, setup-dotnet 6.0.0, cache 6.1.0), SHA-pinned; a test now allows only these pins (SM6).
 - Release scripts: the PDFium preparation and Step 1 draft verifier no longer assign PowerShell's automatic `$matches`; an AST test now covers both (SM6; scripts and test only).
-- Security: hostile-nesting test fixed (debug parse of 100 levels needs ~1.95 MiB on lopdf's rayon threads); it now runs on a private pool, a quarter of the 2 MiB production stack in release (SM7; test only).
-- Security: save-copy reference scrub confirmed bounded; lopdf 0.45 refuses objects nested over 100 levels, now pinned by a hostile-nesting regression test on a 512 KiB stack (SM7; test only).
-- OCR hardening: Tesseract now starts in a private per-job temp directory (removed afterwards), not the install folder; OCR timing tests made deterministic; unused OCR licence build env vars dropped (SM4; no version change).
-- Post-release P3s: 0.2.0 described as lacking a publisher signature, not "unsigned"; in-app record leak scan also blocks `github_pat_` tokens (SM6).
-- Docs: 0.3.1 release evidence (rehearsal, release, Step 1/2, publish, in-app update run 40625100964) in `docs/releases.md`; README and features name 0.3.1 as the published release (SM6).

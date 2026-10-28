@@ -1,0 +1,9 @@
+.panel{position:fixed;left:16px;right:16px;bottom:16px;max-width:720px;margin:0 auto;border:1px solid var(--border);background:var(--bg);color:var(--text);border-radius:8px;padding:12px 16px;box-shadow:0 6px 24px #0002;z-index:20;font-size:13px}
+.panel p{margin:6px 0;line-height:1.5}
+.panel progress{width:100%}
+.panel [role="alert"]{color:#a33}
+.actions{display:flex;justify-content:flex-end;align-items:center;gap:10px;margin-top:8px}
+.actions span{flex:1;color:var(--muted)}
+.actions button{border:1px solid var(--border);border-radius:5px;background:var(--bg);padding:6px 12px}
+.actions button:disabled{opacity:.45}
+.live{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}

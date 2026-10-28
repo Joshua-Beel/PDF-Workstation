@@ -146,6 +146,10 @@ enum Request {
     OcrRaster(crate::ocr::OcrPageRequest, crate::ocr_process::OcrCancellation, crate::ocr_process::OcrWorkerHold, Reply<crate::ocr::OcrPageRaster>),
     #[cfg(windows)]
     ValidateOcrResult(crate::ocr::OcrPageRequest, crate::ocr_process::OcrWorkerHold, Reply<()>),
+    #[cfg(windows)]
+    OcrJobSource(u64, u64, Reply<crate::ocr::OcrJobSource>),
+    #[cfg(windows)]
+    OcrJobRaster(crate::ocr::OcrPageRequest, crate::ocr_process::OcrCancellation, crate::ocr_process::OcrWorkerHold, Reply<crate::ocr::OcrJobRaster>),
     Render(u64, u16, i32, Reply<Vec<u8>>),
     AdmittedRender(u64, u16, i32, u64),
     Text(u64, u16, u64, Reply<String>),
@@ -619,6 +623,64 @@ impl PdfService {
                         let result = validate_ocr_result(&sessions, &documents, request);
                         drop(admission);
                         let _ = reply.send(result);
+                    }
+                    #[cfg(windows)]
+                    Request::OcrJobSource(id, revision, reply) => {
+                        if reply.is_closed() { continue; }
+                        let result = (|| {
+                            let (session, info) = sessions.get(&id).ok_or("Document is closed")?;
+                            let document = documents.get(&id).ok_or("Document is closed")?;
+                            if session.revision != revision { return Err("Document changed. Start searchable OCR again.".into()); }
+                            if !document.is_unprotected() { return Err("Searchable OCR of encrypted or restricted PDFs is not supported in this build.".into()); }
+                            session.page_image_export_guard()?;
+                            session.text_extraction_permission()?;
+                            let count = session.plan.len();
+                            if count == 0 || count > crate::searchable_pdf_stream::MAX_STREAM_PAGES as usize { return Err("Searchable OCR supports 1 to 10,000 current pages.".into()); }
+                            let page_sizes = session.plan.iter().map(|spec| document.planned_page_size(spec)).collect::<Result<Vec<_>, _>>()?;
+                            let mut plan = <Sha256 as sha2::Digest>::new();
+                            for spec in &session.plan { sha2::Digest::update(&mut plan, format!("{spec:?}\n").as_bytes()); }
+                            let identity = format!("{}{}", crate::searchable_pdf_stream::hex(&Sha256::digest(&session.source)), crate::searchable_pdf_stream::hex(&sha2::Digest::finalize(plan)));
+                            let source = PathBuf::from(&info.path);
+                            let stem = source.file_stem().filter(|stem| !stem.is_empty()).unwrap_or_default().to_string_lossy();
+                            Ok(crate::ocr::OcrJobSource {
+                                page_count: count as u32, page_sizes, identity,
+                                suggested_name: format!("{}-searchable.pdf", if stem.is_empty() { "document" } else { &stem }),
+                                source_name: info.name.clone(),
+                            })
+                        })();
+                        let _ = reply.send(result);
+                    }
+                    #[cfg(windows)]
+                    Request::OcrJobRaster(request, cancellation, admission, reply) => {
+                        if reply.is_closed() || cancellation.is_cancelled() { continue; }
+                        let result = (|| {
+                            cancellation.ensure_runnable().map_err(|error| error.to_string())?;
+                            let (session, _) = sessions.get(&request.document_id).ok_or("Document is closed")?;
+                            let original = documents.get(&request.document_id).ok_or("Document is closed")?;
+                            if session.revision != request.revision { return Err("Document changed. Start OCR again.".into()); }
+                            if !original.is_unprotected() { return Err("OCR of encrypted or restricted PDFs is not supported in this build.".into()); }
+                            session.page_image_export_guard()?;
+                            session.text_extraction_permission()?;
+                            let spec = session.plan.get(usize::from(request.page)).ok_or("OCR page is out of range")?.clone();
+                            let (page_width, page_height) = original.planned_page_size(&spec)?;
+                            let (dimensions, reduced) = match crate::ocr::raster_dimensions_fitting(page_width, page_height) {
+                                Ok(fitting) => fitting,
+                                Err(error) => return Ok(crate::ocr::OcrJobRaster::PageFailed(error)),
+                            };
+                            let engine = pdfium.as_ref().map_err(Clone::clone)?;
+                            let document = note_document(engine, original, session, &mut note_documents, request.document_id)?;
+                            cancellation.ensure_runnable().map_err(|error| error.to_string())?;
+                            let mut bgra = vec![0; dimensions.bgra_bytes];
+                            if let Err(error) = document.render_bgra_into(PageTarget::Planned(&spec), RenderMode::Print, dimensions.width, dimensions.height, &mut bgra) {
+                                return Ok(crate::ocr::OcrJobRaster::PageFailed(render_message(error, "Unexpected OCR bitmap layout.")));
+                            }
+                            drop(document);
+                            cancellation.ensure_runnable().map_err(|error| error.to_string())?;
+                            let p6 = crate::ocr::bgra_to_p6(dimensions, &bgra, &cancellation)?;
+                            Ok(crate::ocr::OcrJobRaster::Raster(crate::ocr::OcrPageRaster { request, width: dimensions.width, height: dimensions.height, page_width, page_height, p6 }, reduced))
+                        })();
+                        drop(admission);
+                        if !reply.is_closed() { let _ = reply.send(result); }
                     }
                     Request::BeginOpen(_, _)|Request::DurableEdit(..)|Request::DurableEditAt(..)|Request::SaveAt(..)|Request::DurableCrop(..)|Request::DurableCropPages(..)|Request::DurableResetCrops(..)|Request::DurableComment(..) => unreachable!(),
                     Request::CancelPassword(id, reply) => { pending.remove(&id); let _ = reply.send(Ok(())); }
@@ -1453,6 +1515,14 @@ impl PdfService {
     #[cfg(windows)]
     pub(crate) async fn validate_ocr_result(&self, request: crate::ocr::OcrPageRequest, admission: crate::ocr_process::OcrWorkerHold) -> Result<(), String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::ValidateOcrResult(request, admission, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
+    }
+    #[cfg(windows)]
+    pub(crate) fn ocr_job_source_blocking(&self, id: u64, revision: u64) -> Result<crate::ocr::OcrJobSource, String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::OcrJobSource(id, revision, tx)).map_err(|error| error.to_string())?; rx.blocking_recv().map_err(|error| error.to_string())?
+    }
+    #[cfg(windows)]
+    pub(crate) fn ocr_job_raster_blocking(&self, request: crate::ocr::OcrPageRequest, cancellation: crate::ocr_process::OcrCancellation, admission: crate::ocr_process::OcrWorkerHold) -> Result<crate::ocr::OcrJobRaster, String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::OcrJobRaster(request, cancellation, admission, tx)).map_err(|error| error.to_string())?; rx.blocking_recv().map_err(|error| error.to_string())?
     }
     pub fn print_render_blocking(&self, token: u64, page: usize, max_width: u32, max_height: u32) -> Result<PrintBitmap, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::PrintRender(token, page, max_width, max_height, tx)).map_err(|error| error.to_string())?; rx.blocking_recv().map_err(|error| error.to_string())?

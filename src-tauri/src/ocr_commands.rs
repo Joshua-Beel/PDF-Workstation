@@ -348,7 +348,7 @@ fn validate_uuid(value: &str) -> Result<(), String> {
 }
 
 #[cfg(ocr_opt_in)]
-fn configured_runner(resource_dir: &Path) -> Result<Option<OcrProcessRunner>, ()> {
+pub(crate) fn configured_runner(resource_dir: &Path) -> Result<Option<OcrProcessRunner>, ()> {
     let relative = option_env!("PDF_WORKSTATION_OCR_RESOURCE_RELATIVE").ok_or(())?;
     let bytes = option_env!("PDF_WORKSTATION_OCR_ENGINE_BYTES").ok_or(())?.parse::<u64>().map_err(|_| ())?;
     let sha256 = parse_sha256(option_env!("PDF_WORKSTATION_OCR_ENGINE_SHA256").ok_or(())?).ok_or(())?;
@@ -361,7 +361,7 @@ fn configured_runner(resource_dir: &Path) -> Result<Option<OcrProcessRunner>, ()
 }
 
 #[cfg(not(ocr_opt_in))]
-fn configured_runner(_resource_dir: &Path) -> Result<Option<OcrProcessRunner>, ()> { Ok(None) }
+pub(crate) fn configured_runner(_resource_dir: &Path) -> Result<Option<OcrProcessRunner>, ()> { Ok(None) }
 
 #[cfg(ocr_opt_in)]
 fn parse_sha256(value: &str) -> Option<[u8; 32]> {

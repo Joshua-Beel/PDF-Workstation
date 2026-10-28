@@ -269,6 +269,18 @@ impl OcrProcessRunner {
         self.recognize_inner_admitted(input, options, OcrOutputProfile::Tsv, operation)
     }
 
+    /// For large-document jobs: TSV output, the engine process at below-normal
+    /// priority so the app and the rest of the PC stay responsive.
+    pub(crate) fn recognize_p6_tsv_background(
+        &self,
+        input: &[u8],
+        operation: &OcrOperation,
+    ) -> Result<OcrProcessOutput, OcrProcessError> {
+        let mut options = RunOptions::production();
+        options.background = true;
+        self.recognize_inner_admitted(input, options, OcrOutputProfile::Tsv, operation)
+    }
+
     #[cfg(test)]
     pub(crate) fn recognize_p6_admitted_with_hooks(
         &self,
@@ -315,11 +327,12 @@ struct RunOptions<'a> {
     before_resume: Option<&'a dyn Fn()>,
     after_resume: Option<&'a dyn Fn()>,
     before_finish: Option<&'a dyn Fn()>,
+    background: bool,
 }
 
 impl RunOptions<'_> {
     fn production() -> Self {
-        Self { timeout: OCR_TIMEOUT, before_resume: None, after_resume: None, before_finish: None }
+        Self { timeout: OCR_TIMEOUT, before_resume: None, after_resume: None, before_finish: None, background: false }
     }
 }
 
@@ -637,6 +650,9 @@ fn run_child(
         return Err(OcrProcessError::Cancelled);
     }
     let running = suspended.resume()?;
+    if options.background {
+        lower_priority(running.child.process_id());
+    }
     if let Some(hook) = options.after_resume {
         hook();
     }
@@ -684,6 +700,16 @@ fn run_child(
         return Err(OcrProcessError::Cancelled);
     }
     Ok(OcrProcessOutput { text: stdout, peak_job_commit_bytes })
+}
+
+/// Best effort: a child that keeps normal priority still works, only less politely.
+fn lower_priority(process_id: u32) {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS, PROCESS_SET_INFORMATION};
+    if let Ok(handle) = unsafe { OpenProcess(PROCESS_SET_INFORMATION, false, process_id) } {
+        let _ = unsafe { SetPriorityClass(handle, BELOW_NORMAL_PRIORITY_CLASS) };
+        let _ = unsafe { CloseHandle(handle) };
+    }
 }
 
 fn build_command_line(engine: &Path, tessdata: &Path, output_profile: OcrOutputProfile) -> Result<Vec<u16>, OcrProcessError> {
@@ -854,6 +880,9 @@ fn main() {
     fn fake_case(behavior: &str) -> FakeCase {
         let number = CASE_NUMBER.fetch_add(1, AtomicOrdering::Relaxed);
         let directory = repository_root().join("target/ocr-process-tests/cases").join(format!("{}-{}-{number}", behavior, std::process::id()));
+        // A leftover folder from an earlier run whose process had the same id
+        // would carry its child.pid; start every case from an empty folder.
+        let _ = std::fs::remove_dir_all(&directory);
         let tessdata = directory.join("tessdata");
         std::fs::create_dir_all(&tessdata).unwrap();
         let engine = directory.join("tesseract.exe");
@@ -1000,7 +1029,7 @@ fn main() {
         let result = suspended.runner.recognize_with_options(
             TEST_P6,
             &cancellation,
-            RunOptions { timeout: Duration::from_secs(120), before_resume: Some(&hook), after_resume: None, before_finish: None },
+            RunOptions { timeout: Duration::from_secs(120), before_resume: Some(&hook), after_resume: None, before_finish: None, background: false },
         );
         assert_eq!(result, Err(OcrProcessError::Cancelled));
         assert!(!suspended.directory.join("child.pid").exists());
@@ -1048,6 +1077,7 @@ fn main() {
                     before_resume: None,
                     after_resume: None,
                     before_finish: Some(&before_finish),
+                    background: false,
                 },
             )
         });
@@ -1161,7 +1191,7 @@ fn main() {
         let result = timed.runner.recognize_with_options(
             TEST_P6,
             &OcrCancellation::default(),
-            RunOptions { timeout: Duration::from_millis(200), before_resume: None, after_resume: Some(&published), before_finish: None },
+            RunOptions { timeout: Duration::from_millis(200), before_resume: None, after_resume: Some(&published), before_finish: None, background: false },
         );
         assert_eq!(result, Err(OcrProcessError::TimedOut));
         assert_process_reaped(wait_for_pid(&timed.directory));
@@ -1177,7 +1207,7 @@ fn main() {
             let _ = unwound.runner.recognize_with_options(
                 TEST_P6,
                 &OcrCancellation::default(),
-                RunOptions { timeout: Duration::from_secs(120), before_resume: None, after_resume: Some(&after_resume), before_finish: None },
+                RunOptions { timeout: Duration::from_secs(120), before_resume: None, after_resume: Some(&after_resume), before_finish: None, background: false },
             );
         }));
         assert!(caught.is_err());

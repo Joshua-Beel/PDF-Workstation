@@ -202,6 +202,49 @@ pub(crate) fn raster_dimensions(width_points: f32, height_points: f32) -> Result
     })
 }
 
+/// The OCR raster size for a large-document job: 150 DPI when it fits the
+/// per-page input cap, otherwise the highest whole DPI below 150 that fits
+/// (marked as reduced resolution). Pages that do not fit even at 10 DPI fail.
+pub(crate) fn raster_dimensions_fitting(width_points: f32, height_points: f32) -> Result<(OcrRasterDimensions, bool), String> {
+    if let Ok(dimensions) = raster_dimensions(width_points, height_points) { return Ok((dimensions, false)); }
+    if !width_points.is_finite() || !height_points.is_finite() || width_points <= 0.0 || height_points <= 0.0 {
+        return Err("The page has invalid displayed dimensions for OCR.".into());
+    }
+    for dpi in (10..OCR_DPI).rev() {
+        let width = crate::page_image::pixels_at(width_points, dpi);
+        let height = crate::page_image::pixels_at(height_points, dpi);
+        if !(1.0..=OCR_MAX_EDGE as f64).contains(&width) || !(1.0..=OCR_MAX_EDGE as f64).contains(&height) { continue; }
+        let (width, height) = (width as u32, height as u32);
+        let pixels = u64::from(width) * u64::from(height);
+        let header_bytes = format!("P6\n{width} {height}\n255\n").len() as u64;
+        if header_bytes + pixels * 3 > OCR_INPUT_LIMIT as u64 { continue; }
+        return Ok((OcrRasterDimensions {
+            width, height,
+            bgra_bytes: usize::try_from(pixels * 4).map_err(|_| "The OCR bitmap size is out of range.")?,
+            p6_bytes: usize::try_from(header_bytes + pixels * 3).map_err(|_| "The OCR input size is out of range.")?,
+        }, true));
+    }
+    Err("The page is too large to OCR even at reduced resolution.".into())
+}
+
+/// What a large-document job needs from the open document before it starts.
+#[derive(Clone, Debug)]
+pub(crate) struct OcrJobSource {
+    pub(crate) page_count: u32,
+    pub(crate) page_sizes: Vec<(f32, f32)>,
+    /// SHA-256 of the source bytes followed by SHA-256 of the page plan, hex.
+    pub(crate) identity: String,
+    pub(crate) suggested_name: String,
+    pub(crate) source_name: String,
+}
+
+/// A large-job raster, or a failure of this page only (the document is fine).
+#[derive(Debug)]
+pub(crate) enum OcrJobRaster {
+    Raster(OcrPageRaster, bool),
+    PageFailed(String),
+}
+
 pub(crate) fn bgra_to_p6(
     dimensions: OcrRasterDimensions,
     bgra: &[u8],
