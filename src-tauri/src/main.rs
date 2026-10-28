@@ -187,7 +187,7 @@ async fn relocate_large_ocr(app: tauri::AppHandle, jobs: State<'_, large_ocr_com
 fn pause_large_ocr(jobs: State<'_, large_ocr_commands::LargeOcrJobs>) -> large_ocr_commands::LargeOcrStatus { jobs.pause(); jobs.status() }
 #[cfg(windows)]
 #[tauri::command]
-fn cancel_large_ocr(jobs: State<'_, large_ocr_commands::LargeOcrJobs>) -> large_ocr_commands::LargeOcrStatus { jobs.cancel(); jobs.status() }
+fn cancel_large_ocr(jobs: State<'_, large_ocr_commands::LargeOcrJobs>, keep_saved_parts: Option<bool>) -> Result<large_ocr_commands::LargeOcrStatus, String> { jobs.cancel(keep_saved_parts.unwrap_or(false))?; Ok(jobs.status()) }
 #[cfg(windows)]
 #[tauri::command]
 fn dismiss_large_ocr(jobs: State<'_, large_ocr_commands::LargeOcrJobs>) -> large_ocr_commands::LargeOcrStatus { jobs.dismiss(); jobs.status() }

@@ -258,8 +258,17 @@ impl LargeOcrJobs {
         if let Some(job) = active.as_ref() { job.control.pause(); }
     }
 
-    /// Cancels a running job, or discards saved progress. The source is never touched.
-    pub(crate) fn cancel(&self) {
+    /// Cancels a running job, or discards saved progress. The source is never
+    /// touched. When some parts are already saved under their final names,
+    /// discarding the rest leaves an incomplete set, so it is refused unless
+    /// the user confirmed with those files named (`keep_saved_parts`); the
+    /// saved parts themselves are never deleted.
+    pub(crate) fn cancel(&self, keep_saved_parts: bool) -> Result<(), String> {
+        let directory = {
+            let active = self.inner.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            active.as_ref().map(|job| job.directory.clone())
+        }.or_else(|| self.interrupted_job().map(|(directory, _)| directory));
+        if let Some(directory) = directory { refuse_incomplete_set(&directory, keep_saved_parts)?; }
         self.forget_interrupted();
         let mut active = self.inner.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(job) = active.as_ref() {
@@ -269,12 +278,13 @@ impl LargeOcrJobs {
                 discard(&job.directory);
                 *active = None;
             }
-            return;
+            return Ok(());
         }
         drop(active);
         if let Some((directory, _)) = self.interrupted_job() {
             if directory.parent() == Some(self.inner.root.as_path()) { discard(&directory); }
         }
+        Ok(())
     }
 
     /// Clears a finished job's status from the panel.
@@ -302,7 +312,7 @@ impl LargeOcrJobs {
             job: directory.file_name().unwrap_or_default().to_string_lossy().into_owned(),
             source_name: manifest.source_name.clone(), destination: manifest.destination.clone(), running: true,
             progress: JobProgress { state: JobState::Preparing, pages_done: 0, page_count: manifest.page_count, workers, issues: 0, bytes_written: 0, projected_bytes: None, size_warning: false, seconds_left: None, in_parts, part: 1 },
-            pause_reason: None, report: Vec::new(), interrupted: false, parts: Vec::new(),
+            pause_reason: None, report: Vec::new(), interrupted: false, parts: crate::large_ocr_parts::published_parts(&directory),
         }));
         let page_source: Arc<dyn PageSource> = Arc::new(InProcessSource {
             service: self.inner.service.clone(), document_id, revision, sizes: source.page_sizes, operation: operation.clone(), render_slot: Mutex::new(()),
@@ -320,6 +330,7 @@ impl LargeOcrJobs {
         });
         let thread_status = status.clone();
         let thread_control = control.clone();
+        let thread_directory = directory.clone();
         {
             let mut active = self.inner.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             *active = Some(ActiveJob { directory: directory.clone(), control: control.clone(), status: status.clone() });
@@ -328,7 +339,7 @@ impl LargeOcrJobs {
         let spawned = std::thread::Builder::new().name("ocr-job".into()).spawn(move || {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_job(settings, page_source, recognizer, thread_control, progress)));
             drop(operation);
-            apply_outcome(&thread_status, outcome);
+            apply_outcome(&thread_status, outcome, &thread_directory);
         });
         if let Err(error) = spawned {
             *self.inner.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
@@ -358,6 +369,14 @@ fn prepare_relocation(app_data: &Path, directory: &Path, manifest: &JobManifest,
     remove_stale_publish_temps(directory, manifest);
     let manifest = crate::searchable_pdf_stream::set_destination(directory, &destination.to_string_lossy()).map_err(|error| error.to_string())?;
     Ok((manifest, document_id, revision, source))
+}
+
+/// Refuses to discard a job some of whose parts are already saved, unless
+/// the user confirmed with those files named.
+fn refuse_incomplete_set(directory: &Path, keep_saved_parts: bool) -> Result<(), String> {
+    if keep_saved_parts || !crate::large_ocr_parts::any_published(directory) { return Ok(()); }
+    let saved = crate::large_ocr_parts::published_parts(directory).iter().map(|part| Path::new(&part.path).file_name().unwrap_or_default().to_string_lossy().into_owned()).collect::<Vec<_>>().join(", ");
+    Err(format!("These parts are already saved and would stay as an incomplete set: {saved}. Confirm to discard the remaining parts anyway."))
 }
 
 fn discard(directory: &Path) {
@@ -393,8 +412,11 @@ pub(crate) fn validate_destination_folder(destination: &Path, app_data: &Path) -
 
 /// Records how a job ended. A panic in the job thread becomes a pause with a
 /// message, so the panel never shows a job that runs forever.
-fn apply_outcome(status: &Mutex<LargeOcrJobStatus>, outcome: std::thread::Result<JobOutcome>) {
+/// A paused job lists the parts already saved under their final names.
+fn apply_outcome(status: &Mutex<LargeOcrJobStatus>, outcome: std::thread::Result<JobOutcome>, directory: &Path) {
+    let saved_parts = match &outcome { Ok(JobOutcome::Published { .. }) | Ok(JobOutcome::Cancelled) => None, _ => Some(crate::large_ocr_parts::published_parts(directory)) };
     let mut status = status.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(parts) = saved_parts { status.parts = parts; }
     status.running = false;
     match outcome {
         Ok(JobOutcome::Published { report, parts, .. }) => {
@@ -427,7 +449,7 @@ fn interrupted_status(directory: &Path, manifest: &JobManifest) -> LargeOcrJobSt
             state: JobState::Paused, pages_done, page_count: manifest.page_count, workers: 0, issues: 0, bytes_written: 0, projected_bytes: None, size_warning: false, seconds_left: None,
             in_parts: parts.is_some(), part: parts.map_or(1, |state| state.closed.len() as u32 + 1),
         },
-        pause_reason: Some(PauseReason::User), report: Vec::new(), interrupted: true, parts: Vec::new(),
+        pause_reason: Some(PauseReason::User), report: Vec::new(), interrupted: true, parts: crate::large_ocr_parts::published_parts(directory),
     }
 }
 
@@ -476,7 +498,7 @@ mod tests {
             pause_reason: None, report: Vec::new(), interrupted: false, parts: Vec::new(),
         });
         let outcome = std::panic::catch_unwind(|| -> JobOutcome { panic!("simulated job bug") });
-        apply_outcome(&status, outcome);
+        apply_outcome(&status, outcome, Path::new("E:/no-such-ocr-job"));
         let status = status.into_inner().unwrap();
         assert!(!status.running);
         assert_eq!(status.progress.state, JobState::Paused);
@@ -584,6 +606,12 @@ mod tests {
         std::fs::write(directory.join(crate::large_ocr_parts::PARTS_FILE), br#"{"format":1,"closed":[1],"published":1,"publishing":null}"#).unwrap();
         let refused = prepare_relocation(&app_data, &directory, &manifest, &folder.path().join("third.pdf"), Some((5, 1, source))).unwrap_err();
         assert!(refused.contains("already saved"), "{refused}");
+        let discard_refused = refuse_incomplete_set(&directory, false).unwrap_err();
+        assert!(discard_refused.contains("elsewhere (part 1 of 2).pdf") && discard_refused.contains("incomplete set"), "{discard_refused}");
+        assert!(refuse_incomplete_set(&directory, true).is_ok(), "confirmed with the saved files named");
+        let saved = crate::large_ocr_parts::published_parts(&directory);
+        assert_eq!(saved.len(), 1);
+        assert_eq!((saved[0].first_page, saved[0].pages), (0, 1));
         let interrupted = interrupted_status(&directory, &crate::searchable_pdf_stream::read_manifest(&directory).unwrap());
         assert!(interrupted.progress.in_parts);
         assert_eq!((interrupted.progress.part, interrupted.progress.pages_done), (2, 1));

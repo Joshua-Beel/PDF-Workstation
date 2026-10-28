@@ -5,14 +5,14 @@ import s from './LargeOcrPanel.module.css';
 export type LargeOcrApi = {
   status: () => Promise<LargeOcrStatus>;
   pause: () => Promise<LargeOcrStatus>;
-  cancel: () => Promise<LargeOcrStatus>;
+  cancel: (keepSavedParts: boolean) => Promise<LargeOcrStatus>;
   resume: (documentId: number, revision: number) => Promise<LargeOcrStatus>;
   dismiss: () => Promise<LargeOcrStatus>;
   relocate: (documentId: number | null, revision: number | null) => Promise<LargeOcrStatus | null>;
   saveInParts: (documentId: number | null, revision: number | null) => Promise<LargeOcrStatus>;
 };
 
-const defaultApi: LargeOcrApi = { status: () => largeOcrStatus(), pause: () => pauseLargeOcr(), cancel: () => cancelLargeOcr(), resume: (documentId, revision) => resumeLargeOcr(documentId, revision), dismiss: () => dismissLargeOcr(), relocate: (documentId, revision) => relocateLargeOcr(documentId, revision), saveInParts: (documentId, revision) => saveLargeOcrInParts(documentId, revision) };
+const defaultApi: LargeOcrApi = { status: () => largeOcrStatus(), pause: () => pauseLargeOcr(), cancel: keepSavedParts => cancelLargeOcr(keepSavedParts), resume: (documentId, revision) => resumeLargeOcr(documentId, revision), dismiss: () => dismissLargeOcr(), relocate: (documentId, revision) => relocateLargeOcr(documentId, revision), saveInParts: (documentId, revision) => saveLargeOcrInParts(documentId, revision) };
 
 export function fileName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
@@ -91,6 +91,16 @@ export default function LargeOcrPanel({ document, refresh, openCopy, api = defau
   const done = `Page ${Math.min(progress.pagesDone + (job.running ? 1 : 0), progress.pageCount).toLocaleString()} of ${progress.pageCount.toLocaleString()}`;
   const unreadable = job.report.filter(entry => entry.outcome !== 'text');
   const reduced = job.report.filter(entry => entry.outcome === 'text' && entry.reducedResolution);
+  const hasSaved = job.parts.length > 0 && progress.state !== 'published';
+  const savedNames = job.parts.map(part => fileName(part.path)).join(', ');
+  const savedList = hasSaved && <>
+    <p>Already saved:</p>
+    <ul className={s.parts}>{job.parts.map(part => <li key={part.path}><strong>{fileName(part.path)}</strong> — {partRange(part)}</li>)}</ul>
+  </>;
+  const discard = confirming
+    ? <div className={s.actions}><span>Discard progress? These parts are already saved and will stay as an incomplete set: {savedNames}. The remaining pages will not be saved.</span><button onClick={() => setConfirming(false)}>Keep progress</button><button onClick={() => { setConfirming(false); void act(() => api.cancel(true)); }}>Discard anyway</button></div>
+    : null;
+  const discardButton = <button onClick={() => hasSaved ? setConfirming(true) : void act(() => api.cancel(false))}>Discard progress</button>;
   let body: JSX.Element;
   if (job.running) {
     body = <>
@@ -100,7 +110,9 @@ export default function LargeOcrPanel({ document, refresh, openCopy, api = defau
       {progress.sizeWarning && !progress.inParts && <div className={s.actions}><span role="alert">The copy is on course to be larger than 1 GiB, the largest file PDF Workstation can open. OCR will pause if it reaches that size, or you can save it in parts of up to 1 GiB each.</span><button onClick={() => void act(() => api.saveInParts(null, null))}>Save in parts</button></div>}
       {progress.inParts && <p>Saving in parts of up to 1 GiB each{progress.part > 1 ? `; writing part ${progress.part}` : ' if needed'}.</p>}
       {confirming
-        ? <div className={s.actions}><span>Cancel OCR? The {progress.pagesDone.toLocaleString()} finished pages will be discarded and no file will be saved. The source document is unchanged.</span><button onClick={() => setConfirming(false)}>Keep running</button><button onClick={() => { setConfirming(false); void act(api.cancel); }}>Cancel OCR</button></div>
+        ? <div className={s.actions}><span>{hasSaved
+            ? `Cancel OCR? These parts are already saved and will stay as an incomplete set: ${savedNames}. The remaining pages will not be saved. The source document is unchanged.`
+            : `Cancel OCR? The ${progress.pagesDone.toLocaleString()} finished pages will be discarded and no file will be saved. The source document is unchanged.`}</span><button onClick={() => setConfirming(false)}>Keep running</button><button onClick={() => { setConfirming(false); void act(() => api.cancel(hasSaved)); }}>Cancel OCR</button></div>
         : <div className={s.actions}><button onClick={() => void act(api.pause)}>Pause</button><button onClick={() => setConfirming(true)}>Cancel</button></div>}
     </>;
   } else if (progress.state === 'published' && job.parts.length > 0) {
@@ -119,25 +131,28 @@ export default function LargeOcrPanel({ document, refresh, openCopy, api = defau
       <div className={s.actions}><button onClick={() => openCopy(job.destination)}>Open copy</button><button onClick={() => void act(api.dismiss)}>Close</button></div>
     </>;
   } else if (progress.state === 'cancelled') {
-    body = <><p>OCR cancelled. No file was saved; the source document is unchanged.</p><div className={s.actions}><button onClick={() => void act(api.dismiss)}>Close</button></div></>;
+    body = <><p>{hasSaved ? `OCR cancelled. The parts already saved stay as an incomplete set: ${savedNames}. The rest was not saved; the source document is unchanged.` : 'OCR cancelled. No file was saved; the source document is unchanged.'}</p><div className={s.actions}><button onClick={() => void act(api.dismiss)}>Close</button></div></>;
   } else if (job.pauseReason?.kind === 'sizeLimit') {
     body = <>
       <p>{pauseText(job.pauseReason, job)}</p>
       <p>The parts will be saved next to <strong>{job.destination}</strong>.</p>
       <div className={s.actions}>
         <button disabled={!document} title={document ? undefined : 'Open the document this OCR job was started from.'} onClick={() => document && void act(() => api.saveInParts(document.id, document.revision))}>Save in parts</button>
-        <button onClick={() => void act(api.cancel)}>Discard progress</button>
+        {discardButton}
       </div>
+      {discard}
     </>;
   } else {
     body = <>
       <p>{pauseText(job.pauseReason, job)}</p>
       <p>{progress.inParts ? <>The copy is being saved in parts next to <strong>{job.destination}</strong>.</> : <>The copy will be saved as <strong>{job.destination}</strong>.</>}</p>
+      {savedList}
       <div className={s.actions}>
         <button disabled={!document} title={document ? undefined : 'Open the document this OCR job was started from.'} onClick={() => document && void act(() => api.resume(document.id, document.revision))}>Resume</button>
-        <button onClick={() => void act(async () => (await api.relocate(document?.id ?? null, document?.revision ?? null)) ?? await api.status())}>Save elsewhere…</button>
-        <button onClick={() => void act(api.cancel)}>Discard progress</button>
+        {!hasSaved && <button onClick={() => void act(async () => (await api.relocate(document?.id ?? null, document?.revision ?? null)) ?? await api.status())}>Save elsewhere…</button>}
+        {discardButton}
       </div>
+      {discard}
     </>;
   }
   return <section className={s.panel} aria-label="Searchable OCR">

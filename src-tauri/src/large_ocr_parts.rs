@@ -132,7 +132,7 @@ pub(crate) fn part_directories(root: &Path) -> Vec<PathBuf> {
     if let Ok(entries) = std::fs::read_dir(root) {
         let mut parts = entries.flatten()
             .filter(|entry| entry.file_name().to_str().is_some_and(|name| name.strip_prefix("part-").is_some_and(|number| !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))))
-            .filter(|entry| std::fs::symlink_metadata(entry.path()).is_ok_and(|metadata| metadata.is_dir()))
+            .filter(|entry| std::fs::symlink_metadata(entry.path()).is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink()))
             .map(|entry| entry.path())
             .collect::<Vec<_>>();
         parts.sort();
@@ -141,14 +141,74 @@ pub(crate) fn part_directories(root: &Path) -> Vec<PathBuf> {
     folders
 }
 
-/// After a crash between moving a part and saving that, counts the move.
+/// The parts already at their final names, read only (for a paused job's panel).
+pub(crate) fn published_parts(root: &Path) -> Vec<PublishedPart> {
+    let Ok(manifest) = read_manifest(root) else { return Vec::new() };
+    let Ok(Some(state)) = load_state(root, &manifest) else { return Vec::new() };
+    let total = state.closed.len() + 1;
+    let published = (state.published as usize).min(total);
+    let mut counts = state.closed.clone();
+    counts.push(manifest.page_count - state.closed.iter().sum::<u32>());
+    let names = part_names(Path::new(&manifest.destination), total);
+    describe(&names[..published], &counts[..published], |name| std::fs::metadata(name).map(|metadata| metadata.len()).unwrap_or(0))
+}
+
+/// A part folder must be a real folder inside the job folder, never a link
+/// or junction to somewhere else. A missing folder is fine (it is created).
+fn check_part_folder(directory: &Path) -> Result<(), StreamError> {
+    match std::fs::symlink_metadata(directory) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => Err(StreamError::Unusable(format!("{} is not a plain folder", directory.file_name().unwrap_or_default().to_string_lossy()))),
+        _ => Ok(()),
+    }
+}
+
+/// Free bytes on the volume holding `path`.
+fn free_bytes(path: &Path) -> Option<u64> {
+    #[cfg(test)]
+    if let Some(fake) = *FAKE_FREE_BYTES.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) { return Some(fake); }
+    use std::os::windows::ffi::OsStrExt;
+    let wide = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let mut available = 0_u64;
+    unsafe { windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(windows::core::PCWSTR(wide.as_ptr()), Some(&mut available), None, None) }.ok()?;
+    Some(available)
+}
+
+#[cfg(test)]
+pub(crate) static FAKE_FREE_BYTES: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+
+fn same_contents(left: &Path, right: &Path) -> bool {
+    fn digest(path: &Path) -> Option<[u8; 32]> {
+        use sha2::{Digest, Sha256};
+        let mut file = std::fs::File::open(path).ok()?;
+        let mut hasher = Sha256::new();
+        std::io::copy(&mut file, &mut hasher).ok()?;
+        Some(hasher.finalize().into())
+    }
+    digest(left).is_some_and(|left| digest(right) == Some(left))
+}
+
+/// After a crash between moving a part and saving that, counts the move: the
+/// part's own file is gone and the name holds a file of the recorded size, or
+/// (a cross-volume copy that stopped before removing its source) both files
+/// have the recorded size and identical contents; the source is then removed.
 fn recover_publishing(root: &Path, manifest: &JobManifest, state: &mut PartsState) -> Result<(), StreamError> {
     let Some(bytes) = state.publishing else { return Ok(()) };
     let total = state.closed.len() + 1;
     let index = state.published as usize;
     let name = &part_names(Path::new(&manifest.destination), total)[index];
-    let moved = !part_directory(root, index).join(PART_FILE).exists()
-        && std::fs::symlink_metadata(name).is_ok_and(|metadata| metadata.is_file() && metadata.len() == bytes);
+    let directory = part_directory(root, index);
+    check_part_folder(&directory)?;
+    let source = directory.join(PART_FILE);
+    let named = std::fs::symlink_metadata(name).is_ok_and(|metadata| metadata.is_file() && metadata.len() == bytes);
+    let moved = match std::fs::symlink_metadata(&source) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => named,
+        Ok(metadata) if named && metadata.is_file() && metadata.len() == bytes && same_contents(&source, name) => {
+            std::fs::remove_file(&source).map_err(io)?;
+            let _ = std::fs::remove_file(directory.join(crate::searchable_pdf_stream::PUBLISH_TEMP_MARKER));
+            true
+        }
+        _ => false,
+    };
     if moved { state.published += 1; }
     state.publishing = None;
     save_state(root, state)
@@ -190,6 +250,7 @@ impl Output {
         let mut earlier_report = Vec::new();
         let (mut first_page, mut earlier_bytes) = (0_u32, 0_u64);
         for (index, pages) in state.closed.iter().enumerate() {
+            check_part_folder(&part_directory(root, index))?;
             let records = saved_records(&part_directory(root, index));
             let Some(last) = records.get(*pages as usize - 1) else { return Err(StreamError::Unusable(format!("part {} of the copy is incomplete", index + 1))) };
             earlier_report.extend(report_of(&records[..*pages as usize], first_page));
@@ -205,6 +266,7 @@ impl Output {
         }
         let expected = part_manifest(&manifest, first_page);
         let directory = part_directory(root, state.closed.len());
+        check_part_folder(&directory)?;
         let writer = if state.closed.is_empty() {
             PartialWriter::resume(root)?
         } else {
@@ -255,10 +317,16 @@ impl Output {
         let closed = self.writer.next_page();
         let next_first = self.first_page + closed;
         if next_first >= self.manifest.page_count { return Err(StreamError::Invalid("The OCR job has no more pages.".into())); }
+        let needed = self.cap.saturating_mul(2);
+        if let Some(free) = free_bytes(&self.root).filter(|free| *free < needed) {
+            let mib = |bytes: u64| bytes / (1024 * 1024);
+            return Err(StreamError::Io(format!("only {} MiB is free on the drive that holds PDF Workstation's app data, and the next part needs up to {} MiB of working space", mib(free), mib(needed).max(1))));
+        }
         let mut state = self.parts.clone().unwrap_or(PartsState { format: PARTS_FORMAT, ..PartsState::default() });
         state.closed.push(closed);
-        save_state(&self.root, &state)?;
         let directory = part_directory(&self.root, state.closed.len());
+        check_part_folder(&directory)?;
+        save_state(&self.root, &state)?;
         if std::fs::symlink_metadata(&directory).is_ok() { std::fs::remove_dir_all(&directory).map_err(io)?; }
         let mut writer = PartialWriter::create(&directory, part_manifest(&self.manifest, next_first))?;
         writer.set_size_cap(self.cap);
@@ -295,6 +363,7 @@ impl Output {
             let part = if index + 1 == total {
                 open.take().expect("the open part is used once")
             } else {
+                if let Err(error) = check_part_folder(&part_directory(&root, index)) { revert(&finished); return Err((error, report)); }
                 match PartialWriter::resume(&part_directory(&root, index)) {
                     Ok(mut writer) => { writer.set_size_cap(cap); writer }
                     Err(error) => { revert(&finished); return Err((error, report)); }

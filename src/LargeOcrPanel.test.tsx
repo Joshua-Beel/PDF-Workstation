@@ -73,6 +73,29 @@ it('offers Save in parts when paused at the size cap, with the open document', a
   expect(button(closed, 'Save in parts').props.disabled).toBe(true);
 });
 
+it('shows parts already saved on a paused job and confirms before discarding the rest', async () => {
+  const paused = job({ running: false, pauseReason: { kind: 'publish', message: '"big (part 2 of 3).pdf" already exists' }, parts: [
+    { path: 'E:\\out\\big (part 1 of 3).pdf', firstPage: 0, pages: 412, bytes: 1_000 },
+  ] }, { state: 'paused', pagesDone: 818, pageCount: 818, inParts: true, part: 3 });
+  const calls = api(status(paused));
+  const { ui } = await mount(calls);
+  expect(text(ui)).toContain('Already saved:');
+  expect(text(ui)).toContain('big (part 1 of 3).pdf — pages 1–412');
+  expect(ui.root.findAllByType('button').map(item => item.children.join(''))).not.toContain('Save elsewhere…');
+  await act(async () => { button(ui, 'Discard progress').props.onClick(); });
+  expect(calls.cancel).not.toHaveBeenCalled();
+  expect(text(ui)).toContain('will stay as an incomplete set: big (part 1 of 3).pdf');
+  await act(async () => { button(ui, 'Discard anyway').props.onClick(); });
+  expect(calls.cancel).toHaveBeenCalledWith(true);
+});
+
+it('discards a paused job with nothing saved without asking', async () => {
+  const calls = api(status(job({ running: false }, { state: 'paused' })));
+  const { ui } = await mount(calls);
+  await act(async () => { button(ui, 'Discard progress').props.onClick(); });
+  expect(calls.cancel).toHaveBeenCalledWith(false);
+});
+
 it('lists each saved part with its page range and opens any part', async () => {
   const saved = job({ running: false, parts: [
     { path: 'E:\\out\\big (part 1 of 3).pdf', firstPage: 0, pages: 412, bytes: 1_000 },

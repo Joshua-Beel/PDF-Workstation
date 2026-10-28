@@ -1197,6 +1197,88 @@ pub(crate) mod tests {
         assert_eq!(published, 0, "nothing is published when any part fails its check");
     }
 
+    /// Writes every page with the publish refused, so every part is on disk
+    /// and partial; returns the job's parts record.
+    fn all_pages_unpublished(directory: &Path, destination: &Path) -> crate::large_ocr_parts::PartsState {
+        let mut job = split_settings(directory, destination, false);
+        job.commit = Box::new(|| Err("OCR was paused".into()));
+        let outcome = run_job(job, Arc::new(FakeSource::new()), Arc::new(FakeEngine::new()), in_parts(), silent());
+        assert!(matches!(outcome, JobOutcome::Paused { reason: PauseReason::User, next_page: SPLIT_PAGES, .. }), "{outcome:?}");
+        let manifest = crate::searchable_pdf_stream::read_manifest(directory).unwrap();
+        crate::large_ocr_parts::load_state(directory, &manifest).unwrap().unwrap()
+    }
+
+    #[test]
+    fn a_crash_between_moving_a_part_and_recording_it_is_recognised() {
+        let _serial = JOB_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let folder = tempfile::tempdir().unwrap();
+        let (clean, clean_bytes) = clean_parts(folder.path());
+        for part in &clean { std::fs::remove_file(&part.path).unwrap(); }
+        let destination = folder.path().join("clean.pdf");
+        let first = PathBuf::from(&clean[0].path);
+        for (case, job) in [("moved", "job-a"), ("copied", "job-b"), ("someone else's", "job-c")] {
+            let directory = folder.path().join(job);
+            let mut state = all_pages_unpublished(&directory, &destination);
+            let finished = PartialWriter::resume(&directory).unwrap().finalize_pages(state.closed[0]).unwrap();
+            match case {
+                "moved" => std::fs::rename(&finished.path, &first).unwrap(),
+                "copied" => { std::fs::copy(&finished.path, &first).unwrap(); }
+                _ => std::fs::write(&first, vec![b'x'; finished.bytes as usize]).unwrap(),
+            }
+            state.publishing = Some(finished.bytes);
+            std::fs::write(directory.join(crate::large_ocr_parts::PARTS_FILE), serde_json::to_vec(&state).unwrap()).unwrap();
+            let outcome = run_in_parts(&directory, &destination, true);
+            if case == "someone else's" {
+                let JobOutcome::Paused { reason: PauseReason::Publish(message), .. } = outcome else { panic!("{outcome:?}") };
+                assert!(message.contains("already exists"), "{message}");
+                assert_eq!(std::fs::read(&first).unwrap(), vec![b'x'; finished.bytes as usize], "a same-size file with other contents is not ours and is kept");
+                continue;
+            }
+            let parts = published_parts(outcome);
+            assert_eq!(parts, clean, "{case}");
+            assert!(contents(&parts) == clean_bytes, "{case}");
+            assert!(!directory.exists(), "{case}: the job folder, including a copied source, is removed");
+            for part in &parts { std::fs::remove_file(&part.path).unwrap(); }
+        }
+    }
+
+    #[test]
+    fn too_little_free_space_pauses_before_a_new_part() {
+        let _serial = JOB_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let folder = tempfile::tempdir().unwrap();
+        let destination = folder.path().join("out.pdf");
+        let directory = folder.path().join("job");
+        *crate::large_ocr_parts::FAKE_FREE_BYTES.lock().unwrap() = Some(2 * SPLIT_CAP - 1);
+        let outcome = run_in_parts(&directory, &destination, false);
+        *crate::large_ocr_parts::FAKE_FREE_BYTES.lock().unwrap() = None;
+        let JobOutcome::Paused { reason: PauseReason::Disk(message), next_page, .. } = outcome else { panic!("{outcome:?}") };
+        assert!(message.contains("free on the drive"), "{message}");
+        assert!(next_page > 0 && !directory.join(crate::large_ocr_parts::PARTS_FILE).exists() && !directory.join("part-2").exists());
+        assert!(published_parts(run_in_parts(&directory, &destination, true)).len() > 1);
+    }
+
+    #[test]
+    fn a_part_folder_that_is_a_junction_is_never_followed() {
+        let _serial = JOB_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let folder = tempfile::tempdir().unwrap();
+        let destination = folder.path().join("out.pdf");
+        let directory = folder.path().join("job");
+        let state = all_pages_unpublished(&directory, &destination);
+        let elsewhere = folder.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("keep.txt"), b"keep").unwrap();
+        let open_part = directory.join(format!("part-{}", state.closed.len() + 1));
+        std::fs::remove_dir_all(&open_part).unwrap();
+        let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&open_part).arg(&elsewhere).output().unwrap();
+        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+        let outcome = run_in_parts(&directory, &destination, true);
+        let JobOutcome::Paused { reason: PauseReason::Publish(message), .. } = outcome else { panic!("{outcome:?}") };
+        assert!(message.contains("not a plain folder"), "{message}");
+        assert_eq!(std::fs::read(elsewhere.join("keep.txt")).unwrap(), b"keep");
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 1, "nothing was written through the junction");
+        std::fs::remove_dir(&open_part).unwrap();
+    }
+
     #[test]
     fn automatic_worker_count_is_between_one_and_four() {
         let workers = automatic_workers();
