@@ -68,10 +68,7 @@ pub(crate) fn configure() -> Result<(), String> {
     println!("cargo:rustc-env=PDF_WORKSTATION_OCR_RESOURCE_RELATIVE={}", slash_path(&relative)?);
     println!("cargo:rustc-env=PDF_WORKSTATION_OCR_ENGINE_BYTES={}", verified.executable.bytes);
     println!("cargo:rustc-env=PDF_WORKSTATION_OCR_ENGINE_SHA256={}", verified.executable.sha256);
-    for (prefix, license) in license_environment(&verified.licenses)? {
-        println!("cargo:rustc-env=PDF_WORKSTATION_OCR_LICENSE_{prefix}_BYTES={}", license.bytes);
-        println!("cargo:rustc-env=PDF_WORKSTATION_OCR_LICENSE_{prefix}_SHA256={}", license.sha256);
-    }
+    require_exact_licenses(&verified.licenses)?;
     Ok(())
 }
 
@@ -81,18 +78,13 @@ pub(crate) struct VerifiedSetup {
     pub(crate) licenses: Vec<Receipt>,
 }
 
-fn license_environment(licenses: &[Receipt]) -> Result<Vec<(&'static str, &Receipt)>, String> {
+fn require_exact_licenses(licenses: &[Receipt]) -> Result<(), String> {
     let mut by_path: BTreeMap<&str, &Receipt> = licenses.iter().map(|license| (license.path.as_str(), license)).collect();
-    let mut ordered = Vec::with_capacity(LICENSES.len());
-    for (path, prefix) in [
-        ("engine/licenses/Tesseract-Apache-2.0.txt", "TESSERACT"),
-        ("engine/licenses/Leptonica-BSD-2-Clause.txt", "LEPTONICA"),
-        ("engine/licenses/eng-fast-Apache-2.0.txt", "ENG_FAST"),
-    ] {
-        ordered.push((prefix, by_path.remove(path).ok_or("an OCR license receipt is missing")?));
+    for path in LICENSES {
+        by_path.remove(path).ok_or("an OCR license receipt is missing")?;
     }
     if !by_path.is_empty() { return Err("an unexpected OCR license receipt is present".into()); }
-    Ok(ordered)
+    Ok(())
 }
 
 pub(crate) fn verify_setup(root: &Path, repository: &Path, manifest_path: &Path) -> Result<VerifiedSetup, String> {
@@ -295,15 +287,19 @@ mod tests {
     }
 
     #[test]
-    fn license_environment_has_fixed_names_and_order() {
-        let licenses = vec![
+    fn license_receipts_must_be_exactly_the_three_expected_files_in_any_order() {
+        let mut licenses = vec![
             Receipt { path: LICENSES[2].into(), bytes: 3, sha256: "3".repeat(64) },
             Receipt { path: LICENSES[0].into(), bytes: 1, sha256: "1".repeat(64) },
             Receipt { path: LICENSES[1].into(), bytes: 2, sha256: "2".repeat(64) },
         ];
-        let values = license_environment(&licenses).unwrap();
-        assert_eq!(values.iter().map(|(prefix, receipt)| (*prefix, receipt.bytes)).collect::<Vec<_>>(), vec![("TESSERACT", 1), ("LEPTONICA", 2), ("ENG_FAST", 3)]);
-        assert!(license_environment(&licenses[..2]).is_err());
+        require_exact_licenses(&licenses).unwrap();
+        assert!(require_exact_licenses(&licenses[..2]).is_err());
+        licenses.push(Receipt { path: "engine/licenses/Extra.txt".into(), bytes: 4, sha256: "4".repeat(64) });
+        assert!(require_exact_licenses(&licenses).is_err());
+        licenses.truncate(2);
+        licenses.push(Receipt { path: "engine/licenses/Other.txt".into(), bytes: 4, sha256: "4".repeat(64) });
+        assert!(require_exact_licenses(&licenses).is_err());
     }
 
     #[test]

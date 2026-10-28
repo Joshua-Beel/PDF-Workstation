@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- OCR hardening: Tesseract now starts in a private per-job temp directory (removed afterwards), not the install folder; OCR timing tests made deterministic; unused OCR licence build env vars dropped (SM4; no version change).
 - Post-release P3s: 0.2.0 described as lacking a publisher signature, not "unsigned"; in-app record leak scan also blocks `github_pat_` tokens (SM6).
 - Docs: 0.3.1 release evidence (rehearsal, release, Step 1/2, publish, in-app update run 40625100964) in `docs/releases.md`; README and features name 0.3.1 as the published release (SM6).
 - In-app update record schema 4: API metadata reads recorded as authenticated, public latest.json as unauthenticated; setup exit claimed only if a setup process was seen; JWT-shaped tokens blocked from the record (SM6).
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - Save-copy prune: regression test that an indirect destination to a kept page survives (SM2); README recent changes trimmed to 15 lines (SM0). Full entries in [docs/changelog.md](docs/changelog.md).
 - In-app update check: automatic relaunch still required when an Explorer shell window exists; without one it is recorded as not observed, with its reason (schema v3) (SM6; script, tests, docs).
 - In-app update check: WebDriver lifecycle now uses the shared hosted-proven launch helpers (30 s session create, native-driver wait, owned-process cleanup); firewall precheck added (SM6; scripts and tests).
-- In-app update check: stopped assigning the read-only `$HOME` (run 40618989631) and `$Matches`; suppressed stray `WaitForExit` output; AST test guards both (SM6; scripts and tests).

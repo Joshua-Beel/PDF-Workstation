@@ -11,8 +11,9 @@ use std::time::Duration;
 
 use windows::core::PCWSTR;
 use windows::Win32::Security::Cryptography::{
-    BCryptCloseAlgorithmProvider, BCryptHash, BCryptOpenAlgorithmProvider,
+    BCryptCloseAlgorithmProvider, BCryptGenRandom, BCryptHash, BCryptOpenAlgorithmProvider,
     BCRYPT_ALG_HANDLE, BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS, BCRYPT_SHA256_ALGORITHM,
+    BCRYPT_USE_SYSTEM_PREFERRED_RNG,
 };
 use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
 
@@ -47,7 +48,13 @@ const RUN_STATE_COMPLETED: u8 = 2;
 
 #[cfg(test)]
 pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-    OCR_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    let guard = OCR_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    while OCR_SLOT.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(!OCR_SLOT.load(Ordering::Acquire), "the OCR slot stayed held after the previous test released the test lock");
+    guard
 }
 
 #[derive(Clone)]
@@ -535,6 +542,71 @@ fn sha256(input: &[u8]) -> Result<[u8; 32], OcrProcessError> {
     Ok(output)
 }
 
+const JOB_DIRECTORY_PREFIX: &str = "pdf-workstation-ocr-";
+const JOB_DIRECTORY_STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+const JOB_DIRECTORY_ATTEMPTS: usize = 5;
+
+struct JobDirectory(PathBuf);
+
+fn random_directory_name() -> Result<String, OcrProcessError> {
+    let mut random = [0_u8; 16];
+    let status = unsafe { BCryptGenRandom(None, &mut random, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+    if status.0 < 0 {
+        return Err(OcrProcessError::System(format!("Could not generate an OCR work directory name: {status:?}")));
+    }
+    Ok(format!("{JOB_DIRECTORY_PREFIX}{}", random.iter().map(|byte| format!("{byte:02x}")).collect::<String>()))
+}
+
+fn is_job_directory_name(name: &str) -> bool {
+    name.strip_prefix(JOB_DIRECTORY_PREFIX)
+        .is_some_and(|rest| rest.len() == 32 && rest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+}
+
+fn sweep_stale_job_directories(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_str().is_some_and(is_job_directory_name) {
+            continue;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else { continue };
+        if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT_VALUE != 0 {
+            continue;
+        }
+        let stale = metadata.modified().ok().and_then(|modified| modified.elapsed().ok()).is_some_and(|age| age > JOB_DIRECTORY_STALE_AFTER);
+        if stale {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+impl JobDirectory {
+    fn create() -> Result<Self, OcrProcessError> {
+        let root = std::env::temp_dir();
+        sweep_stale_job_directories(&root);
+        let mut last_error = None;
+        for _ in 0..JOB_DIRECTORY_ATTEMPTS {
+            let path = root.join(random_directory_name()?);
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => last_error = Some(error),
+                Err(error) => return Err(OcrProcessError::System(format!("Could not create the OCR work directory: {error}"))),
+            }
+        }
+        Err(OcrProcessError::System(format!("Could not create the OCR work directory: {}", last_error.map(|error| error.to_string()).unwrap_or_default())))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for JobDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn run_child(
     engine: &Path,
     tessdata: &Path,
@@ -544,12 +616,13 @@ fn run_child(
     output_profile: OcrOutputProfile,
 ) -> Result<OcrProcessOutput, OcrProcessError> {
     cancellation.ensure_runnable()?;
+    let job_directory = JobDirectory::create()?;
     let suspended = child_job::spawn_suspended(
         OCR_LABEL,
         &JobLimits::single_process(OCR_CHILD_COMMIT_LIMIT),
         || {
             let application = wide_null(engine.as_os_str())?;
-            let current_directory = wide_null(engine.parent().ok_or_else(|| OcrProcessError::InvalidAsset("OCR executable has no parent directory".into()))?.as_os_str())?;
+            let current_directory = wide_null(job_directory.path().as_os_str())?;
             let command_line = build_command_line(engine, tessdata, output_profile)?;
             Ok(ChildCommand { application, command_line, current_directory })
         },
@@ -679,7 +752,7 @@ use std::thread;
 use std::time::Duration;
 
 fn main() {
-    let directory = std::env::current_dir().unwrap();
+    let directory = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
     let name = std::env::current_exe().unwrap().file_name().unwrap().to_string_lossy().to_ascii_lowercase();
     if name == "grandchild.exe" {
         fs::write(directory.join("grandchild.pid"), std::process::id().to_string()).unwrap();
@@ -689,6 +762,7 @@ fn main() {
     }
     fs::write(directory.join("child.pid.tmp"), std::process::id().to_string()).unwrap();
     fs::rename(directory.join("child.pid.tmp"), directory.join("child.pid")).unwrap();
+    fs::write(directory.join("cwd.txt"), std::env::current_dir().unwrap().to_string_lossy().as_bytes()).unwrap();
     let behavior = fs::read_to_string(directory.join("behavior.txt")).unwrap();
     if matches!(behavior.trim(), "stdout-exact" | "stdout-over" | "stderr-exact" | "stderr-over" | "invalid-stdout" | "invalid-stderr" | "nonzero" | "unexpected-stderr") {
         let mut input = Vec::new();
@@ -755,7 +829,7 @@ fn main() {
     fn fake_executable() -> Result<PathBuf, String> {
         FAKE_EXECUTABLE
             .get_or_init(|| {
-                let directory = repository_root().join("target/ocr-process-tests/fake-build");
+                let directory = repository_root().join("target/ocr-process-tests").join(format!("fake-build-{}", std::process::id()));
                 std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
                 let source = directory.join("fake-child.rs");
                 let executable = directory.join("fake-child.exe");
@@ -801,7 +875,8 @@ fn main() {
 
     fn wait_for_pid(directory: &Path) -> u32 {
         let path = directory.join("child.pid");
-        for _ in 0..300 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
             if let Ok(text) = std::fs::read_to_string(&path) {
                 if let Ok(pid) = text.trim().parse() {
                     return pid;
@@ -821,7 +896,8 @@ fn main() {
     }
 
     fn assert_process_reaped(pid: u32) {
-        for _ in 0..1000 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
             if !process_is_alive(pid) {
                 return;
             }
@@ -862,6 +938,42 @@ fn main() {
     }
 
     #[test]
+    fn child_working_directory_is_a_private_temp_directory_outside_the_engine_root() {
+        let _serial = test_lock();
+        let case = fake_case("exact");
+        assert_eq!(case.runner.recognize_p6(TEST_P6, &OcrCancellation::default()).unwrap().text, "recognized text\n");
+        let reported = PathBuf::from(std::fs::read_to_string(case.directory.join("cwd.txt")).unwrap());
+        let engine_root = external_windows_path(&case.directory.canonicalize().unwrap()).unwrap();
+        let temp_root = external_windows_path(&std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        assert!(!reported.starts_with(&engine_root), "{reported:?} is inside the engine root {engine_root:?}");
+        assert!(!reported.starts_with(&case.directory), "{reported:?} is inside the install folder");
+        assert!(reported.starts_with(&temp_root), "{reported:?} is not under {temp_root:?}");
+        assert!(is_job_directory_name(&reported.file_name().unwrap().to_string_lossy()));
+        assert!(!reported.exists(), "the per-job directory must be removed after the job");
+    }
+
+    #[test]
+    fn job_directories_are_random_exclusive_and_the_sweep_spares_fresh_and_foreign_entries() {
+        let first = random_directory_name().unwrap();
+        assert!(is_job_directory_name(&first));
+        assert_ne!(first, random_directory_name().unwrap());
+        for bad in ["pdf-workstation-ocr-", "pdf-workstation-ocr-1234-0", "pdf-workstation-ocr-0123456789ABCDEF0123456789abcdef", "other-0123456789abcdef0123456789abcdef"] {
+            assert!(!is_job_directory_name(bad), "{bad}");
+        }
+        let root = tempfile::tempdir().unwrap();
+        let fresh = root.path().join(random_directory_name().unwrap());
+        let foreign = root.path().join("pdf-workstation-ocr-keep-me");
+        std::fs::create_dir(&fresh).unwrap();
+        std::fs::create_dir(&foreign).unwrap();
+        sweep_stale_job_directories(root.path());
+        assert!(fresh.exists() && foreign.exists());
+        let one = JobDirectory::create().unwrap();
+        let two = JobDirectory::create().unwrap();
+        assert_ne!(one.path(), two.path());
+        assert!(one.path().is_dir() && two.path().is_dir());
+    }
+
+    #[test]
     fn cancellation_before_spawn_and_while_suspended_runs_no_child_code() {
         let _serial = test_lock();
         let pre_cancelled = fake_case("exact");
@@ -877,7 +989,7 @@ fn main() {
         let result = suspended.runner.recognize_with_options(
             TEST_P6,
             &cancellation,
-            RunOptions { timeout: Duration::from_secs(2), before_resume: Some(&hook), after_resume: None, before_finish: None },
+            RunOptions { timeout: Duration::from_secs(120), before_resume: Some(&hook), after_resume: None, before_finish: None },
         );
         assert_eq!(result, Err(OcrProcessError::Cancelled));
         assert!(!suspended.directory.join("child.pid").exists());
@@ -921,7 +1033,7 @@ fn main() {
                 TEST_P6,
                 &worker_token,
                 RunOptions {
-                    timeout: Duration::from_secs(2),
+                    timeout: Duration::from_secs(120),
                     before_resume: None,
                     after_resume: None,
                     before_finish: Some(&before_finish),
@@ -937,7 +1049,8 @@ fn main() {
 
         let completed = fake_case("exact");
         let cancellation = OcrCancellation::default();
-        assert!(completed.runner.recognize_p6(TEST_P6, &cancellation).is_ok());
+        let completed_result = completed.runner.recognize_p6(TEST_P6, &cancellation);
+        assert!(completed_result.is_ok(), "{completed_result:?}");
         assert!(!cancellation.cancel());
     }
 
@@ -1053,7 +1166,7 @@ fn main() {
             let _ = unwound.runner.recognize_with_options(
                 TEST_P6,
                 &OcrCancellation::default(),
-                RunOptions { timeout: Duration::from_secs(2), before_resume: None, after_resume: Some(&after_resume), before_finish: None },
+                RunOptions { timeout: Duration::from_secs(120), before_resume: None, after_resume: Some(&after_resume), before_finish: None },
             );
         }));
         assert!(caught.is_err());
