@@ -426,3 +426,38 @@ fn new_bookmarks_use_an_xyz_destination_that_keeps_the_zoom() {
     assert_eq!(dest[1].as_name().unwrap(), b"XYZ");
     assert!(dest[2..].iter().all(|object| matches!(object, Object::Null)));
 }
+
+#[test]
+fn outline_items_that_alias_other_plain_objects_are_refused_and_those_objects_are_untouched() {
+    let hostile = |attach: &dyn Fn(&mut Document, ObjectId)| {
+        let mut document = sample(); with_outline(&mut document, &tree());
+        let victim = document.new_object_id();
+        document.objects.insert(victim, Object::Dictionary(dictionary! { "Title" => Object::string_literal("Real title"), "T" => Object::string_literal("field") }));
+        attach(&mut document, victim);
+        let root = document.catalog().unwrap().get(b"Outlines").unwrap().as_reference().unwrap();
+        document.get_dictionary_mut(root).unwrap().set("First", Object::Reference(victim));
+        let before: Vec<String> = document.objects.iter().filter(|(id, _)| **id != root).map(|(id, object)| format!("{id:?}{object:?}")).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+        let mut edits = OutlineEdits::default(); edits.load(read(&document));
+        let view = edits.view(&plan(6));
+        assert!(!view.editable && view.reason.unwrap().contains("used by something else"));
+        assert!(edits.apply(edits.version, BookmarkOp::Add { page: 0, title: "x".into(), after: None }, &plan(6)).is_err());
+        assert!(edits.pending().is_none());
+        let after: Vec<String> = document.objects.iter().filter(|(id, _)| **id != root).map(|(id, object)| format!("{id:?}{object:?}")).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+        assert_eq!(before, after);
+    };
+    hostile(&|d, victim| { let form = d.new_object_id(); d.objects.insert(form, Object::Dictionary(dictionary! { "Fields" => vec![Object::Reference(victim)] })); d.catalog_mut().unwrap().set("AcroForm", Object::Reference(form)); });
+    hostile(&|d, victim| { d.trailer.set("Info", Object::Reference(victim)); });
+    hostile(&|d, victim| { let annotation = d.new_object_id(); d.objects.insert(annotation, Object::Dictionary(dictionary! { "Subtype" => "Link", "A" => Object::Reference(victim) })); let page = d.get_pages().values().next().copied().unwrap(); d.get_dictionary_mut(page).unwrap().set("Annots", vec![Object::Reference(annotation)]); });
+    hostile(&|d, victim| { d.catalog_mut().unwrap().set("OpenAction", Object::Reference(victim)); });
+}
+
+#[test]
+fn a_direct_outline_root_does_not_trip_the_alias_check() {
+    let mut document = sample(); with_outline(&mut document, &tree());
+    let root_id = document.catalog().unwrap().get(b"Outlines").unwrap().as_reference().unwrap();
+    let root = document.get_dictionary(root_id).unwrap().clone();
+    document.objects.remove(&root_id);
+    for (_, object) in document.objects.iter_mut() { if let Object::Dictionary(dict) = object { if dict.get(b"Parent").ok().and_then(|p| p.as_reference().ok()) == Some(root_id) { dict.remove(b"Parent"); } } }
+    document.catalog_mut().unwrap().set("Outlines", Object::Dictionary(root));
+    assert_eq!(read(&document).unwrap().len(), 7);
+}

@@ -114,7 +114,7 @@ fn clean_title(title: &str) -> Result<String, String> {
     if title.is_empty() { return Err("Enter a bookmark title.".into()); }
     if title.chars().count() > MAX_TITLE_CHARS { return Err(format!("A bookmark title can have at most {MAX_TITLE_CHARS} characters.")); }
     if title.chars().any(char::is_control) { return Err("A bookmark title cannot contain control characters.".into()); }
-    if title.chars().any(|c| matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200B}'..='\u{200F}' | '\u{FEFF}')) { return Err("A bookmark title cannot contain invisible or text-direction control characters.".into()); }
+    if title.chars().any(|c| matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200B}'..='\u{200F}' | '\u{FEFF}' | '\u{2060}' | '\u{00AD}')) { return Err("A bookmark title cannot contain invisible or text-direction control characters.".into()); }
     Ok(title.to_owned())
 }
 
@@ -196,7 +196,43 @@ pub fn read(document: &Document) -> Result<Vec<Entry>, String> {
         entries.push(Entry { uid: entries.len() as u32, origin: Some(id), title, renamed: false, depth, open: count > 0, source_page: destination_page(document, dict, &pages) });
         if first.is_some() { stack.push(first); parents.push(Some(id)); }
     }
+    refuse_aliased_items(document, &seen, root_id)?;
     Ok(entries)
+}
+
+/// An outline item may be referenced only by the outline's own tree links. Anything reachable from the trailer
+/// that points at one (an AcroForm field, the `/Info` dictionary, an annotation or action, a name tree node)
+/// means the item is really another object, which a save would then rewrite. One linear walk over the objects
+/// reachable from the trailer; unreachable leftovers (for example deleted bookmarks) are ignored.
+fn refuse_aliased_items(document: &Document, items: &HashSet<ObjectId>, root_id: Option<ObjectId>) -> Result<(), String> {
+    const LINKS: [&[u8]; 5] = [b"Parent", b"First", b"Last", b"Prev", b"Next"];
+    let refusal = || "A bookmark is also used by something else in the document, so the bookmarks cannot be edited safely.".to_owned();
+    let catalog = document.trailer.get(b"Root").ok().and_then(|root| root.as_reference().ok());
+    let mut visited: HashSet<ObjectId> = HashSet::new();
+    let mut pending: Vec<&Object> = document.trailer.iter().map(|(_, value)| value).collect();
+    while let Some(object) = pending.pop() {
+        match object {
+            Object::Reference(id) => {
+                if items.contains(id) { return Err(refusal()); }
+                if Some(*id) == root_id || !visited.insert(*id) { continue; }
+                let Some(target) = document.objects.get(id) else { continue };
+                match target {
+                    Object::Dictionary(dict) if Some(*id) == catalog => pending.extend(dict.iter().filter(|(key, _)| key.as_slice() != b"Outlines").map(|(_, value)| value)),
+                    other => pending.push(other),
+                }
+            }
+            Object::Array(values) => pending.extend(values.iter()),
+            Object::Dictionary(dict) => pending.extend(dict.iter().map(|(_, value)| value)),
+            Object::Stream(stream) => pending.extend(stream.dict.iter().map(|(_, value)| value)),
+            _ => {}
+        }
+    }
+    for id in items {
+        if let Some(Object::Dictionary(dict)) = document.objects.get(id) {
+            if dict.iter().any(|(key, value)| !LINKS.contains(&key.as_slice()) && matches!(value, Object::Reference(target) if items.contains(target))) { return Err(refusal()); }
+        }
+    }
+    Ok(())
 }
 
 /// Writes the entries as the document's outline. `page_object` maps a source page index to its page object,

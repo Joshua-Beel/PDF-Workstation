@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Bookmark alias refusal (SM1; branch `sm1/bookmark-editing`; `outline_edit.rs`): an outline item that is also referenced from elsewhere reachable from the trailer (AcroForm field, /Info, action, annotation) is refused on read; U+2060 and U+00AD refused in titles (source build).
 - Bookmark-editing review fixes (SM1; branch `sm1/bookmark-editing`; `outline_edit.rs`, `service.rs` DiscardRecovery, `BookmarksPanel.tsx`, `App.tsx`): a bookmark-only edit can now be discarded so the tab and window close; hostile outlines aimed at the page tree or catalog, or with a wrong `/Parent` or `/Type`, are refused on read; bidi and zero-width characters are refused in titles; checkpoint notice says bookmark edits are excluded; panel focus restored; new tests (source build; not yet re-reviewed).
 - Bookmark editing (source build): add at the current page, rename, delete with children, move up or down, indent and outdent, undo and redo; saved only into a new copy with correct outline links and counts, untouched bookmarks keep their destinations; signed, encrypted or malformed outlines refused (SM1).
 - Published 0.3.1 installer OCR check recorded: hosted run 40672496983 installed it fresh and current-page OCR on packaged welcome.pdf p1 was recognized (402 bytes); accuracy, searchable copies, real scans not verified (SM6; docs only).
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - The Open dialog is now titled "Open a PDF" (it showed the Windows default "Open"), matching the other titled native dialogs; both dialog verifiers expect it (SM3).
 - A file refused for editing by the cross-reference check now keeps the copy permission of an empty-password encrypted file (search and copy no longer bypass `/P`) (SM3).
 - Cross-reference review fixes: a file refused for editing keeps search, selection, copy and OCR; refusals need a used object; walks are bounded on stream input and offsets; raw-byte object-stream check (SM3).
-- lopdf loads now resolve objects as the cross-reference chain says (free and missing entries, hybrid `/XRefStm`); where PDFium, lopdf and the standard disagree about a used object, editing is refused (SM3).
