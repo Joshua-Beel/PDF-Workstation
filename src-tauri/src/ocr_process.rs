@@ -583,7 +583,8 @@ fn sweep_stale_job_directories(root: &Path) {
 impl JobDirectory {
     fn create() -> Result<Self, OcrProcessError> {
         let root = std::env::temp_dir();
-        sweep_stale_job_directories(&root);
+        static SWEEP: std::sync::Once = std::sync::Once::new();
+        SWEEP.call_once(|| sweep_stale_job_directories(&root));
         let mut last_error = None;
         for _ in 0..JOB_DIRECTORY_ATTEMPTS {
             let path = root.join(random_directory_name()?);
@@ -965,8 +966,17 @@ fn main() {
         let foreign = root.path().join("pdf-workstation-ocr-keep-me");
         std::fs::create_dir(&fresh).unwrap();
         std::fs::create_dir(&foreign).unwrap();
+        let stale = root.path().join(random_directory_name().unwrap());
+        let stale_foreign = root.path().join("pdf-workstation-ocr-old-but-not-ours");
+        for path in [&stale, &stale_foreign] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::write(path.join("leftover.txt"), b"x").unwrap();
+            let handle = OpenOptions::new().write(true).custom_flags(0x0200_0000).open(path).unwrap();
+            handle.set_modified(std::time::SystemTime::now() - Duration::from_secs(25 * 60 * 60)).unwrap();
+        }
         sweep_stale_job_directories(root.path());
-        assert!(fresh.exists() && foreign.exists());
+        assert!(fresh.exists() && foreign.exists() && stale_foreign.exists());
+        assert!(!stale.exists(), "a matching directory older than 24 h must be swept");
         let one = JobDirectory::create().unwrap();
         let two = JobDirectory::create().unwrap();
         assert_ne!(one.path(), two.path());
