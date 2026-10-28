@@ -62,7 +62,7 @@ pub enum PageEdit {
     Redo,
 }
 
-fn source_text_extraction_permission(document: &Document) -> Result<(), String> {
+pub(crate) fn source_text_extraction_permission(document: &Document) -> Result<(), String> {
     let permissions = if let Some(state) = document.encryption_state.as_ref() {
         state.permissions()
     } else if document.is_encrypted() {
@@ -120,6 +120,8 @@ impl EditSession {
         let owner_access = parsed.as_ref().ok().is_some_and(|document| password.is_some_and(|password| document.authenticate_owner_password(password).is_ok()));
         let text_extraction_permission = if owner_access {
             Ok(())
+        } else if parsed.as_ref().is_err_and(|error| error.as_str() == crate::xref_resolve::AMBIGUOUS) {
+            crate::xref_resolve::refused_source_permission(&source)
         } else {
             parsed.as_ref().map_err(|_| "The PDF extraction permission could not be verified.".into()).and_then(|document| source_text_extraction_permission(document))
         };

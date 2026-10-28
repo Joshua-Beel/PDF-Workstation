@@ -121,6 +121,9 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - OCR save-in-parts review fixes: Discard after some parts are saved asks first and names them, a paused job lists saved parts, crash recovery after a cross-volume copy, no junction following, free-space check before each new part (SM4).
 - Large-document OCR (source build): a copy that would pass 1 GiB can be saved in parts, `<name> (part 1 of N).pdf`, each at most 1 GiB, checked from disk and never overwriting; unit-tested with a small size limit only (SM4).
 - The Open dialog is now titled "Open a PDF" (it showed the Windows default "Open"), matching the other titled native dialogs; both dialog verifiers expect it (SM3).
+- A file refused for editing by the cross-reference check now keeps the copy permission of an empty-password encrypted file (search and copy no longer bypass `/P`) (SM3).
+- Cross-reference review fixes: a file refused for editing keeps search, selection, copy and OCR; refusals need a used object; walks are bounded on stream input and offsets; raw-byte object-stream check (SM3).
+- lopdf loads now resolve objects as the cross-reference chain says (free and missing entries, hybrid `/XRefStm`); where PDFium, lopdf and the standard disagree about a used object, editing is refused (SM3).
 - Release scripts: the `WEBDRIVER_ERROR_DIAG` sanitizer now redacts forward-slash and mixed-slash Windows paths, UNC paths and paths containing spaces to the end of the token, with negative controls and a planted-offender control for the backslash-quote scan (SM6; test/script only).
 - Large-document OCR review round 2: deterministic pause test, safer startup cleanup, Save elsewhere clears the old temp copy and never uses another document (SM4).
 - Large-document OCR review fixes: crash-safe after finalize, panics degrade one page instead of hanging, Save elsewhere, bounded final check, stale-folder cleanup (SM4).
@@ -130,6 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - Debug builds only: `SMACROBAT_TEST_DATA_DIR=<absolute folder>` puts recovery records, the update-attempt note and the WebView2 profile under that folder instead of the user profile; compiled out of release (SM5).
 - Docs: OCR packaging evidence in `docs/features.md` and `docs/ocr-feasibility.md` now cites only what `docs/releases.md` states (SM4; docs only).
 - Docs: OCR wording in `docs/features.md` and `docs/ocr-feasibility.md` now says 0.3.1 includes the engine; recognition on the published installer remains unverified (SM4; docs only).
-- OCR working-directory test accepts the hosted runner's short 8.3 temp path by comparing canonical parents exactly (SM0; test only).
-- Dependency notices inventory refreshed for the new test-only `rayon` dev-dependency; notice text unchanged (SM0).
-- OCR hardening follow-up: the stale OCR work-directory sweep runs once per process, and a test now proves it deletes a matching directory older than 24 h while sparing fresh and foreign-named ones (SM4; no version change).

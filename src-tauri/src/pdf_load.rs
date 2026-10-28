@@ -12,6 +12,8 @@
 //!    into one large object multiply the parse work without any decompression).
 //! A tripped limit makes the filter drop every later object, so nothing more is decoded or kept, and the load
 //! is refused with a message that ends "Nothing was opened."
+//! A successful load is then reconciled with the cross-reference chain as a conforming reader resolves it
+//! (`xref_resolve::reconcile`, SM3): free and absent numbers, hybrid `/XRefStm` sections, object-stream members.
 //!
 //! lopdf passes the filter no context and runs it on rayon threads, so the budget lives in process-wide
 //! atomics and `GATE` lets one budgeted load run at a time. The app's loads all run on the single PDF worker,
@@ -188,7 +190,12 @@ fn budget_filter(id: ObjectId, object: &mut Object) -> Option<(ObjectId, Object)
 }
 
 /// Loads a document source within the open-time work limits.
-pub fn load(bytes: &[u8]) -> Result<Document, LoadFailure> {
+pub fn load(bytes: &[u8]) -> Result<Document, LoadFailure> { load_limited(bytes, true) }
+
+/// lopdf's own resolution within the same limits, for the read-only checks of a source `xref_resolve` refused.
+pub(crate) fn load_unreconciled(bytes: &[u8]) -> Result<Document, LoadFailure> { load_limited(bytes, false) }
+
+fn load_limited(bytes: &[u8], reconcile: bool) -> Result<Document, LoadFailure> {
     if count_object_headers(bytes, MAX_LOAD_OBJECTS) > MAX_LOAD_OBJECTS { return Err(LoadFailure::Limit(objects_message())); }
     let _gate = GATE.lock().unwrap_or_else(PoisonError::into_inner);
     OBJECTS.store(0, Ordering::Relaxed);
@@ -198,8 +205,9 @@ pub fn load(bytes: &[u8]) -> Result<Document, LoadFailure> {
     let loaded = Document::load_mem_with_options(bytes, options);
     let reason = TRIP.swap(TRIP_NONE, Ordering::AcqRel);
     if reason != TRIP_NONE { return Err(LoadFailure::Limit(trip_message(reason))); }
-    let document = loaded.map_err(|error| LoadFailure::Parse(error.to_string()))?;
+    let mut document = loaded.map_err(|error| LoadFailure::Parse(error.to_string()))?;
     if document.objects.len() > MAX_LOAD_OBJECTS { return Err(LoadFailure::Limit(objects_message())); }
+    if reconcile { crate::xref_resolve::reconcile(&mut document, bytes).map_err(LoadFailure::Parse)?; }
     Ok(document)
 }
 
