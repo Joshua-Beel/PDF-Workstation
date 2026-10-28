@@ -51,6 +51,7 @@ $script:UpdatePins = [ordered]@{
     UpdateCheckDeadlineSeconds = 45
     FailedDownloadDeadlineSeconds = 135
     InstallDeadlineSeconds = 180
+    UpdaterSetupExitDeadlineSeconds = 60
     InstallerDeadlineMilliseconds = 180000
 }
 
@@ -570,6 +571,32 @@ function Test-ShellWindowPresent {
     return [SmacrobatUpdateShellProbe]::GetShellWindow() -ne [IntPtr]::Zero
 }
 
+function Get-UpdaterSetupProcesses {
+    param([Parameter(Mandatory = $true)][datetime]$StartedAfter,[Parameter(Mandatory = $true)][AllowEmptyString()][string[]]$TempRoots,[scriptblock]$SnapshotProvider)
+    $roots = @($TempRoots | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\') + '\' } | Sort-Object -Unique)
+    if ($roots.Count -eq 0) { throw 'No temporary root is available for updater setup detection.' }
+    $all = @(if ($SnapshotProvider) { & $SnapshotProvider } else { Get-CimInstance Win32_Process -ErrorAction Stop })
+    $boundary = $StartedAfter.ToUniversalTime().AddSeconds(-2)
+    return @($all | Where-Object {
+        $path = [string]$_.ExecutablePath
+        $created = $_.CreationDate
+        -not [string]::IsNullOrWhiteSpace($path) -and $null -ne $created -and ([datetime]$created).ToUniversalTime() -ge $boundary -and
+        $path.EndsWith('.exe',[StringComparison]::OrdinalIgnoreCase) -and
+        @($roots | Where-Object { $path.StartsWith($_,[StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+    })
+}
+
+function Wait-UpdaterSetupExit {
+    param([Parameter(Mandatory = $true)][datetime]$StartedAfter,[Parameter(Mandatory = $true)][AllowEmptyString()][string[]]$TempRoots,[Parameter(Mandatory = $true)][datetime]$Deadline,[scriptblock]$SnapshotProvider)
+    do {
+        $remaining = @(Get-UpdaterSetupProcesses -StartedAfter $StartedAfter -TempRoots $TempRoots -SnapshotProvider $SnapshotProvider)
+        if ($remaining.Count -eq 0) { return }
+        Start-Sleep -Milliseconds 250
+    } while ([datetime]::UtcNow -lt $Deadline)
+    $names = @($remaining | ForEach-Object { [IO.Path]::GetFileName([string]$_.ExecutablePath) -replace '[^A-Za-z0-9 ._-]','?' } | Sort-Object -Unique)
+    throw ('Updater setup processes did not exit before the post-update check: count=' + $remaining.Count + ', names=' + ($names -join '|') + '.')
+}
+
 function Resolve-AutomaticRelaunch {
     param([bool]$Observed,[bool]$ShellWindowBeforeUpdate,[bool]$ShellWindowAtRelaunch)
     if ($Observed) { return [ordered]@{ observed = $true; verified = $true; notObservedReason = $null } }
@@ -764,6 +791,7 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
     } while ([datetime]::UtcNow -lt $installDeadline)
     $shellWindowAtRelaunch = Test-ShellWindowPresent
     $relaunchOutcome = Resolve-AutomaticRelaunch -Observed ($null -ne $automaticRelaunch) -ShellWindowBeforeUpdate $shellWindowBeforeUpdate -ShellWindowAtRelaunch $shellWindowAtRelaunch
+    Wait-UpdaterSetupExit -StartedAfter $retryStarted -TempRoots @([string]$env:TEMP,[IO.Path]::GetTempPath(),(Join-Path $env:LOCALAPPDATA 'Temp')) -Deadline ([datetime]::UtcNow.AddSeconds($script:UpdatePins.UpdaterSetupExitDeadlineSeconds))
     Stop-ExactProcesses -ApplicationPath ([string]$upgraded.appPath)
     Stop-WebDriverSession -Session $session
     $session = $null
@@ -856,7 +884,7 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
             publisherUiScreenshotsUsed = $false; standaloneSignedInstallerRepairVerified = $true
             partialByteDownloadInterruptionVerified = $false; appKillMidDownloadVerified = $false
             installerStageInterruptionVerified = $false; installerTransactionalityVerified = $false
-            firewallRuleRemoved = $true; relevantApplicationProcessesRemaining = 0
+            firewallRuleRemoved = $true; updaterSetupExitVerified = $true; relevantApplicationProcessesRemaining = 0
         }
     }
     $json = $record | ConvertTo-Json -Depth 12

@@ -267,6 +267,34 @@ public sealed class InAppRecordingHandler : HttpMessageHandler {
     expect(launch).toContain('TotalTimeoutMilliseconds = 60000');
   });
 
+  it('waits a bounded time for updater setup processes to exit before the post-update session', () => {
+    const script = readFileSync(scriptPath, 'utf8');
+    const wait = script.indexOf('    Wait-UpdaterSetupExit -StartedAfter $retryStarted');
+    expect(wait).toBeGreaterThan(script.indexOf('$relaunchOutcome = Resolve-AutomaticRelaunch'));
+    expect(wait).toBeLessThan(script.indexOf('$postSession = Start-WebDriverSession'));
+    expect(script).toContain("-TempRoots @([string]$env:TEMP,[IO.Path]::GetTempPath(),(Join-Path $env:LOCALAPPDATA 'Temp'))");
+    expect(script).toContain('UpdaterSetupExitDeadlineSeconds = 60');
+    expect(script).toContain('updaterSetupExitVerified = $true');
+    const source = verifierHarness(['Get-UpdaterSetupProcesses', 'Wait-UpdaterSetupExit'], String.raw`
+      $start=[datetime]::UtcNow
+      $temp='C:\Users\runner\AppData\Local\Temp'
+      $old=[pscustomobject]@{ExecutablePath=$temp+'\old-setup.exe';CreationDate=$start.AddMinutes(-5)}
+      $app=[pscustomobject]@{ExecutablePath='C:\Users\runner\AppData\Local\PDF Workstation\pdf-workstation.exe';CreationDate=$start.AddSeconds(5)}
+      $sibling=[pscustomobject]@{ExecutablePath='C:\Users\runner\AppData\Local\Temp2\x.exe';CreationDate=$start.AddSeconds(5)}
+      $setup=[pscustomobject]@{ExecutablePath=$temp+'\PDF Workstation-0.3.1-updater-abc\PDF Workstation-0.3.1-installer.exe';CreationDate=$start.AddSeconds(3)}
+      $found=@(Get-UpdaterSetupProcesses -StartedAfter $start -TempRoots @($temp,'') -SnapshotProvider {@($old,$app,$sibling,$setup)}.GetNewClosure())
+      if($found.Count-ne1-or$found[0]-ne$setup){throw 'Updater setup detection is not exact.'}
+      $calls=[ref]0
+      Wait-UpdaterSetupExit -StartedAfter $start -TempRoots @($temp) -Deadline ([datetime]::UtcNow.AddSeconds(10)) -SnapshotProvider {$calls.Value++;if($calls.Value-lt3){@($setup)}else{@($old,$app)}}.GetNewClosure()
+      if($calls.Value-ne3){throw 'Wait did not poll until the setup process exited.'}
+      $message='';try{Wait-UpdaterSetupExit -StartedAfter $start -TempRoots @($temp) -Deadline ([datetime]::UtcNow.AddMilliseconds(600)) -SnapshotProvider {@($setup)}.GetNewClosure()}catch{$message=$_.Exception.Message}
+      if($message-cne'Updater setup processes did not exit before the post-update check: count=1, names=PDF Workstation-0.3.1-installer.exe.'){throw ('Remaining setup process was not reported exactly: '+$message)}
+      if($message.Contains('Users')){throw 'Remaining setup diagnostic leaked a path.'}
+    `);
+    const result = spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', source], { encoding: 'utf8', timeout: 30_000 });
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
   it('fails the main flow on incomplete WebDriver cleanup but keeps error-path cleanup best effort', () => {
     const script = readFileSync(scriptPath, 'utf8');
     expect(script).toContain('$stopped = Stop-OwnedLaunchProcesses -TauriDriver $Session.Driver');
