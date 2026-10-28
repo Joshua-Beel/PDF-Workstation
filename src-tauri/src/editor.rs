@@ -1089,4 +1089,34 @@ mod tests {
         let mut bytes=Vec::new(); document.save_to(&mut bytes).unwrap();
         assert!(EditSession::new(bytes,6).export(None).is_err());
     }
+    fn nested_pdf(depth: usize, dictionaries: bool) -> Vec<u8> {
+        let (open, close) = if dictionaries { ("<< /K ", " >>") } else { ("[", "]") };
+        let deep = format!("{}4 0 R{}", open.repeat(depth), close.repeat(depth));
+        let bodies = ["<< /Type /Catalog /Pages 2 0 R >>".to_string(), "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 200 200] >>".into(), "<< /Type /Page /Parent 2 0 R /Resources << >> /Deep 5 0 R >>".into(), "<< /Type /Page /Parent 2 0 R /Resources << >> >>".into(), deep];
+        let mut pdf = b"%PDF-1.7\n".to_vec(); let mut offsets = Vec::new();
+        for (index, body) in bodies.iter().enumerate() { offsets.push(pdf.len()); pdf.extend(format!("{} 0 obj\n{body}\nendobj\n", index + 1).bytes()); }
+        let xref = pdf.len(); pdf.extend(format!("xref\n0 {}\n0000000000 65535 f \n", bodies.len() + 1).bytes());
+        for offset in offsets { pdf.extend(format!("{offset:010} 00000 n \n").bytes()); }
+        pdf.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", bodies.len() + 1).bytes()); pdf
+    }
+    fn nesting(object: &Object) -> usize { match object { Object::Array(values) => 1 + values.iter().map(nesting).max().unwrap_or(0), Object::Dictionary(dict) => 1 + dict.iter().map(|(_, value)| nesting(value)).max().unwrap_or(0), _ => 0 } }
+    #[test]
+    fn hostile_nesting_depth_is_bounded_by_the_parser_and_save_copy_survives_a_small_stack() {
+        std::thread::Builder::new().stack_size(512 * 1024).spawn(|| {
+            for dictionaries in [false, true] {
+                let loaded = |depth| crate::pdf_load::load(&nested_pdf(depth, dictionaries)).ok().and_then(|document| document.objects.get(&(5, 0)).map(nesting));
+                assert_eq!(loaded(100), Some(100), "lopdf 0.45 accepts 100 levels of direct nesting");
+                assert_eq!(loaded(101), None, "lopdf 0.45 must refuse a 101-level object; a parser upgrade that drops MAX_NESTING_DEPTH reopens unbounded recursion in null_references::scrub and the other Object walkers");
+                let export = EditSession::new(nested_pdf(100, dictionaries), 2).export(Some(&[0])).unwrap();
+                let copy = Document::load_mem(&export).unwrap();
+                assert_eq!(copy.get_pages().len(), 1);
+                let mut deepest = copy.objects.values().map(nesting).max().unwrap();
+                assert!(deepest >= 100, "the deep object survives the save-copy");
+                let mut value = copy.objects.values().find(|object| nesting(object) == deepest).unwrap();
+                while deepest > 0 { value = match value { Object::Array(values) => &values[0], Object::Dictionary(dict) => dict.get(b"K").unwrap(), _ => unreachable!() }; deepest -= 1; }
+                assert_eq!(value, &Object::Null, "scrub reached the bottom and nulled the removed page reference");
+                for depth in [101, 100_000] { let _ = EditSession::new(nested_pdf(depth, dictionaries), 2).export(Some(&[0])); }
+            }
+        }).unwrap().join().unwrap();
+    }
 }
