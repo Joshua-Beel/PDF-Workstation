@@ -38,6 +38,9 @@ mod searchable_pdf;
 #[cfg(windows)]
 mod searchable_ocr_job;
 mod data_dirs;
+#[cfg(windows)]
+#[cfg_attr(not(test), allow(dead_code))]
+mod searchable_pdf_stream;
 mod update_attempt;
 mod update_commands;
 #[cfg(windows)]

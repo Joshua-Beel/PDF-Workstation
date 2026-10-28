@@ -10,10 +10,10 @@ pub const MAX_SEARCHABLE_OUTPUT_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_SEARCHABLE_WORD_CHARS: usize = 512;
 pub const MAX_SEARCHABLE_DISTINCT_CHARS: usize = 8_192;
 
-const FONT_NAME: &str = "InvisibleOcrText";
-const GLYPH_ADVANCE: i64 = 500;
-const FONT_ASCENT: i64 = 800;
-const FONT_DESCENT: i64 = -200;
+pub(crate) const FONT_NAME: &str = "InvisibleOcrText";
+pub(crate) const GLYPH_ADVANCE: i64 = 500;
+pub(crate) const FONT_ASCENT: i64 = 800;
+pub(crate) const FONT_DESCENT: i64 = -200;
 
 /// Characters the invisible text layer accepts: any Unicode scalar value the
 /// engine emits except controls, whitespace (words are already split),
@@ -144,7 +144,7 @@ fn validate_pages(pages: &[SearchableRasterPage]) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_word(word: &SearchableWord, page_width: f64, page_height: f64, page: usize) -> Result<(), String> {
+pub(crate) fn validate_word(word: &SearchableWord, page_width: f64, page_height: f64, page: usize) -> Result<(), String> {
     if !word.x.is_finite()
         || !word.y.is_finite()
         || !word.width.is_finite()
@@ -317,7 +317,7 @@ fn add_invisible_font(document: &mut Document, ids: &CharacterIds) -> Result<lop
     }))
 }
 
-fn to_unicode_cmap(characters: &[char]) -> String {
+pub(crate) fn to_unicode_cmap(characters: &[char]) -> String {
     use std::fmt::Write;
     let mut cmap = String::from(
         "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
@@ -347,7 +347,7 @@ fn to_unicode_cmap(characters: &[char]) -> String {
 /// never paints; it exists so viewers give each character, including a
 /// one-character word, a non-empty box (PDFium drops a text object whose only
 /// glyph has no outline). The characters come only from /ToUnicode.
-fn glyphless_truetype() -> Vec<u8> {
+pub(crate) fn glyphless_truetype() -> Vec<u8> {
     fn be16(out: &mut Vec<u8>, values: &[i32]) {
         for value in values {
             out.extend_from_slice(&(*value as u16).to_be_bytes());
