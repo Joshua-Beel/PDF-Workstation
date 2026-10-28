@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- In-app update check: tauri-driver start moved inside the session try, so a start failure is cleaned up and reported as itself (SM6; review P3).
 - In-app update check: 7-Zip and the standalone silent installers run with the shared minimal environment, as tauri-driver already does (SM6; review P3).
 - In-app update check: before the post-update session, waits up to 60 s for updater setup processes started from temp after the retry to exit, and fails if any remain (SM6; review P3).
 - In-app update check: a WebDriver session stop in the main flow now fails if the driver or any owned process did not exit; error-path cleanup stays best effort (SM6; review P3).

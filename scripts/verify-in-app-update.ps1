@@ -415,9 +415,10 @@ function Start-WebDriverSession {
     $deadline = [datetime]::UtcNow.AddMilliseconds($script:LaunchPins.TotalTimeoutMilliseconds)
     $startedAfter = [datetime]::UtcNow
     $driverCapture = Start-BoundedDiscardProcess -Path $TauriDriverPath -Arguments @("--port=$($script:LaunchPins.WebDriverPort)","--native-port=$($script:LaunchPins.NativeDriverPort)","--native-driver=$EdgeDriverPath") -Environment (Get-MinimalWindowsProcessEnvironment)
-    $driverCapture.Start(); $driver = $driverCapture.Process
+    $driver = $driverCapture.Process
     $sessionId = $null
     try {
+        $driverCapture.Start()
         $status = $null
         do {
             try { $status = Invoke-BoundedLoopbackJson -Method GET -Path '/status' -Deadline $deadline } catch { }
@@ -437,8 +438,9 @@ function Start-WebDriverSession {
         $ownedApp = Wait-OwnedUpdateApplication -Driver $driver -StartedAfter $startedAfter -ApplicationPath $ApplicationPath -Deadline $deadline
         return [pscustomobject]@{ DriverCapture = $driverCapture; Driver = $driver; SessionId = $sessionId; StartedAfter = $startedAfter; Captured = @($ownedApp.Owned); ApplicationProcessId = [int]$ownedApp.ProcessId; ApplicationProcessStartUtcTicks = [long]$ownedApp.ProcessStartUtcTicks }
     } catch {
-        Stop-WebDriverSession -Session ([pscustomobject]@{ DriverCapture = $driverCapture; Driver = $driver; SessionId = $sessionId; StartedAfter = $startedAfter; Captured = @() }) -AllowIncomplete
-        throw
+        $startFailure = $_
+        try { Stop-WebDriverSession -Session ([pscustomobject]@{ DriverCapture = $driverCapture; Driver = $driver; SessionId = $sessionId; StartedAfter = $startedAfter; Captured = @() }) -AllowIncomplete } catch { try { $driverCapture.Dispose() } catch { } }
+        throw $startFailure
     }
 }
 

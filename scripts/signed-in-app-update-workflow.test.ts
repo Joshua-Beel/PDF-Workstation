@@ -318,7 +318,19 @@ public sealed class InAppRecordingHandler : HttpMessageHandler {
     expect(script.match(/^\s+Stop-WebDriverSession -Session \$(session|postSession)\r?$/gm)).toHaveLength(2);
     expect(script).toContain('try { Stop-WebDriverSession -Session $postSession -AllowIncomplete } catch { }');
     expect(script).toContain('try { Stop-WebDriverSession -Session $session -AllowIncomplete } catch { }');
-    expect(script).toMatch(/Captured = @\(\) \}\) -AllowIncomplete\r?\n\s+throw/);
+    expect(script).toMatch(/\$startFailure = \$_\r?\n\s+try \{ Stop-WebDriverSession -Session \(\[pscustomobject\]@\{[^\n]*Captured = @\(\) \}\) -AllowIncomplete \} catch \{ try \{ \$driverCapture\.Dispose\(\) \} catch \{ \} \}\r?\n\s+throw \$startFailure/);
+    expect(script).toMatch(/\$driver = \$driverCapture\.Process\r?\n\s+\$sessionId = \$null\r?\n\s+try \{\r?\n\s+\$driverCapture\.Start\(\)/);
+    expect(script).not.toContain('$driverCapture.Start(); $driver');
+    const startFailure = verifierHarness(['Start-WebDriverSession', 'Stop-WebDriverSession', 'Assert-WebDriverSessionStopped'], String.raw`
+      $script:UpdatePins=[ordered]@{PortHandoffTimeoutMilliseconds=5000}
+      $profileDir=Join-Path (Resolve-Path target) ('in-app-start-failure-'+[Guid]::NewGuid().ToString('N'))
+      try{
+        $message='';try{$null=Start-WebDriverSession -ApplicationPath 'C:\absent\pdf-workstation.exe' -TauriDriverPath (Join-Path $profileDir 'missing-tauri-driver.exe') -EdgeDriverPath 'C:\absent\msedgedriver.exe' -ExpectedEdgeDriverVersion '1.2.3.4' -ProfileRoot $profileDir}catch{$message=$_.Exception.Message}
+        if(-not$message.Contains('start process')){throw ('The driver start failure was replaced by a cleanup error: '+$message)}
+      } finally { Remove-Item -LiteralPath $profileDir -Recurse -Force -ErrorAction SilentlyContinue }
+    `, '. ./scripts/installed-app-launch.ps1');
+    const started = spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', startFailure], { encoding: 'utf8', timeout: 30_000 });
+    expect(started.status, started.stderr || started.stdout).toBe(0);
     const source = verifierHarness(['Assert-WebDriverSessionStopped'], String.raw`
       function New-Outcome($root,$app='all-exited'){[pscustomobject]@{rootOutcome=$root;application=$app;tauriDriver='absent';edgeDriver='all-exited';webview='all-exited';ocrEngine='absent';other='absent'}}
       foreach($root in @('already-exited','tree-kill-exited','fallback-exited')){Assert-WebDriverSessionStopped -Outcome (New-Outcome $root)}
