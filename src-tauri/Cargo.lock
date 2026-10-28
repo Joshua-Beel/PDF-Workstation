@@ -2931,6 +2931,7 @@ dependencies = [
  "minisign-verify",
  "pdfium-render",
  "png 0.18.1",
+ "rayon",
  "rfd",
  "semver",
  "serde",

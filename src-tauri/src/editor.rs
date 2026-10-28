@@ -1101,9 +1101,22 @@ mod tests {
     }
     fn nesting(object: &Object) -> usize { match object { Object::Array(values) => 1 + values.iter().map(nesting).max().unwrap_or(0), Object::Dictionary(dict) => 1 + dict.iter().map(|(_, value)| nesting(value)).max().unwrap_or(0), _ => 0 } }
     #[test]
-    fn hostile_nesting_depth_is_bounded_by_the_parser_and_save_copy_survives_a_small_stack() {
-        std::thread::Builder::new().stack_size(512 * 1024).spawn(|| {
+    fn hostile_nesting_depth_is_bounded_by_the_parser_and_save_copy_fits_the_production_stack() {
+        // lopdf parses on rayon pool threads and pdf-worker parses trailers and content; both run on the 2 MiB
+        // std default. Measured peak at 100 levels: ~1.95 MiB debug, <= 259 KiB release. Run everything on a
+        // private pool: release at a quarter of production (asserts >= 4x margin), debug at twice production.
+        const PRODUCTION_STACK: usize = 2 * 1024 * 1024;
+        let stack = if cfg!(debug_assertions) { PRODUCTION_STACK * 2 } else { PRODUCTION_STACK / 4 };
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).stack_size(stack).thread_name(|index| format!("sm7-nesting-{index}")).build().unwrap();
+        pool.install(|| {
+            let wrap = |depth: usize, dictionaries: bool, leaf: &str| { let (open, close) = if dictionaries { ("<< /K ", " >>") } else { ("[", "]") }; format!("{}{leaf}{}", open.repeat(depth), close.repeat(depth)) };
             for dictionaries in [false, true] {
+                let trailer = String::from_utf8(nested_pdf(1, dictionaries)).unwrap().replace("/Root 1 0 R >>", &format!("/Root 1 0 R /Deep {} >>", wrap(99, dictionaries, "1")));
+                let mut document = crate::pdf_load::load(trailer.as_bytes()).unwrap();
+                assert_eq!(nesting(&Object::Dictionary(document.trailer.clone())), 100, "the trailer parses on the calling thread");
+                document.save_to(&mut Vec::new()).unwrap();
+                assert_eq!(lopdf::content::Content::decode(format!("{} Tj", wrap(100, dictionaries, "1")).as_bytes()).unwrap().operations.len(), 1);
+                let _ = lopdf::content::Content::decode(format!("{} Tj", wrap(100_000, dictionaries, "1")).as_bytes());
                 let loaded = |depth| crate::pdf_load::load(&nested_pdf(depth, dictionaries)).ok().and_then(|document| document.objects.get(&(5, 0)).map(nesting));
                 assert_eq!(loaded(100), Some(100), "lopdf 0.45 accepts 100 levels of direct nesting");
                 assert_eq!(loaded(101), None, "lopdf 0.45 must refuse a 101-level object; a parser upgrade that drops MAX_NESTING_DEPTH reopens unbounded recursion in null_references::scrub and the other Object walkers");
@@ -1117,6 +1130,6 @@ mod tests {
                 assert_eq!(value, &Object::Null, "scrub reached the bottom and nulled the removed page reference");
                 for depth in [101, 100_000] { let _ = EditSession::new(nested_pdf(depth, dictionaries), 2).export(Some(&[0])); }
             }
-        }).unwrap().join().unwrap();
+        });
     }
 }

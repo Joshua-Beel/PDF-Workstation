@@ -11,6 +11,7 @@ sha2 = "0.10.9"
 
 [dev-dependencies]
 serde_json = "1"
+rayon = "=1.12.0"
 
 [dependencies]
 tauri = { version = "2", features = [] }
