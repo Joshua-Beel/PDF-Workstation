@@ -479,7 +479,10 @@ pub(crate) fn remove_page_references(document: &mut Document, mut removed: HashS
     let first_removed = |array: &Object| matches!(array.as_array().ok().and_then(|array| array.first()), Some(Object::Reference(id)) if removed.contains(id));
     let dead_arrays: HashSet<ObjectId> = document.objects.iter().filter(|(_, object)| first_removed(object)).map(|(id, _)| *id).collect();
     let targets_removed = |destination: &Object| match destination { Object::Reference(id) => dead_arrays.contains(id), other => first_removed(other) };
-    let goto_removed = |action: &lopdf::Dictionary| action.get(b"S").and_then(Object::as_name).is_ok_and(|name| name == b"GoTo") && action.get(b"D").is_ok_and(targets_removed);
+    // `/S` may be a reference to the name, which PDFium follows too (SM7 P3-1).
+    let goto_names: HashSet<ObjectId> = document.objects.keys().copied().filter(|id| crate::named_dests::is_goto_name(document, &Object::Reference(*id))).collect();
+    let goto = |action: &lopdf::Dictionary| match action.get(b"S") { Ok(Object::Reference(id)) => goto_names.contains(id), Ok(name) => name.as_name().is_ok_and(|name| name == b"GoTo"), Err(_) => false };
+    let goto_removed = |action: &lopdf::Dictionary| goto(action) && action.get(b"D").is_ok_and(targets_removed);
     let dead_actions: HashSet<ObjectId> = document.objects.iter().filter(|(_, object)| object.as_dict().is_ok_and(goto_removed)).map(|(id, _)| *id).collect();
     let mut dead_links = Vec::new();
     for (id, object) in document.objects.iter_mut() {

@@ -136,7 +136,7 @@ fn destination_page(document: &Document, dict: &lopdf::Dictionary, pages: &HashM
     if let Ok(dest) = dict.get(b"Dest") { return array_page(dest); }
     let (_, action) = document.dereference(dict.get(b"A").ok()?).ok()?;
     let action = action.as_dict().ok()?;
-    if action.get(b"S").ok()?.as_name().ok()? != b"GoTo" { return None; }
+    if !crate::named_dests::is_goto(document, action) { return None; }
     array_page(action.get(b"D").ok()?)
 }
 
@@ -248,7 +248,7 @@ fn retarget_page_number(document: &Document, dict: &mut lopdf::Dictionary, page:
         return;
     }
     let Some(action) = dict.get(b"A").ok().and_then(|action| document.dereference(action).ok()).and_then(|(_, action)| action.as_dict().ok()) else { return };
-    if !action.get(b"S").and_then(Object::as_name).is_ok_and(|name| name == b"GoTo") { return; }
+    if !crate::named_dests::is_goto(document, action) { return; }
     let Some(fixed) = action.get(b"D").ok().and_then(|dest| crate::named_dests::with_page_reference(document, dest, page, page_count)) else { return };
     let mut action = action.clone(); action.set("D", fixed);
     dict.set("A", Object::Dictionary(action));

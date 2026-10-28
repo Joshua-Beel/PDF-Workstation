@@ -62,6 +62,7 @@ fn fixture() -> lopdf::Document {
     assert_eq!(p.len(), 6);
     let tree_p1 = document.add_object(fit(p[1]));
     let four = document.add_object(Object::Integer(4));
+    let goto_name = document.add_object(Object::Name(b"GoTo".to_vec()));
     let goto_b = document.add_object(dictionary! { "S" => "GoTo", "D" => string("tree-p1") });
     let mut d = node("D", Target::Dest(fit(p[5])), vec![node("D1", Target::Dest(fit(p[3])), vec![])]);
     d.closed = true;
@@ -87,6 +88,8 @@ fn fixture() -> lopdf::Document {
         node("I", Target::Dest(Object::Array(vec![Object::Integer(3)])), vec![]),
         node("J", Target::Dest(Object::Array(vec![Object::Reference(four), Object::Name(b"Fit".to_vec())])), vec![]),
         node("K", Target::Dest(Object::Name(b"Real-p5".to_vec())), vec![]),
+        node("L", Target::Action(Object::Dictionary(dictionary! { "S" => Object::Reference(goto_name), "D" => fit_n(1) })), vec![]),
+        node("M", Target::Action(Object::Dictionary(dictionary! { "S" => Object::Reference(goto_name), "D" => fit(p[4]) })), vec![]),
     ]);
     let dests = document.add_object(dictionary! { "Named-p3" => fit(p[3]), "Named-p1" => dictionary! { "D" => fit(p[1]) }, "Int-p4" => fit_n(4), "Int-p2" => dictionary! { "D" => fit_n(2) }, "Real-p5" => vec![Object::Real(5.5), "XYZ".into(), Object::Null, Object::Null, Object::Null] });
     let leaf1 = document.add_object(dictionary! { "Limits" => vec![string("tree-int-p0"), string("tree-p2")], "Names" => vec![string("tree-int-p0"), fit_n(0), string("tree-p1"), Object::Reference(tree_p1), string("tree-p2"), fit(p[2])] });
@@ -132,6 +135,13 @@ fn has_title(document: &lopdf::Document, title: &str) -> bool {
     document.objects.values().any(|object| object.as_dict().ok().and_then(|dict| dict.get(b"Title").ok()).and_then(|value| lopdf::decode_text_string(value).ok()).as_deref() == Some(title))
 }
 
+/// What PDFium reports for `rows`. Its action type is read with `GetNameFor("S")`, which does not follow a
+/// reference, so the bundled PDFium gives no page for L and M (an `/S` that is a reference to `/GoTo`). The
+/// copy handles them as GoTo anyway (SM7 P3-1): other readers may follow the reference.
+fn as_pdfium_reads(rows: &[Row]) -> Vec<Row> {
+    rows.iter().map(|(title, depth, page)| (title.clone(), *depth, if title == "L" || title == "M" { None } else { *page })).collect()
+}
+
 /// Saves `info` to `name`, reloads it with lopdf and PDFium, checks both agree, and returns both readings.
 fn saved(service: &PdfService, info: &DocumentInfo, folder: &Path, name: &str, pages: Option<Vec<usize>>) -> (lopdf::Document, Vec<Row>, Vec<String>) {
     let path = folder.join(name);
@@ -141,7 +151,7 @@ fn saved(service: &PdfService, info: &DocumentInfo, folder: &Path, name: &str, p
     let rows = lopdf_rows(&copy);
     let labels = lopdf_labels(&copy);
     let reopened = open(service, &path);
-    assert_eq!(pdfium_rows(service, &reopened), rows, "PDFium and lopdf must read the same bookmarks in {name}");
+    assert_eq!(pdfium_rows(service, &reopened), as_pdfium_reads(&rows), "PDFium and lopdf must read the same bookmarks in {name}");
     assert_eq!(pdfium_labels(service, &reopened), labels, "PDFium and lopdf must read the same page labels in {name}");
     (copy, rows, labels)
 }
@@ -156,9 +166,9 @@ fn delete_move_and_extract_keep_bookmarks_named_destinations_and_labels_on_their
     let original = lopdf::Document::load(&source).unwrap();
     let h = original.objects.values().filter_map(|object| object.as_dict().ok()).find(|dict| dict.get(b"Title").ok().and_then(|title| lopdf::decode_text_string(title).ok()).as_deref() == Some("H")).unwrap();
     assert!(matches!(h.get(b"Dest").unwrap().as_array().unwrap()[0], Object::Real(_)), "the saved fixture keeps a real page number");
-    let all = vec![row("A", 0, Some(0)), row("A1", 1, Some(1)), row("A1a", 2, Some(2)), row("A2", 1, Some(3)), row("B", 0, Some(1)), row("B1", 1, Some(4)), row("B2", 1, Some(5)), row("C", 0, None), row("D", 0, Some(5)), row("D1", 1, Some(3)), row("E", 0, Some(3)), row("E2", 1, Some(0)), row("F", 0, Some(1)), row("F1", 1, Some(4)), row("G", 0, Some(2)), row("H", 0, Some(2)), row("I", 0, Some(3)), row("J", 0, Some(4)), row("K", 0, Some(5))];
+    let all = vec![row("A", 0, Some(0)), row("A1", 1, Some(1)), row("A1a", 2, Some(2)), row("A2", 1, Some(3)), row("B", 0, Some(1)), row("B1", 1, Some(4)), row("B2", 1, Some(5)), row("C", 0, None), row("D", 0, Some(5)), row("D1", 1, Some(3)), row("E", 0, Some(3)), row("E2", 1, Some(0)), row("F", 0, Some(1)), row("F1", 1, Some(4)), row("G", 0, Some(2)), row("H", 0, Some(2)), row("I", 0, Some(3)), row("J", 0, Some(4)), row("K", 0, Some(5)), row("L", 0, Some(1)), row("M", 0, Some(4))];
     assert_eq!(lopdf_rows(&original), all, "the reader resolves direct, GoTo, /Dests and name-tree destinations");
-    assert_eq!(pdfium_rows(&service, &info), all, "PDFium follows page-number destinations as page indexes");
+    assert_eq!(pdfium_rows(&service, &info), as_pdfium_reads(&all), "PDFium follows page-number destinations as page indexes");
     assert_eq!(pdfium_labels(&service, &info), ["i", "ii", "P-1", "P-2", "P-3", "A"]);
 
     let deleted = direct(&service, |reply| Request::Edit(info.id, PageEdit::Delete { pages: vec![1, 4] }, reply)).unwrap();
@@ -170,7 +180,7 @@ fn delete_move_and_extract_keep_bookmarks_named_destinations_and_labels_on_their
     assert_eq!(names(&copy), vec![("Int-p2".into(), Some(1)), ("Named-p3".into(), Some(2)), ("Real-p5".into(), Some(3)), ("tree-int-p0".into(), Some(0)), ("tree-p2".into(), Some(1)), ("tree-p5".into(), Some(3))], "named destinations to removed pages are dropped");
     assert_eq!(copy.get_pages().len(), 4);
     assert!(!crate::named_dests::page_number_destination_left(&copy, 6), "page numbers are turned into page references");
-    for title in ["A1", "B", "B1", "F", "F1", "J"] { assert!(!has_title(&copy, title), "the dropped bookmark {title} is pruned from the copy"); }
+    for title in ["A1", "B", "B1", "F", "F1", "J", "L", "M"] { assert!(!has_title(&copy, title), "the dropped bookmark {title} is pruned from the copy"); }
     assert_eq!(copy.objects.values().filter(|object| object.as_dict().is_ok_and(|dict| dict.get(b"Type").and_then(Object::as_name).is_ok_and(|kind| kind == b"Page"))).count(), 4, "removed pages are pruned");
     assert!(!copy.objects.values().any(|object| object.as_array().is_ok_and(|array| matches!(array.first(), Some(Object::Null)))), "no destination is left pointing at null");
 
@@ -178,7 +188,7 @@ fn delete_move_and_extract_keep_bookmarks_named_destinations_and_labels_on_their
     let moved = { assert!(!moved.dirty); direct(&service, |reply| Request::Edit(moved.id, PageEdit::Move { from: 0, to: 5 }, reply)).unwrap() };
     let (copy, rows, labels) = saved(&service, &moved, folder.path(), "moved.pdf", None);
     assert_eq!(rows, vec![row("A", 0, Some(5)), row("A1", 1, Some(0)), row("A1a", 2, Some(1)), row("A2", 1, Some(2)), row("B", 0, Some(0)), row("B1", 1, Some(3)), row("B2", 1, Some(4)), row("C", 0, None), row("D", 0, Some(4)), row("D1", 1, Some(2)),
-        row("E", 0, Some(2)), row("E2", 1, Some(5)), row("F", 0, Some(0)), row("F1", 1, Some(3)), row("G", 0, Some(1)), row("H", 0, Some(1)), row("I", 0, Some(2)), row("J", 0, Some(3)), row("K", 0, Some(4))], "page-number bookmarks follow their pages on a move");
+        row("E", 0, Some(2)), row("E2", 1, Some(5)), row("F", 0, Some(0)), row("F1", 1, Some(3)), row("G", 0, Some(1)), row("H", 0, Some(1)), row("I", 0, Some(2)), row("J", 0, Some(3)), row("K", 0, Some(4)), row("L", 0, Some(0)), row("M", 0, Some(3))], "page-number bookmarks follow their pages on a move");
     assert_eq!(names(&copy), vec![("Int-p2".into(), Some(1)), ("Int-p4".into(), Some(3)), ("Named-p1".into(), Some(0)), ("Named-p3".into(), Some(2)), ("Real-p5".into(), Some(4)), ("tree-int-p0".into(), Some(5)), ("tree-p1".into(), Some(0)), ("tree-p2".into(), Some(1)), ("tree-p5".into(), Some(4))]);
     assert!(!crate::named_dests::page_number_destination_left(&copy, 6));
     assert_eq!(labels, ["ii", "P-1", "P-2", "P-3", "A", "i"], "a moved page keeps its label");
@@ -233,7 +243,7 @@ fn hostile_or_unsupported_references_still_refuse_page_removal_and_leave_the_ses
     refused(&mut aliased, delete(), "also used by something else");
 
     let mut shared = fixture();
-    let (a1, d) = (title(&shared, "A1"), title(&shared, "K"));
+    let (a1, d) = (title(&shared, "A1"), title(&shared, "M"));
     shared.get_dictionary_mut(a1).unwrap().set("First", d);
     shared.get_dictionary_mut(a1).unwrap().set("Last", d);
     shared.get_dictionary_mut(d).unwrap().remove(b"Parent");
@@ -277,6 +287,12 @@ fn hostile_or_unsupported_references_still_refuse_page_removal_and_leave_the_ses
     let error = session.apply(PageEdit::Move { from: 0, to: 1 }).unwrap_err();
     assert!(error.contains("by its number"), "a page-number destination this copy cannot update refuses the move: {error}");
     assert_eq!(session.revision, 0); assert_eq!(session.source, bytes);
+    let mut indirect = sample();
+    let goto_name = indirect.add_object(Object::Name(b"GoTo".to_vec()));
+    indirect.catalog_mut().unwrap().set("OpenAction", dictionary! { "S" => Object::Reference(goto_name), "D" => fit_n(0) });
+    let mut session = EditSession::new(save_bytes(&mut indirect), 6);
+    assert!(session.apply(PageEdit::Move { from: 0, to: 1 }).unwrap_err().contains("by its number"), "an open action whose /S is a reference to /GoTo is still a GoTo (SM7 P3-1)");
+
     let mut plain = sample();
     plain.catalog_mut().unwrap().set("OpenAction", Object::Array(vec![Object::Real(1.5)]));
     let mut session = EditSession::new(save_bytes(&mut plain), 6);
@@ -342,4 +358,14 @@ fn timing_move_and_delete_on_a_large_file() {
         let delete = start.elapsed().as_millis();
         eprintln!("TIMING outline_and_labels={outline_and_labels} size={} MiB moves={times:?} ms delete={delete} ms", bytes.len() / (1024 * 1024));
     }
+}
+
+#[test]
+fn removed_page_references_treat_an_indirect_goto_subtype_as_goto() {
+    let mut document = sample();
+    let page = document.get_pages()[&2];
+    let goto_name = document.add_object(Object::Name(b"GoTo".to_vec()));
+    let link = document.add_object(dictionary! { "Type" => "Annot", "Subtype" => "Link", "Rect" => vec![0.into(), 0.into(), 9.into(), 9.into()], "A" => dictionary! { "S" => Object::Reference(goto_name), "D" => fit(page) } });
+    crate::editor::remove_page_references(&mut document, HashSet::from([page]));
+    assert!(!document.get_dictionary(link).unwrap().has(b"A"), "a GoTo whose /S is a reference to the name is dropped like a direct one (SM7 P3-1)");
 }

@@ -87,6 +87,16 @@ pub fn with_page_reference(document: &Document, value: &Object, page: ObjectId, 
     }
 }
 
+/// Whether `value` is the name `/GoTo`, directly or through references (PDFium follows them too).
+pub fn is_goto_name(document: &Document, value: &Object) -> bool {
+    matches!(follow(document, value), Some(Object::Name(name)) if name == b"GoTo")
+}
+
+/// Whether `action` is a GoTo action. `/S` may be a reference to the name (SM7 P3-1).
+pub fn is_goto(document: &Document, action: &Dictionary) -> bool {
+    action.get(b"S").is_ok_and(|value| is_goto_name(document, value))
+}
+
 /// Whether any local destination still names an in-range page by number: a `/Dest`, the `/D` of a GoTo
 /// action, the catalog's `/OpenAction` array, or a named destination's value (remote `GoToR` / `GoToE`
 /// targets name pages of another file and are not looked at). Structural copies refuse rather than leave
@@ -101,7 +111,7 @@ pub fn page_number_destination_left(document: &Document, page_count: usize) -> b
             Object::Dictionary(dict) => {
                 let open_array = dict.get(b"OpenAction").ok().filter(|value| matches!(follow(document, value), Some(Object::Array(_))));
                 if dict.get(b"Dest").is_ok_and(numbered) || open_array.is_some_and(numbered) { return true; }
-                if dict.get(b"S").and_then(Object::as_name).is_ok_and(|name| name == b"GoTo") && dict.get(b"D").is_ok_and(numbered) { return true; }
+                if is_goto(document, dict) && dict.get(b"D").is_ok_and(numbered) { return true; }
                 pending.extend(dict.iter().map(|(_, value)| value));
             }
             Object::Stream(stream) => pending.extend(stream.dict.iter().map(|(_, value)| value)),
