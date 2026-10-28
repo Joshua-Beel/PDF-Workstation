@@ -74,8 +74,13 @@ export type PageTextGeometry = {
   reason: string | null;
 };
 export const pageTextGeometry = (id: number, page: number, revision: number) => invoke<PageTextGeometry>('page_text_geometry', { id, page, revision });
-export type BookmarkList = { items: { title: string; page: number | null; depth: number; destination?: BookmarkDestination | null }[]; truncated: boolean };
+export type BookmarkList = { items: { title: string; page: number | null; depth: number; destination?: BookmarkDestination | null }[]; truncated: boolean; edited?: boolean };
 export const documentBookmarks = (id: number, revision: number) => invoke<BookmarkList>('document_bookmarks', { id, revision });
+export type BookmarkEditEntry = { uid: number; title: string; depth: number; page: number | null; open: boolean; has_children: boolean; added: boolean };
+export type BookmarkEditView = { editable: boolean; reason: string | null; version: number; entries: BookmarkEditEntry[]; can_undo: boolean; can_redo: boolean; changed: boolean };
+export type BookmarkEditResult = { view: BookmarkEditView; document: DocumentInfo };
+export type BookmarkOp = { kind: 'add'; page: number; title: string; after: number | null } | { kind: 'rename'; uid: number; title: string } | { kind: 'delete' | 'move_up' | 'move_down' | 'indent' | 'outdent'; uid: number } | { kind: 'set_open'; uid: number; open: boolean } | { kind: 'undo' | 'redo' };
+export const editBookmarks = (id: number, revision: number, change: { version: number; op: BookmarkOp } | null) => invoke<BookmarkEditResult>('edit_bookmarks', { id, revision, version: change?.version ?? null, op: change?.op ?? null });
 export const editPages = (id: number, revision: number, edit: PageEdit, currentPage: number) => invoke<DocumentInfo>('edit_pages', { id, revision, edit, currentPage });
 export type SavedCopy = { path: string; document: DocumentInfo };
 export const saveCopy = (id: number, revision: number, pages?: number[]) => invoke<SavedCopy | null>('save_copy', { id, revision, pages: pages ?? null });

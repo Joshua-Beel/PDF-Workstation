@@ -23,7 +23,7 @@ Version 0.3.1 is the current published release (2026-10-27): publisher-signed in
 - Drop to open (source build): drop one `.pdf` onto the window; native drag/drop remains unverified.
 - Pages sidebar (source build): renders only nearby rows, with keyboard navigation.
 - Page labels (source build): PDF page labels beside physical page numbers. [Guide](docs/tools/page-labels.md)
-- Bookmarks (source build): up to 1,000 nested bookmarks with destination zoom; no bookmark editing, and scroll and zoom feel in the running app unverified.
+- Bookmarks (source build): up to 1,000 nested bookmarks with destination zoom; add, rename, delete, move, indent and outdent save into a new copy (not in recovery points; no installed-app check); scroll and zoom feel in the running app unverified.
 - Passwords (source build): open, retry or cancel; passwords aren't saved and encrypted PDFs stay read-only. Verified in the signed installed app on controlled fixtures.
 - Document properties (source build): Ctrl+D shows metadata, sizes, permissions and signature count; signatures aren't validated.
 
@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Bookmark editing (source build): add at the current page, rename, delete with children, move up or down, indent and outdent, undo and redo; saved only into a new copy with correct outline links and counts, untouched bookmarks keep their destinations; signed, encrypted or malformed outlines refused (SM1).
 - Published 0.3.1 installer OCR check recorded: hosted run 40672496983 installed it fresh and current-page OCR on packaged welcome.pdf p1 was recognized (402 bytes); accuracy, searchable copies, real scans not verified (SM6; docs only).
 - Viewer: renders for pages scrolled out of view are cancelled while still queued (last page of a 32-page fling 1.9 s to 65-130 ms, source build); an opened PDF's bytes are held once, not twice (SM5).
 - Child-process spawning (OCR and PDF helper) now holds a process-wide lock while its pipes are inheritable, and test processes started with `std::process::Command` take the same lock: fixes intermittent "OCR output pipes did not close" in parallel `cargo test` (SM4; test-visible only).
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - Cross-reference review fixes: a file refused for editing keeps search, selection, copy and OCR; refusals need a used object; walks are bounded on stream input and offsets; raw-byte object-stream check (SM3).
 - lopdf loads now resolve objects as the cross-reference chain says (free and missing entries, hybrid `/XRefStm`); where PDFium, lopdf and the standard disagree about a used object, editing is refused (SM3).
 - Release scripts: the `WEBDRIVER_ERROR_DIAG` sanitizer now redacts forward-slash and mixed-slash Windows paths, UNC paths and paths containing spaces to the end of the token, with negative controls and a planted-offender control for the backslash-quote scan (SM6; test/script only).
-- Large-document OCR review round 2: deterministic pause test, safer startup cleanup, Save elsewhere clears the old temp copy and never uses another document (SM4).
