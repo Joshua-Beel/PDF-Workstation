@@ -4,7 +4,7 @@ import { lstat, readFile, stat } from 'node:fs/promises';
 import { dirname, extname, isAbsolute, join, resolve, sep } from 'node:path';
 import { inflateSync } from 'node:zlib';
 
-export const OCR_ARGS = ['stdin', 'stdout', '--tessdata-dir', '<tessdata>', '-l', 'eng', '--oem', '1', '--psm', '6', '--dpi', '150', '--loglevel', 'ERROR'];
+export const OCR_ARGS = ['stdin', 'stdout', '--tessdata-dir', '<tessdata>', '-l', 'eng', '--oem', '1', '--psm', '3', '--dpi', '150', '--loglevel', 'ERROR'];
 export const OCR_DPI = 150;
 export const OCR_INPUT_LIMIT = 16 * 1024 * 1024;
 export const OCR_MAX_EDGE = 16384;

@@ -8,7 +8,7 @@ The harness runs the built opt-in OCR engine the way the app does and scores the
 
 `scripts/ocr-accuracy.mjs` (library: `scripts/ocr/accuracy-lib.mjs`) starts the engine with the arguments from `src-tauri/src/ocr_process.rs`:
 
-`tesseract stdin stdout --tessdata-dir <engine>/tessdata -l eng --oem 1 --psm 6 --dpi 150 --loglevel ERROR`
+`tesseract stdin stdout --tessdata-dir <engine>/tessdata -l eng --oem 1 --psm 3 --dpi 150 --loglevel ERROR`
 
 The image is decoded, flattened onto white, and sent on stdin as a binary P6 image, as the app sends a rendered page. A unit test checks the argument string against `ocr_process.rs` and the pins against `src-tauri/ocr_build.rs`, so a change on either side fails the test.
 

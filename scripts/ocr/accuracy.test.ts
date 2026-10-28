@@ -135,8 +135,8 @@ describe('image decoding', () => {
 describe('engine identity', () => {
   it('uses the same invocation as ocr_process.rs and the same pins as ocr_build.rs', () => {
     const processSource = readFileSync(join(repo, 'src-tauri/src/ocr_process.rs'), 'utf8');
-    expect(processSource).toContain('"-l" "eng" "--oem" "1" "--psm" "6" "--dpi" "150" "--loglevel" "ERROR"');
-    expect(OCR_ARGS.slice(4).join(' ')).toBe('-l eng --oem 1 --psm 6 --dpi 150 --loglevel ERROR');
+    expect(processSource).toContain('"-l" "eng" "--oem" "1" "--psm" "3" "--dpi" "150" "--loglevel" "ERROR"');
+    expect(OCR_ARGS.slice(4).join(' ')).toBe('-l eng --oem 1 --psm 3 --dpi 150 --loglevel ERROR');
     expect(processSource).toContain('["-c", "tessedit_create_tsv=1", "-c", "tessedit_create_txt=0"]');
     const build = readFileSync(join(repo, 'src-tauri/ocr_build.rs'), 'utf8');
     for (const value of [MODEL_SHA256, ...Object.values(PINS), ...RECIPE_INPUTS, ...LICENSES]) expect(build).toContain(value);
