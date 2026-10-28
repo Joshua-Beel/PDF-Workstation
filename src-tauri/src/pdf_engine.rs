@@ -198,6 +198,12 @@ impl PdfEngine for InProcessEngine {
 pub(crate) struct InProcessDocument<'a> { inner: PdfDocument<'a>, text_extraction_allowed: bool, _source: Option<crate::editor::SourceBytes> }
 
 impl InProcessDocument<'_> {
+    /// The pre-`bb09ea1` way to read sizes (loads every page); kept for the equality test and the perf harness.
+    #[cfg(test)]
+    pub(crate) fn page_sizes_loading_each_page(&self) -> Result<Vec<(f32, f32)>, String> {
+        let all = self.inner.pages();
+        (0..all.len()).map(|index| all.get(index).map(|page| (page.width().value, page.height().value)).map_err(|error| error.to_string())).collect()
+    }
     fn with_target<T>(&self, target: PageTarget<'_>, action: impl FnOnce(&PdfPage<'_>) -> T) -> Result<T, String> {
         match target {
             PageTarget::Planned(spec) => with_planned_page(&self.inner, spec, |page| Ok(action(page))),

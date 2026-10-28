@@ -120,7 +120,8 @@ fn stages(engine: &crate::pdf_engine::InProcessEngine, label: &str, path: &Path)
         match doc {
             Ok(doc) => {
                 let (sizes, t_sizes) = time(|| doc.page_sizes());
-                out(&format!("{label} stage_read_ms={t_read:.1} stage_lopdf_ms={t_lopdf:.1} lopdf_ok={lopdf_ok} stage_pdfium_load_ms={t_load:.1} stage_page_sizes_ms={t_sizes:.1} pages={}", sizes.as_ref().map(|s| s.len()).unwrap_or(0)));
+                let (_, t_legacy) = time(|| doc.page_sizes_loading_each_page());
+                out(&format!("{label} stage_read_ms={t_read:.1} stage_lopdf_ms={t_lopdf:.1} lopdf_ok={lopdf_ok} stage_pdfium_load_ms={t_load:.1} stage_page_sizes_ms={t_sizes:.1} stage_page_sizes_load_each_page_ms={t_legacy:.1} pages={}", sizes.as_ref().map(|s| s.len()).unwrap_or(0)));
             }
             Err(e) => { out(&format!("{label} stage_pdfium_error={e}")); return; }
         }

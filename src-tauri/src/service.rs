@@ -153,6 +153,7 @@ enum Request {
     #[cfg(windows)]
     OcrJobRaster(crate::ocr::OcrPageRequest, crate::ocr_process::OcrCancellation, crate::ocr_process::OcrWorkerHold, Reply<crate::ocr::OcrJobRaster>),
     Render(u64, u16, i32, Reply<Vec<u8>>),
+    #[allow(dead_code)]
     AdmittedRender(u64, u16, i32, u64),
     Text(u64, u16, u64, Reply<String>),
     TextGeometry(u64, u16, u64, Reply<crate::text_geometry::PageTextGeometry>),
@@ -872,7 +873,7 @@ impl PdfService {
                         })();
                         let _ = reply.send(result);
                     }
-                    Request::AdmittedRender(id,page,width,token)=>{let reply=render_admission.lock().expect("render admission mutex poisoned").take(token);let Some(reply)=reply else{continue};
+                    Request::AdmittedRender(_,_,_,token)=>{let claimed=render_admission.lock().expect("render admission mutex poisoned").claim(token);let Some(((id,page,width,_),reply))=claimed else{continue};
                         #[cfg(test)]
                         { render_work.entry(id).or_default().dequeued += 1; }
                         if reply.is_closed() {
@@ -1940,14 +1941,19 @@ fn restore_recovery_session(session: &mut EditSession, record: &crate::recovery_
     Ok(())
 }
 type RenderKey=(u64,u16,i32,u64);
-#[derive(Default)]struct RenderAdmission{epoch:u64,next:u64,keys:HashMap<RenderKey,u64>,replies:HashMap<u64,Reply<Vec<u8>>>,tickets:HashMap<u64,u64>,ticket_of:HashMap<u64,u64>}
+#[derive(Default)]struct RenderAdmission{epoch:u64,next:u64,keys:HashMap<RenderKey,u64>,replies:HashMap<u64,Reply<Vec<u8>>>,tickets:HashMap<u64,u64>,ticket_of:HashMap<u64,u64>,spare:HashMap<u64,u64>,cancelled:std::collections::VecDeque<u64>}
+const CANCELLED_TICKET_MEMORY:usize=256;
 impl RenderAdmission{
+    fn key_of(&self,token:u64)->Option<RenderKey>{self.keys.iter().find_map(|(key,value)|(*value==token).then_some(*key))}
+    fn claim(&mut self,token:u64)->Option<(RenderKey,Reply<Vec<u8>>)>{if self.spare.remove(&token).is_some(){return None}let key=self.key_of(token)?;self.take(token).map(|reply|(key,reply))}
+    fn remember_cancelled(&mut self,ticket:u64){if self.cancelled.contains(&ticket){return}if self.cancelled.len()>=CANCELLED_TICKET_MEMORY{self.cancelled.pop_front();}self.cancelled.push_back(ticket);}
     fn forget_ticket(&mut self,token:u64){if let Some(ticket)=self.ticket_of.remove(&token){if self.tickets.get(&ticket)==Some(&token){self.tickets.remove(&ticket);}}}
-    fn take(&mut self,token:u64)->Option<Reply<Vec<u8>>>{let key=self.keys.iter().find_map(|(key,value)|(*value==token).then_some(*key));if let Some(key)=key{self.keys.remove(&key);}self.forget_ticket(token);self.replies.remove(&token)}
+    fn take(&mut self,token:u64)->Option<Reply<Vec<u8>>>{self.spare.remove(&token);let key=self.keys.iter().find_map(|(key,value)|(*value==token).then_some(*key));if let Some(key)=key{self.keys.remove(&key);}self.forget_ticket(token);self.replies.remove(&token)}
     fn cancel(&mut self,ticket:u64)->bool{
-        let Some(token)=self.tickets.get(&ticket).copied() else{return false};
+        let Some(token)=self.tickets.get(&ticket).copied() else{self.remember_cancelled(ticket);return false};
         if self.ticket_of.get(&token)!=Some(&ticket){self.tickets.remove(&ticket);return false}
-        if let Some(reply)=self.take(token){let _=reply.send(Err("Viewer render was cancelled because the page is no longer visible.".into()));true}else{false}
+        let epoch=self.key_of(token).map(|key|key.3);
+        if let Some(reply)=self.take(token){if let Some(epoch)=epoch{self.spare.insert(token,epoch);}let _=reply.send(Err("Viewer render was cancelled because the page is no longer visible.".into()));true}else{false}
     }
 }
 const WORKER_QUEUE_LIMIT:usize=256;
@@ -1970,7 +1976,9 @@ impl RequestSender{
         let mut a=self.renders.lock().expect("render admission mutex poisoned");let key=(id,page,width,a.epoch);
         let register=|a:&mut RenderAdmission,token:u64|{a.forget_ticket(token);if let Some(ticket)=ticket{a.tickets.insert(ticket,token);a.ticket_of.insert(token,ticket);}};
         if let Some(token)=a.keys.get(&key).copied(){register(&mut a,token);if let Some(old)=a.replies.insert(token,reply){let _=old.send(Err("Viewer render was superseded by a newer request.".into()));}return Ok(())}
+        if let Some(t)=ticket{if let Some(at)=a.cancelled.iter().position(|c|*c==t){a.cancelled.remove(at);let _=reply.send(Err("Viewer render was cancelled because the page is no longer visible.".into()));return Ok(())}}
         if a.keys.len()>=self.limit{let _=reply.send(Err("Viewer render queue is full. Try again.".into()));return Ok(())}
+        if let Some(token)=a.spare.iter().find_map(|(token,epoch)|(*epoch==key.3).then_some(*token)){a.spare.remove(&token);a.keys.insert(key,token);a.replies.insert(token,reply);register(&mut a,token);return Ok(())}
         a.next=a.next.wrapping_add(1);let token=a.next;a.keys.insert(key,token);a.replies.insert(token,reply);register(&mut a,token);
         if self.inner.send(Request::AdmittedRender(id,page,width,token)).is_err(){a.take(token);return Err(SendRejected::Closed)}Ok(())
     }
@@ -3105,6 +3113,42 @@ mod tests {
         assert!(!leftover, "cancellation leaves no admission state behind");
     }
     #[test]
+    fn render_cancel_churn_keeps_worker_channel_markers_bounded() {
+        let (sender, receiver, state) = admission_sender();
+        let mut ticket = 0u64;
+        for round in 0..50u16 {
+            let mut replies = Vec::new();
+            for page in 0..32u16 { ticket += 1; let (tx, rx) = oneshot::channel(); sender.send_render(1, page + round * 100, 64, Some(ticket), tx).unwrap(); replies.push((ticket, rx)); }
+            for (t, rx) in replies { assert!(sender.cancel_render(t)); assert!(rx.blocking_recv().unwrap().unwrap_err().contains("cancelled")); }
+        }
+        assert_eq!(receiver.try_iter().count(), 32, "1,600 admit-then-cancel renders leave only the 32 markers the admission limit allows");
+        assert!(state.lock().unwrap().keys.is_empty());
+    }
+    #[test]
+    fn render_cancel_markers_are_not_reused_across_a_barrier() {
+        let (sender, receiver, state) = admission_sender();
+        let (tx, old) = oneshot::channel(); sender.send_render(1, 0, 64, Some(1), tx).unwrap();
+        assert!(sender.cancel_render(1)); assert!(old.blocking_recv().unwrap().is_err());
+        sender.send(Request::Close(9, oneshot::channel().0)).unwrap();
+        let (tx, _after) = oneshot::channel(); sender.send_render(1, 0, 64, Some(2), tx).unwrap();
+        let order: Vec<&'static str> = receiver.try_iter().map(|request| match request { Request::AdmittedRender(..) => "render", Request::Close(..) => "close", _ => "other" }).collect();
+        assert_eq!(order, ["render", "close", "render"], "a render queued after a mutation must run after it, never in a stale earlier slot");
+        assert_eq!(state.lock().unwrap().keys.len(), 1);
+    }
+    #[test]
+    fn render_cancel_arriving_before_its_render_sticks() {
+        let (sender, receiver, state) = admission_sender();
+        assert!(!sender.cancel_render(77), "nothing is queued yet");
+        let (tx, early) = oneshot::channel(); sender.send_render(1, 3, 64, Some(77), tx).unwrap();
+        assert!(early.blocking_recv().unwrap().unwrap_err().contains("cancelled"), "the late render of a cancelled ticket is answered as cancelled");
+        assert_eq!(receiver.try_iter().count(), 0, "and never reaches the worker");
+        assert!(state.lock().unwrap().keys.is_empty());
+        let (tx, _again) = oneshot::channel(); sender.send_render(1, 3, 64, Some(78), tx).unwrap();
+        assert_eq!(state.lock().unwrap().keys.len(), 1, "other tickets are unaffected");
+        for early_ticket in 1000..1000 + 2 * CANCELLED_TICKET_MEMORY as u64 { sender.cancel_render(early_ticket); }
+        assert!(state.lock().unwrap().cancelled.len() <= CANCELLED_TICKET_MEMORY, "the memory of early cancels is bounded");
+    }
+    #[test]
     fn render_cancel_frees_admission_slots_and_ignores_superseded_or_spent_tickets() {
         let (sender, receiver, state) = admission_sender();
         let mut replies = Vec::new();
@@ -3122,7 +3166,7 @@ mod tests {
         assert!(sender.cancel_render(50));
         assert!(newer.blocking_recv().unwrap().unwrap_err().contains("cancelled"));
         let markers: Vec<u64> = receiver.try_iter().filter_map(|request| match request { Request::AdmittedRender(_, _, _, token) => Some(token), _ => None }).collect();
-        assert_eq!(markers.len(), 33);
+        assert_eq!(markers.len(), 32, "a render admitted after a cancel reuses the cancelled render's channel marker");
         let mut a = state.lock().unwrap();
         assert_eq!(markers.iter().filter_map(|token| a.take(*token)).count(), 1, "the worker finds a reply only for the render never cancelled");
         assert!(a.keys.is_empty() && a.replies.is_empty() && a.tickets.is_empty() && a.ticket_of.is_empty());
