@@ -267,6 +267,26 @@ public sealed class InAppRecordingHandler : HttpMessageHandler {
     expect(launch).toContain('TotalTimeoutMilliseconds = 60000');
   });
 
+  it('fails the main flow on incomplete WebDriver cleanup but keeps error-path cleanup best effort', () => {
+    const script = readFileSync(scriptPath, 'utf8');
+    expect(script).toContain('$stopped = Stop-OwnedLaunchProcesses -TauriDriver $Session.Driver');
+    expect(script).toContain('if (-not $AllowIncomplete) { Assert-WebDriverSessionStopped -Outcome $stopped }');
+    expect(script.match(/^\s+Stop-WebDriverSession -Session \$(session|postSession)\r?$/gm)).toHaveLength(2);
+    expect(script).toContain('try { Stop-WebDriverSession -Session $postSession -AllowIncomplete } catch { }');
+    expect(script).toContain('try { Stop-WebDriverSession -Session $session -AllowIncomplete } catch { }');
+    expect(script).toMatch(/Captured = @\(\) \}\) -AllowIncomplete\r?\n\s+throw/);
+    const source = verifierHarness(['Assert-WebDriverSessionStopped'], String.raw`
+      function New-Outcome($root,$app='all-exited'){[pscustomobject]@{rootOutcome=$root;application=$app;tauriDriver='absent';edgeDriver='all-exited';webview='all-exited';ocrEngine='absent';other='absent'}}
+      foreach($root in @('already-exited','tree-kill-exited','fallback-exited')){Assert-WebDriverSessionStopped -Outcome (New-Outcome $root)}
+      foreach($bad in @((New-Outcome 'deadline'),(New-Outcome 'kill-failed'),(New-Outcome 'not-invoked'),(New-Outcome 'tree-kill-exited' 'incomplete'))){
+        $message='';try{Assert-WebDriverSessionStopped -Outcome $bad}catch{$message=$_.Exception.Message}
+        if(-not$message.StartsWith('WebDriver session cleanup was incomplete: root=')){throw 'Incomplete cleanup was accepted.'}
+      }
+    `);
+    const result = spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', source], { encoding: 'utf8', timeout: 30_000 });
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
   it('does not redefine shared helper functions and fails fast when the firewall cannot enforce the cutoff', () => {
     const source = String.raw`
       $ErrorActionPreference='Stop'

@@ -432,7 +432,7 @@ function Start-WebDriverSession {
         $ownedApp = Wait-OwnedUpdateApplication -Driver $driver -StartedAfter $startedAfter -ApplicationPath $ApplicationPath -Deadline $deadline
         return [pscustomobject]@{ DriverCapture = $driverCapture; Driver = $driver; SessionId = $sessionId; StartedAfter = $startedAfter; Captured = @($ownedApp.Owned); ApplicationProcessId = [int]$ownedApp.ProcessId; ApplicationProcessStartUtcTicks = [long]$ownedApp.ProcessStartUtcTicks }
     } catch {
-        Stop-WebDriverSession -Session ([pscustomobject]@{ DriverCapture = $driverCapture; Driver = $driver; SessionId = $sessionId; StartedAfter = $startedAfter; Captured = @() })
+        Stop-WebDriverSession -Session ([pscustomobject]@{ DriverCapture = $driverCapture; Driver = $driver; SessionId = $sessionId; StartedAfter = $startedAfter; Captured = @() }) -AllowIncomplete
         throw
     }
 }
@@ -448,13 +448,24 @@ function Wait-WebDriverValue {
 }
 
 function Stop-WebDriverSession {
-    param($Session)
+    param($Session,[switch]$AllowIncomplete)
     if ($null -eq $Session) { return }
     if ($Session.SessionId) { $null = Invoke-SessionDeleteOutcome -SessionId ([string]$Session.SessionId) -Deadline ([datetime]::UtcNow.AddSeconds(10)) }
     $captured = @($Session.Captured)
     try { $captured += @(Get-OwnedLaunchProcesses -RootProcessId $Session.Driver.Id -StartedAfter $Session.StartedAfter); $captured = @(Get-UniqueOwnedLaunchProcesses -Processes $captured) } catch { }
-    $null = Stop-OwnedLaunchProcesses -TauriDriver $Session.Driver -Captured $captured -Deadline ([datetime]::UtcNow.AddMilliseconds($script:LaunchPins.CleanupProcessTimeoutMilliseconds))
+    $stopped = Stop-OwnedLaunchProcesses -TauriDriver $Session.Driver -Captured $captured -Deadline ([datetime]::UtcNow.AddMilliseconds($script:LaunchPins.CleanupProcessTimeoutMilliseconds))
     $Session.DriverCapture.Dispose()
+    if (-not $AllowIncomplete) { Assert-WebDriverSessionStopped -Outcome $stopped }
+}
+
+function Assert-WebDriverSessionStopped {
+    param([Parameter(Mandatory = $true)]$Outcome)
+    $categories = @('application','tauriDriver','edgeDriver','webview','ocrEngine','other')
+    $incomplete = @($categories | Where-Object { [string]$Outcome.$_ -cnotin @('absent','all-exited') })
+    if ([string]$Outcome.rootOutcome -cnotin @('already-exited','tree-kill-exited','fallback-exited') -or $incomplete.Count -ne 0) {
+        $states = ($categories | ForEach-Object { $_ + '=' + [string]$Outcome.$_ }) -join ','
+        throw ('WebDriver session cleanup was incomplete: root=' + [string]$Outcome.rootOutcome + ',' + $states + '.')
+    }
 }
 
 function Open-UpdatesDialog {
@@ -860,7 +871,7 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
     }
 } finally {
     if ($firewallName) { Remove-NetFirewallRule -DisplayName $firewallName -ErrorAction SilentlyContinue }
-    Stop-WebDriverSession -Session $postSession
-    Stop-WebDriverSession -Session $session
+    try { Stop-WebDriverSession -Session $postSession -AllowIncomplete } catch { }
+    try { Stop-WebDriverSession -Session $session -AllowIncomplete } catch { }
     try { if (Test-Path -LiteralPath $installRoot) { Stop-ExactProcesses -ApplicationPath (Join-Path $installRoot 'pdf-workstation.exe') } } catch { }
 }

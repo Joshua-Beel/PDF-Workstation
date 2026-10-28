@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- In-app update check: a WebDriver session stop in the main flow now fails if the driver or any owned process did not exit; error-path cleanup stays best effort (SM6; review P3).
 - Docs: `docs/releases.md` in-app update section names the current receipt schema (v3) for the false publisher-UI claims (SM6; review P3).
 - In-app update check: the receipt also records the shell-window probe taken at the end of the relaunch wait (`updater.shellWindowAtRelaunch`) (SM6; review P3).
 - In-app update check: the two GitHub API release-metadata reads use the job's read-only token (API host only, no redirects, removed from the environment first); public downloads stay unauthenticated (SM6).
