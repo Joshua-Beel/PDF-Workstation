@@ -3,8 +3,8 @@
   "target": "x86_64-pc-windows-msvc",
   "coverage": "Conservative resolved Cargo Windows graph, including build/auxiliary packages, plus non-development npm lock entries. Runtime-candidate is not proof of linked code. PDFium notices are packaged separately. Five exact MPL-2.0 crate source archives are packaged with verified locations and hashes. PDF Workstation itself is MIT-licensed; this collection records third-party notices and is not a legal licensing review. The ocr-engine records cover the Tesseract engine, Leptonica and the English model packaged under resources/ocr/ by an installer built with an OCR setup root; their license texts are checked against scripts/ocr/pins.json.",
   "inputHashes": {
-    "src-tauri/Cargo.lock": "9cde16cd67983362db2d70b8bf539a08fc467686abc1de5e7d91b4a4f9a24e38",
-    "src-tauri/Cargo.toml": "3e8864e5040c3bcfca7ef46f3b8c9f30029673e406574d570f0d1fafde839f21",
+    "src-tauri/Cargo.lock": "f9e285351a7c21357a5bc10b0885301c011c3206ed50110b53498877358bdf82",
+    "src-tauri/Cargo.toml": "5db74d314a434135447808719a866ab1839aa5f91e90da63815e3e7a904d2c3e",
     "package-lock.json": "63ae4caf4d854ac2bb0355e265294978741fb20257c15a749a2dc3f741cd4c04",
     "package.json": "f057e7c7bea9f90348c6e9a7b263c4d9ec26b7480cd9d4886df800a86865fffc",
     "scripts/notice-supplements/manifest.json": "f0700cbb9d20d43f42d709852e7961194d22937a41bf1fad5063e27f5fae2121",
