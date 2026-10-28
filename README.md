@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Docs: OCR packaging evidence in `docs/features.md` and `docs/ocr-feasibility.md` now cites only what `docs/releases.md` states (SM4; docs only).
 - Docs: OCR wording in `docs/features.md` and `docs/ocr-feasibility.md` now says 0.3.1 includes the engine; recognition on the published installer remains unverified (SM4; docs only).
 - OCR working-directory test accepts the hosted runner's short 8.3 temp path by comparing canonical parents exactly (SM0; test only).
 - Dependency notices inventory refreshed for the new test-only `rayon` dev-dependency; notice text unchanged (SM0).
@@ -133,3 +134,4 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - In-app update record schema 4: API metadata reads recorded as authenticated, public latest.json as unauthenticated; setup exit claimed only if a setup process was seen; JWT-shaped tokens blocked from the record (SM6).
 - In-app update check: accepts GitHub's longer token format (`.`, `-`), anchored so a trailing newline is rejected (SM0; script and test only).
 - In-app update check: tauri-driver start moved inside the session try, so a start failure is cleaned up and reported as itself (SM6; review P3).
+- In-app update check: 7-Zip and the standalone silent installers run with the shared minimal environment, as tauri-driver already does (SM6; review P3).
