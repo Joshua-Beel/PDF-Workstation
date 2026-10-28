@@ -99,7 +99,7 @@ fn clear_update_attempt(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn open_document(app: tauri::AppHandle, service: State<'_, PdfService>) -> Result<Option<service::OpenResult>, String> {
     let window = app.get_webview_window("main").ok_or("Application window is unavailable")?;
-    let path = tauri::async_runtime::spawn_blocking(move || rfd::FileDialog::new().set_parent(&window).add_filter("PDF documents", &["pdf"]).pick_file()).await.map_err(|e| e.to_string())?;
+    let path = tauri::async_runtime::spawn_blocking(move || rfd::FileDialog::new().set_parent(&window).set_title("Open a PDF").add_filter("PDF documents", &["pdf"]).pick_file()).await.map_err(|e| e.to_string())?;
     match path { Some(path) => service.begin_open_from(path, open_path::OpenOrigin::UserChosen).await.map(Some), None => Ok(None) }
 }
 #[tauri::command]

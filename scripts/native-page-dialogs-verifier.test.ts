@@ -30,7 +30,7 @@ describe('native page-dialog verifier', () => {
   });
 
   it('expects the dialog titles and default names that main.rs actually sets', () => {
-    for (const title of ['Save combined PDF as a new file', 'Save PDF with inserted pages as a new file', 'Save PDF with replaced pages as a new file', 'Save a copy as a new file', 'Choose one PNG or JPEG image', 'Save image as a new PDF', 'Choose PNG or JPEG images', 'Save images as a new PDF']) {
+    for (const title of ['Open a PDF', 'Save combined PDF as a new file', 'Save PDF with inserted pages as a new file', 'Save PDF with replaced pages as a new file', 'Save a copy as a new file', 'Choose one PNG or JPEG image', 'Save image as a new PDF', 'Choose PNG or JPEG images', 'Save images as a new PDF']) {
       expect(mainRs).toContain(`set_title("${title}")`);
       expect(verifier).toContain(`'${title}'`);
     }
