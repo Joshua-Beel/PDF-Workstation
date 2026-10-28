@@ -1031,7 +1031,7 @@ mod tests {
             "<< /Type /Catalog /Pages 2 0 R >>".into(),
             "<< /Type /Pages /Kids [4 0 R 6 0 R] /Count 2 >>".into(),
             "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R /Annots [8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R] >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R /Annots [8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 17 0 R 18 0 R] >>".into(),
             content("kept page"),
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>".into(),
             content("removed page"),
@@ -1043,16 +1043,21 @@ mod tests {
             "<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /Dest [6 0 R /Fit] >>".into(),
             "[6 0 R /Fit]".into(),
             "<< /S /GoTo /D 14 0 R >>".into(),
+            "[4 0 R /Fit]".into(),
+            "<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /Dest 16 0 R >>".into(),
+            "<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /Dest 16 0 R >>".into(),
         ], &[]);
         let mut document = Document::load_mem(&source).unwrap();
         remove_page_references(&mut document, HashSet::from([(6, 0)]));
         let annots = document.get_dictionary((4, 0)).unwrap().get(b"Annots").unwrap().as_array().unwrap().clone();
-        assert_eq!(annots, vec![Object::Reference((11, 0)), Object::Reference((12, 0))], "dead links leave no null behind in /Annots");
+        assert_eq!(annots, vec![Object::Reference((11, 0)), Object::Reference((12, 0)), Object::Reference((17, 0)), Object::Reference((18, 0))], "dead links leave no null behind in /Annots");
         for number in [8, 9, 10] {
             let link = document.get_dictionary((number, 0)).unwrap();
             assert!(!link.has(b"Dest") && !link.has(b"A"), "object {number}: an indirect destination to the removed page is dropped, not left as [null ...]");
         }
         assert!(document.get_dictionary((11, 0)).unwrap().get(b"Subtype").is_ok_and(|value| value.as_name().is_ok_and(|name| name == b"Link")), "a link that never had a destination or action is left untouched");
+        for number in [17, 18] { assert_eq!(document.get_dictionary((number, 0)).unwrap().get(b"Dest").unwrap(), &Object::Reference((16, 0)), "link {number} keeps its indirect destination"); }
+        assert_eq!(document.get_object((16, 0)).unwrap().as_array().unwrap()[0], Object::Reference((4, 0)), "the shared array to the kept page is intact");
         assert_eq!(document.get_dictionary((12, 0)).unwrap().get(b"Dest").unwrap().as_array().unwrap()[0], Object::Reference((4, 0)));
     }
 
