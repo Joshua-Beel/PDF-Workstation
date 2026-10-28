@@ -133,7 +133,17 @@ export type CropInsets = { top: number; right: number; bottom: number; left: num
 export const cropPage = (id: number, page: number, revision: number, rect: { x: number; y: number; width: number; height: number }, currentPage: number) => invoke<DocumentInfo>('crop_page', { id, page, revision, rect, currentPage });
 export const cropPages = (id: number, revision: number, pages: number[], insets: CropInsets, currentPage: number) => invoke<DocumentInfo>('crop_pages', { id, revision, pages, insets, currentPage });
 export const resetCrops = (id: number, revision: number, pages: number[], currentPage: number) => invoke<DocumentInfo>('reset_crops', { id, revision, pages, currentPage });
-export async function renderPage(id: number, page: number, width: number) {
-  const bytes = await invoke<ArrayBuffer>('render_page', { id, page, width });
+let renderTicket = Math.floor(Math.random() * 2 ** 40);
+async function renderBytes(id: number, page: number, width: number, signal?: AbortSignal) {
+  if (!signal) return invoke<ArrayBuffer>('render_page', { id, page, width });
+  if (signal.aborted) throw 'Viewer render was cancelled.';
+  const ticket = ++renderTicket;
+  const cancel = () => { invoke('cancel_render', { ticket }).catch(() => undefined); };
+  signal.addEventListener('abort', cancel, { once: true });
+  try { return await invoke<ArrayBuffer>('render_page', { id, page, width, ticket }); }
+  finally { signal.removeEventListener('abort', cancel); }
+}
+export async function renderPage(id: number, page: number, width: number, signal?: AbortSignal) {
+  const bytes = await renderBytes(id, page, width, signal);
   return URL.createObjectURL(new Blob([bytes], { type: 'image/png' }));
 }

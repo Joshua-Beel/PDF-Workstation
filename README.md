@@ -119,6 +119,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 Full history: [docs/changelog.md](docs/changelog.md)
 
 - Published 0.3.1 installer OCR check recorded: hosted run 40672496983 installed it fresh and current-page OCR on packaged welcome.pdf p1 was recognized (402 bytes); accuracy, searchable copies, real scans not verified (SM6; docs only).
+- Viewer: renders for pages scrolled out of view are cancelled while still queued (last page of a 32-page fling 1.9 s to 65-130 ms, source build); an opened PDF's bytes are held once, not twice (SM5).
 - Child-process spawning (OCR and PDF helper) now holds a process-wide lock while its pipes are inheritable, and test processes started with `std::process::Command` take the same lock: fixes intermittent "OCR output pipes did not close" in parallel `cargo test` (SM4; test-visible only).
 - Release scripts: the installed print-dialog diagnostic keeps its last completed native-window receipt when the final poll is cut short by the deadline (fixes a CI flake), and the `WEBDRIVER_ERROR_DIAG` sanitizer now also redacts `file://server/share` and a UNC path glued to a word (SM6; scripts and tests only).
 - Text replacement and selected-text highlights now pass the same two-reader copy-permission check as search and copy (SM3).
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - lopdf loads now resolve objects as the cross-reference chain says (free and missing entries, hybrid `/XRefStm`); where PDFium, lopdf and the standard disagree about a used object, editing is refused (SM3).
 - Release scripts: the `WEBDRIVER_ERROR_DIAG` sanitizer now redacts forward-slash and mixed-slash Windows paths, UNC paths and paths containing spaces to the end of the token, with negative controls and a planted-offender control for the backslash-quote scan (SM6; test/script only).
 - Large-document OCR review round 2: deterministic pause test, safer startup cleanup, Save elsewhere clears the old temp copy and never uses another document (SM4).
-- Large-document OCR review fixes: crash-safe after finalize, panics degrade one page instead of hanging, Save elsewhere, bounded final check, stale-folder cleanup (SM4).

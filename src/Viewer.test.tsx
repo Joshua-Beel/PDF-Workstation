@@ -157,3 +157,22 @@ it('frames a Fit destination at the fit-page scale of its page', () => {
   expect(viewport.scrollTo).toHaveBeenLastCalledWith({ top: pageTopOffset(info.pages, 2, scale) - 24 });
   act(() => ui.unmount());
 });
+
+it('aborts the pending render of every page scrolled out of view and keeps visible pages rendering', async () => {
+  vi.mocked(renderPage).mockImplementation(() => new Promise(() => undefined));
+  const info = document(9, 1, 2_000); let ui!: ReactTestRenderer;
+  act(() => { ui = create(<Viewer {...props(info)} />, { createNodeMock: () => viewport }); });
+  await act(async () => { vi.advanceTimersByTime(35); await Promise.resolve(); });
+  const first = vi.mocked(renderPage).mock.calls.map(([, page, , signal]) => ({ page, signal: signal! }));
+  expect(first.length).toBeGreaterThan(0);
+  expect(first.every(({ signal }) => signal instanceof AbortSignal && !signal.aborted)).toBe(true);
+  const layout = pageLayout(info.pages, 96 / 72);
+  act(() => scrollable(ui).props.onScroll({ currentTarget: { scrollTop: layout.offsets[1_000] + 13 } }));
+  expect(first.every(({ signal }) => signal.aborted)).toBe(true);
+  await act(async () => { vi.advanceTimersByTime(35); await Promise.resolve(); });
+  const second = vi.mocked(renderPage).mock.calls.slice(first.length).map(([, page, , signal]) => ({ page, signal: signal! }));
+  expect(second.length).toBeGreaterThan(0);
+  expect(second.every(({ page, signal }) => page >= 990 && !signal.aborted)).toBe(true);
+  act(() => ui.unmount());
+  expect(second.every(({ signal }) => signal.aborted)).toBe(true);
+});

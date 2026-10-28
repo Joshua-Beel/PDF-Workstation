@@ -324,3 +324,93 @@ fn viewer_perf_split() {
         if label.starts_with("synthetic") { let _ = std::fs::remove_file(&path); }
     }
 }
+
+/// A scan-like document written straight to disk (so generating it does not raise this process's peak):
+/// `pages` pages, each one uncompressed `side` x `side` RGB image of pseudo-random bytes (incompressible,
+/// so the file is about `pages * side * side * 3` bytes).
+fn generate_scan(path: &Path, pages: usize, side: usize) {
+    let mut file = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+    let mut offsets = vec![0u64; 3 + pages * 3];
+    let mut at = 0u64;
+    let put = |file: &mut std::io::BufWriter<std::fs::File>, bytes: &[u8], at: &mut u64| { file.write_all(bytes).unwrap(); *at += bytes.len() as u64; };
+    put(&mut file, b"%PDF-1.5\n%\xE2\xE3\xCF\xD3\n", &mut at);
+    offsets[1] = at; put(&mut file, b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n", &mut at);
+    let kids: Vec<String> = (0..pages).map(|n| format!("{} 0 R", 3 + n * 3)).collect();
+    offsets[2] = at; put(&mut file, format!("2 0 obj\n<< /Type /Pages /Count {pages} /Kids [{}] >>\nendobj\n", kids.join(" ")).as_bytes(), &mut at);
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    let mut row = vec![0u8; side * 3];
+    for n in 0..pages {
+        let (page, content, image) = (3 + n * 3, 4 + n * 3, 5 + n * 3);
+        offsets[page] = at; put(&mut file, format!("{page} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /XObject << /Im0 {image} 0 R >> >> /Contents {content} 0 R >>\nendobj\n").as_bytes(), &mut at);
+        let draw = b"q 612 0 0 792 0 0 cm /Im0 Do Q\n";
+        offsets[content] = at; put(&mut file, format!("{content} 0 obj\n<< /Length {} >>\nstream\n", draw.len()).as_bytes(), &mut at); put(&mut file, draw, &mut at); put(&mut file, b"\nendstream\nendobj\n", &mut at);
+        offsets[image] = at; put(&mut file, format!("{image} 0 obj\n<< /Type /XObject /Subtype /Image /Width {side} /Height {side} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length {} >>\nstream\n", side * side * 3).as_bytes(), &mut at);
+        for _ in 0..side {
+            for chunk in row.chunks_mut(8) { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; let bytes = seed.to_le_bytes(); chunk.copy_from_slice(&bytes[..chunk.len()]); }
+            put(&mut file, &row, &mut at);
+        }
+        put(&mut file, b"\nendstream\nendobj\n", &mut at);
+    }
+    let xref = at;
+    let mut table = format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len());
+    for offset in &offsets[1..] { table.push_str(&format!("{offset:010} 00000 n \n")); }
+    table.push_str(&format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", offsets.len()));
+    put(&mut file, table.as_bytes(), &mut at);
+    file.flush().unwrap();
+}
+
+/// Memory of one open (SM5, render-cancel-memory): peak working set and private bytes for a large scan-like
+/// PDF, before and after the open, then after the first render and after close. `SM5_MEM_PAGES` (default 134)
+/// pages of 1000 x 1000 RGB (about 3 MB each, so about 400 MB by default).
+#[test]
+#[ignore]
+fn viewer_perf_open_memory() {
+    let dir = PathBuf::from(std::env::var("SM1_PERF_DIR").expect("SM1_PERF_DIR"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pages: usize = std::env::var("SM5_MEM_PAGES").ok().and_then(|v| v.parse().ok()).unwrap_or(134);
+    let path = dir.join(format!("synthetic-scan-{pages}.pdf"));
+    generate_scan(&path, pages, 1000);
+    let size = std::fs::metadata(&path).unwrap().len() as f64 / 1_048_576.0;
+    let service = PdfService::start(library());
+    let (ws0, pv0, peak0) = memory();
+    let (opened, t_open) = time(|| block_on(service.open(path.clone())));
+    let id = serde_json::to_value(opened.unwrap()).unwrap()["id"].as_u64().unwrap();
+    let (ws1, pv1, peak1) = memory();
+    let _ = block_on(service.render(id, 0, 1224)).unwrap();
+    let (ws2, pv2, peak2) = memory();
+    block_on(service.close(id)).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let (ws3, pv3, _) = memory();
+    out(&format!("open_memory file_mib={size:.0} pages={pages} open_ms={t_open:.0} before ws/private/peak={ws0:.0}/{pv0:.0}/{peak0:.0} after_open={ws1:.0}/{pv1:.0}/{peak1:.0} after_render={ws2:.0}/{pv2:.0}/{peak2:.0} after_close={ws3:.0}/{pv3:.0} open_peak_over_before_x_file={:.2} retained_private_over_before_x_file={:.2}", (peak1 - ws0) / size, (pv1 - pv0) / size));
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Fast-scroll time-to-visible-page (SM5, render-cancel-memory): 32 viewer renders queued back to back, as a
+/// scrollbar drag through 32 pages leaves them, then the visible (last) page's reply is timed with and without
+/// cancelling the 31 stale tickets the way the viewer does when those pages unmount. `SM5_SCROLL_PAGES` scan pages.
+#[test]
+#[ignore]
+fn viewer_perf_fast_scroll() {
+    let dir = PathBuf::from(std::env::var("SM1_PERF_DIR").expect("SM1_PERF_DIR"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("synthetic-scroll.pdf");
+    generate_scan(&path, 32, 1000);
+    let service = PdfService::start(library());
+    let id = serde_json::to_value(block_on(service.open(path.clone())).unwrap()).unwrap()["id"].as_u64().unwrap();
+    for round in 0..3 {
+        for cancel in [false, true] {
+            let width = 1600 + round * 16 + if cancel { 8 } else { 0 };
+            let started = Instant::now();
+            let ticket = |page: u16| 1_000_000 + u64::from(page) + (width as u64) * 100;
+            let replies: Vec<_> = (0..32u16).map(|page| service.queue_render(id, page, width, ticket(page))).collect();
+            let cancelled = if cancel { (0..31u16).filter(|page| service.cancel_render(ticket(*page))).count() } else { 0 };
+            let mut replies = replies.into_iter();
+            let visible = replies.next_back().unwrap().blocking_recv().unwrap();
+            let visible_ms = ms(started.elapsed());
+            let mut results: Vec<_> = replies.map(|rx| rx.blocking_recv().unwrap()).collect(); results.push(visible);
+            out(&format!("fast_scroll round={round} cancel={cancel} width={width} queued=32 cancelled={cancelled} rendered={} time_to_visible_ms={visible_ms:.0} visible_ok={}", results.iter().filter(|r| r.is_ok()).count(), results[31].is_ok()));
+        }
+    }
+    let _ = block_on(service.close(id));
+    let _ = std::fs::remove_file(&path);
+}
