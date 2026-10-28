@@ -219,7 +219,8 @@ public sealed class InAppRecordingHandler : HttpMessageHandler {
   it('requires the automatic relaunch whenever an Explorer shell window exists and labels the verifier launch', () => {
     const script = readFileSync(scriptPath, 'utf8');
     expect(script).toMatch(/Assert-FirewallEnforcing\r?\n#[^\n]*RunAsUser[^\n]*\r?\n\$shellWindowBeforeUpdate = Test-ShellWindowPresent\r?\n\$session = \$null/);
-    expect(script).toContain('-ShellWindowAtRelaunch (Test-ShellWindowPresent)');
+    expect(script).toMatch(/\$shellWindowAtRelaunch = Test-ShellWindowPresent\r?\n\s+\$relaunchOutcome = Resolve-AutomaticRelaunch -Observed \(\$null -ne \$automaticRelaunch\) -ShellWindowBeforeUpdate \$shellWindowBeforeUpdate -ShellWindowAtRelaunch \$shellWindowAtRelaunch/);
+    expect(script).toContain('shellWindowBeforeUpdate = [bool]$shellWindowBeforeUpdate; shellWindowAtRelaunch = [bool]$shellWindowAtRelaunch');
     expect(script).toContain('automaticRelaunchVerified = [bool]$relaunchOutcome.verified');
     expect(script).toContain('automaticRelaunchObserved = [bool]$relaunchOutcome.observed; automaticRelaunchNotObservedReason = $relaunchOutcome.notObservedReason');
     expect(script).toContain("postUpdateLaunchedBy = 'verifier-webdriver'");

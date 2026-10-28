@@ -751,7 +751,8 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
         if ($relaunches.Count -gt 1) { throw 'Automatic updater relaunch was ambiguous.' }
         Start-Sleep -Milliseconds 200
     } while ([datetime]::UtcNow -lt $installDeadline)
-    $relaunchOutcome = Resolve-AutomaticRelaunch -Observed ($null -ne $automaticRelaunch) -ShellWindowBeforeUpdate $shellWindowBeforeUpdate -ShellWindowAtRelaunch (Test-ShellWindowPresent)
+    $shellWindowAtRelaunch = Test-ShellWindowPresent
+    $relaunchOutcome = Resolve-AutomaticRelaunch -Observed ($null -ne $automaticRelaunch) -ShellWindowBeforeUpdate $shellWindowBeforeUpdate -ShellWindowAtRelaunch $shellWindowAtRelaunch
     Stop-ExactProcesses -ApplicationPath ([string]$upgraded.appPath)
     Stop-WebDriverSession -Session $session
     $session = $null
@@ -828,7 +829,7 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
             baselineUiVersion = [string]$available.installed; offeredVersion = [string]$available.status; earlyFailureStatus = [string]$failed.status
             retryDownloadStateObserved = [bool]$sawDownloadState; updaterSessionClosedForInstall = [bool]$sessionClosedForInstall
             automaticRelaunchObserved = [bool]$relaunchOutcome.observed; automaticRelaunchNotObservedReason = $relaunchOutcome.notObservedReason
-            shellWindowBeforeUpdate = [bool]$shellWindowBeforeUpdate
+            shellWindowBeforeUpdate = [bool]$shellWindowBeforeUpdate; shellWindowAtRelaunch = [bool]$shellWindowAtRelaunch
             postUpdateLaunchedBy = 'verifier-webdriver'; targetUiVersion = [string]$current.installed; targetUiStatus = [string]$current.status
         }
         verification = [ordered]@{
