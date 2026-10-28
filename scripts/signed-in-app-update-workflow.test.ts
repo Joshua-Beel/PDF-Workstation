@@ -287,12 +287,13 @@ public sealed class InAppRecordingHandler : HttpMessageHandler {
 
   it('waits a bounded time for updater setup processes to exit before the post-update session', () => {
     const script = readFileSync(scriptPath, 'utf8');
-    const wait = script.indexOf('    Wait-UpdaterSetupExit -StartedAfter $retryStarted');
+    const wait = script.indexOf('    $updaterSetupOutcome = Wait-UpdaterSetupExit -StartedAfter $retryStarted');
     expect(wait).toBeGreaterThan(script.indexOf('$relaunchOutcome = Resolve-AutomaticRelaunch'));
     expect(wait).toBeLessThan(script.indexOf('$postSession = Start-WebDriverSession'));
     expect(script).toContain("-TempRoots @([string]$env:TEMP,[IO.Path]::GetTempPath(),(Join-Path $env:LOCALAPPDATA 'Temp'))");
     expect(script).toContain('UpdaterSetupExitDeadlineSeconds = 60');
-    expect(script).toContain('updaterSetupExitVerified = $true');
+    expect(script).toContain('updaterSetupProcessObserved = [bool]$updaterSetupOutcome.processObserved; updaterSetupExitVerified = [bool]$updaterSetupOutcome.exitVerified');
+    expect(script).not.toMatch(/updaterSetup(ExitVerified|ProcessObserved)\s*=\s*\$true/);
     const source = verifierHarness(['Get-UpdaterSetupProcesses', 'Wait-UpdaterSetupExit'], String.raw`
       $start=[datetime]::UtcNow
       $temp='C:\Users\runner\AppData\Local\Temp'
@@ -303,8 +304,11 @@ public sealed class InAppRecordingHandler : HttpMessageHandler {
       $found=@(Get-UpdaterSetupProcesses -StartedAfter $start -TempRoots @($temp,'') -SnapshotProvider {@($old,$app,$sibling,$setup)}.GetNewClosure())
       if($found.Count-ne1-or$found[0]-ne$setup){throw 'Updater setup detection is not exact.'}
       $calls=[ref]0
-      Wait-UpdaterSetupExit -StartedAfter $start -TempRoots @($temp) -Deadline ([datetime]::UtcNow.AddSeconds(10)) -SnapshotProvider {$calls.Value++;if($calls.Value-lt3){@($setup)}else{@($old,$app)}}.GetNewClosure()
+      $seen=Wait-UpdaterSetupExit -StartedAfter $start -TempRoots @($temp) -Deadline ([datetime]::UtcNow.AddSeconds(10)) -SnapshotProvider {$calls.Value++;if($calls.Value-lt3){@($setup)}else{@($old,$app)}}.GetNewClosure()
       if($calls.Value-ne3){throw 'Wait did not poll until the setup process exited.'}
+      if($seen.processObserved-ne$true-or$seen.exitVerified-ne$true){throw 'An observed setup exit was not recorded as observed and verified.'}
+      $none=Wait-UpdaterSetupExit -StartedAfter $start -TempRoots @($temp) -Deadline ([datetime]::UtcNow.AddSeconds(10)) -SnapshotProvider {@($old,$app)}.GetNewClosure()
+      if($none.processObserved-ne$false-or$none.exitVerified-ne$false){throw 'An unseen setup process was recorded as an observed or verified exit.'}
       $message='';try{Wait-UpdaterSetupExit -StartedAfter $start -TempRoots @($temp) -Deadline ([datetime]::UtcNow.AddMilliseconds(600)) -SnapshotProvider {@($setup)}.GetNewClosure()}catch{$message=$_.Exception.Message}
       if($message-cne'Updater setup processes did not exit before the post-update check: count=1, names=PDF Workstation-0.3.1-installer.exe.'){throw ('Remaining setup process was not reported exactly: '+$message)}
       if($message.Contains('Users')){throw 'Remaining setup diagnostic leaked a path.'}
@@ -387,7 +391,7 @@ public sealed class InAppRecordingHandler : HttpMessageHandler {
     expect(script).not.toContain('Invoke-InstalledPublisherUiProof');
     expect(script.match(/= New-HostedPublisherUiNotAttemptedEvidence -Path/g)).toHaveLength(2);
     expect(script.match(/Assert-HostedPublisherUiEvidence -Value \$/g)).toHaveLength(2);
-    expect(script).toContain('schemaVersion = 3');
+    expect(script).toContain('schemaVersion = 4');
     expect(script).toContain("mode = 'hosted-noninteractive'");
     expect(script).toContain("reason = 'github-hosted-noninteractive-session'");
     expect(script).toContain("publisherUiMode = 'hosted-noninteractive'; publisherUiAttempted = $false");
@@ -468,9 +472,46 @@ public sealed class InAppRecordingHandler : HttpMessageHandler {
     expect(script).toContain('$outputFiles.Count -ne 1');
     expect(script).toContain('notes = $manifestNotesReceipt');
     expect(script).not.toContain('notes = [string]$manifest.notes');
-    expect(script).toContain('GITHUB_TOKEN|GH_TOKEN|IN_APP_UPDATE_API_TOKEN|gh[pousr]_[A-Za-z0-9_]{16,}|AZURE_|TAURI_SIGNING');
+    expect(script).toContain('GITHUB_TOKEN|GH_TOKEN|IN_APP_UPDATE_API_TOKEN|gh[pousr]_[A-Za-z0-9_]{16,}|(?-i:eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,})|AZURE_|TAURI_SIGNING');
     expect(script).toContain('release-assets\\.githubusercontent\\.com');
     expect(script).not.toMatch(/Write-Host\s+\$json|Write-Output\s+\$json/);
+  });
+
+  it('records authenticated release metadata and the unauthenticated public manifest honestly', () => {
+    const script = readFileSync(scriptPath, 'utf8');
+    expect(script).not.toContain('publicUnauthenticatedReleaseMetadataVerified');
+    expect(script).toContain('releaseMetadataVerified = $true; releaseMetadataAuthenticated = $true; publicLatestManifestVerified = $true; publicLatestManifestAuthenticated = $false');
+    expect(script).toContain("release metadata is read from the GitHub API with the job''s read-only token; latest.json, the installers and the signature are downloaded unauthenticated");
+    expect(script).toContain('updater setup exit is recorded as verified only when an updater setup process was observed');
+    expect(script.match(/Invoke-GitHubReleaseApi -Path "/g)).toHaveLength(2);
+    expect(script).toContain('$null = Invoke-PublicDownload -Uri $script:UpdatePins.LatestManifestUrl');
+  });
+
+  it('rejects JWT-shaped tokens in the sanitized record without rejecting receipts', () => {
+    const script = readFileSync(scriptPath, 'utf8');
+    const match = script.match(/\$json -match '((?:[^']|'')+)'\) \{/);
+    expect(match).not.toBeNull();
+    const pattern = match![1].replaceAll("''", "'");
+    const jwt = 'eyJ' + 'a1_-'.repeat(12) + '.' + 'b2'.repeat(20) + '.' + 'c3-'.repeat(10);
+    const source = String.raw`
+      $ErrorActionPreference='Stop'
+      $pattern=[IO.File]::ReadAllText($env:LEAK_PATTERN_PATH)
+      $clean='{"sha256":"67C685264ABC094246E95C04629BFFF5D4854BD4FE5B84FEDE8760261A119038","scope":"they eyJ do not.match here"}'
+      if($clean -match $pattern){throw 'A clean receipt record was rejected.'}
+      foreach($leak in @('{"x":"${jwt}"}','{"x":"ghp_0123456789abcdefABCDEF"}','{"x":"C:\\Users\\a"}')){
+        if($leak -notmatch $pattern){throw ('A leak was not rejected: '+$leak.Substring(0,8))}
+      }
+      if(('{"x":"'+'${jwt}'.ToUpperInvariant()+'"}') -match $pattern){throw 'The JWT prefix match is not case-sensitive.'}
+    `;
+    const root = `target/in-app-update-test-${randomUUID()}`;
+    mkdirSync(root, { recursive: true });
+    try {
+      writeFileSync(`${root}/pattern.txt`, pattern, 'utf8');
+      const result = runPwshFile(source, { ...process.env, LEAK_PATTERN_PATH: `${root}/pattern.txt` });
+      expect(result.status, result.stderr || result.stdout).toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('never assigns automatic variables or leaks WaitForExit output in the verifier and its dot-sourced helper', () => {

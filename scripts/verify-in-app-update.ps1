@@ -594,9 +594,11 @@ function Get-UpdaterSetupProcesses {
 
 function Wait-UpdaterSetupExit {
     param([Parameter(Mandatory = $true)][datetime]$StartedAfter,[Parameter(Mandatory = $true)][AllowEmptyString()][string[]]$TempRoots,[Parameter(Mandatory = $true)][datetime]$Deadline,[scriptblock]$SnapshotProvider)
+    $observed = $false
     do {
         $remaining = @(Get-UpdaterSetupProcesses -StartedAfter $StartedAfter -TempRoots $TempRoots -SnapshotProvider $SnapshotProvider)
-        if ($remaining.Count -eq 0) { return }
+        if ($remaining.Count -eq 0) { return [pscustomobject]@{ processObserved = $observed; exitVerified = $observed } }
+        $observed = $true
         Start-Sleep -Milliseconds 250
     } while ([datetime]::UtcNow -lt $Deadline)
     $names = @($remaining | ForEach-Object { [IO.Path]::GetFileName([string]$_.ExecutablePath) -replace '[^A-Za-z0-9 ._-]','?' } | Sort-Object -Unique)
@@ -797,7 +799,7 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
     } while ([datetime]::UtcNow -lt $installDeadline)
     $shellWindowAtRelaunch = Test-ShellWindowPresent
     $relaunchOutcome = Resolve-AutomaticRelaunch -Observed ($null -ne $automaticRelaunch) -ShellWindowBeforeUpdate $shellWindowBeforeUpdate -ShellWindowAtRelaunch $shellWindowAtRelaunch
-    Wait-UpdaterSetupExit -StartedAfter $retryStarted -TempRoots @([string]$env:TEMP,[IO.Path]::GetTempPath(),(Join-Path $env:LOCALAPPDATA 'Temp')) -Deadline ([datetime]::UtcNow.AddSeconds($script:UpdatePins.UpdaterSetupExitDeadlineSeconds))
+    $updaterSetupOutcome = Wait-UpdaterSetupExit -StartedAfter $retryStarted -TempRoots @([string]$env:TEMP,[IO.Path]::GetTempPath(),(Join-Path $env:LOCALAPPDATA 'Temp')) -Deadline ([datetime]::UtcNow.AddSeconds($script:UpdatePins.UpdaterSetupExitDeadlineSeconds))
     Stop-ExactProcesses -ApplicationPath ([string]$upgraded.appPath)
     Stop-WebDriverSession -Session $session
     $session = $null
@@ -840,8 +842,8 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
     Assert-HostedPublisherUiEvidence -Value $applicationPublisherUi -Kind 'installed-application' -FileName 'pdf-workstation.exe' -Bytes ([uint64]$targetApplicationReceipt.bytes) -Sha256 ([string]$targetApplicationReceipt.sha256) -Publisher $ExpectedPublisher
     [IO.Directory]::CreateDirectory($output) | Out-Null
     $record = [ordered]@{
-        schemaVersion = 3
-        scope = 'Ephemeral GitHub-hosted proof of the exact published 0.2.0 UI checking the public latest manifest, deterministic pre-download network failure and retry, signed target install, automatic relaunch when the session has an Explorer shell window (otherwise recorded as not observed with its reason), a verifier-launched current-version recheck, exact Authenticode publisher and trusted-timestamp verification, sentinel preservation, and standalone signed-installer restoration of a controlled missing-application-executable state; the noninteractive hosted session does not attempt or verify Windows Explorer Digital Signatures UI, and partial-byte interruption and installer transactionality are not established.'
+        schemaVersion = 4
+        scope = 'Ephemeral GitHub-hosted proof of the exact published 0.2.0 UI checking the public latest manifest (release metadata is read from the GitHub API with the job''s read-only token; latest.json, the installers and the signature are downloaded unauthenticated), deterministic pre-download network failure and retry, signed target install, automatic relaunch when the session has an Explorer shell window (otherwise recorded as not observed with its reason), a verifier-launched current-version recheck, exact Authenticode publisher and trusted-timestamp verification, sentinel preservation, and standalone signed-installer restoration of a controlled missing-application-executable state; updater setup exit is recorded as verified only when an updater setup process was observed; the noninteractive hosted session does not attempt or verify Windows Explorer Digital Signatures UI, and partial-byte interruption and installer transactionality are not established.'
         mode = 'published-stable-in-app-update'
         workflowSourceRevision = $WorkflowSourceRevision
         targetSourceRevision = $TargetSourceRevision
@@ -879,7 +881,7 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
         }
         verification = [ordered]@{
             runner = 'github-hosted-windows-2022'; ephemeral = $true
-            publicUnauthenticatedReleaseMetadataVerified = $true; publicLatestManifestVerified = $true
+            releaseMetadataVerified = $true; releaseMetadataAuthenticated = $true; publicLatestManifestVerified = $true; publicLatestManifestAuthenticated = $false
             exactPublishedBaselineInstalled = $true; inAppUpdateUiVerified = $true
             deterministicEarlyDownloadCutoffVerified = $true; failedDownloadLeftBaselineUnchanged = $true
             retryThroughSameUiVerified = $true; updaterSignatureVerified = $true; targetPublisherSignatureVerified = $true
@@ -890,11 +892,11 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
             publisherUiScreenshotsUsed = $false; standaloneSignedInstallerRepairVerified = $true
             partialByteDownloadInterruptionVerified = $false; appKillMidDownloadVerified = $false
             installerStageInterruptionVerified = $false; installerTransactionalityVerified = $false
-            firewallRuleRemoved = $true; updaterSetupExitVerified = $true; relevantApplicationProcessesRemaining = 0
+            firewallRuleRemoved = $true; updaterSetupProcessObserved = [bool]$updaterSetupOutcome.processObserved; updaterSetupExitVerified = [bool]$updaterSetupOutcome.exitVerified; relevantApplicationProcessesRemaining = 0
         }
     }
     $json = $record | ConvertTo-Json -Depth 12
-    if ($json -match '(?i)([A-Z]:\\|\\Users\\|runneradmin|GITHUB_TOKEN|GH_TOKEN|IN_APP_UPDATE_API_TOKEN|gh[pousr]_[A-Za-z0-9_]{16,}|AZURE_|TAURI_SIGNING|codesigning\.azure\.net|raw\.log|release-assets\.githubusercontent\.com)') {
+    if ($json -match '(?i)([A-Z]:\\|\\Users\\|runneradmin|GITHUB_TOKEN|GH_TOKEN|IN_APP_UPDATE_API_TOKEN|gh[pousr]_[A-Za-z0-9_]{16,}|(?-i:eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})|AZURE_|TAURI_SIGNING|codesigning\.azure\.net|raw\.log|release-assets\.githubusercontent\.com)') {
         throw 'Sanitized in-app update record contains a host path, credential marker, raw log, or ephemeral download URL.'
     }
     $recordPath = Join-Path $output 'in-app-update-verification.json'
