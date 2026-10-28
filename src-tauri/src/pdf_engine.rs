@@ -104,6 +104,9 @@ pub(crate) trait EngineDocument {
     fn page_sizes(&self) -> Result<Vec<PageSize>, String>;
     /// No security handler (not encrypted, no permission restrictions).
     fn is_unprotected(&self) -> bool;
+    /// PDFium's own copy/extract permission (`FPDF_GetDocPermissions` bit 5) under the security handler
+    /// PDFium chose, read once at load. The text gate requires this and lopdf's view to agree (see `service.rs`).
+    fn text_extraction_allowed(&self) -> bool;
     /// Displayed width and height in points of a planned page (crop and rotation applied).
     fn planned_page_size(&self, spec: &PageSpec) -> Result<(f32, f32), String>;
     /// The viewer render: `width` pixels wide, at most 5,000 high, annotations on, PNG-encoded.
@@ -139,25 +142,43 @@ pub(crate) trait EngineDocument {
 }
 
 /// PDFium in this process.
-pub(crate) struct InProcessEngine { pdfium: Pdfium }
+/// `raw` is a second binding to the same loaded library, kept only to read the raw permission bits that
+/// pdfium-render does not expose (it reports bit 10, not bit 5, for revision 3 and later). It must be taken
+/// before `Pdfium::new`, which refuses any later binding.
+pub(crate) struct InProcessEngine { pdfium: Pdfium, raw: Box<dyn PdfiumLibraryBindings> }
 impl InProcessEngine {
     pub(crate) fn bind(library: PathBuf) -> Result<Self, String> {
-        Pdfium::bind_to_library(library).map(Pdfium::new).map(|pdfium| Self { pdfium }).map_err(|e| format!("PDF engine could not start: {e}"))
+        let start = |error: PdfiumError| format!("PDF engine could not start: {error}");
+        let raw = Pdfium::bind_to_library(&library).map_err(start)?;
+        let pdfium = Pdfium::bind_to_library(library).map(Pdfium::new).map_err(start)?;
+        Ok(Self { pdfium, raw })
+    }
+    fn document<'a>(&self, inner: PdfDocument<'a>) -> InProcessDocument<'a> {
+        let handle = self.raw.get_handle_from_document(&inner);
+        let bits = unsafe { self.raw.FPDF_GetDocPermissions(handle) } as u64;
+        InProcessDocument { inner, text_extraction_allowed: extraction_bits_allow(bits) }
     }
 }
+
+/// Bit 5 (0x10), the bit lopdf's `COPYABLE` reads, is copy/extract in every standard handler revision (R2-R6), so
+/// the revision (`FPDF_GetSecurityHandlerRevision`) does not change the rule: without an `/Encrypt` dictionary
+/// (revision -1) or when the owner password unlocked the file PDFium reports every bit; otherwise the bits are
+/// the `/P` of the `/Encrypt` dictionary PDFium resolved. Bit 10 (accessibility extraction, R3+) is not enough.
+pub(crate) fn extraction_bits_allow(bits: u64) -> bool { bits & 0x10 != 0 }
+
 impl PdfEngine for InProcessEngine {
     type Document<'a> = InProcessDocument<'a>;
     fn load_from_vec(&self, bytes: Vec<u8>, password: Option<&str>) -> Result<InProcessDocument<'_>, LoadError> {
-        Ok(InProcessDocument { inner: self.pdfium.load_pdf_from_byte_vec(bytes, password)? })
+        Ok(self.document(self.pdfium.load_pdf_from_byte_vec(bytes, password)?))
     }
     fn load_from_slice<'a>(&'a self, bytes: &'a [u8], password: Option<&str>) -> Result<InProcessDocument<'a>, LoadError> {
-        Ok(InProcessDocument { inner: self.pdfium.load_pdf_from_byte_slice(bytes, password)? })
+        Ok(self.document(self.pdfium.load_pdf_from_byte_slice(bytes, password)?))
     }
 }
 
 /// A document loaded in this process. Its PDFium handle is private to this module: the worker can
 /// reach it only through [`EngineDocument`].
-pub(crate) struct InProcessDocument<'a> { inner: PdfDocument<'a> }
+pub(crate) struct InProcessDocument<'a> { inner: PdfDocument<'a>, text_extraction_allowed: bool }
 
 impl InProcessDocument<'_> {
     fn with_target<T>(&self, target: PageTarget<'_>, action: impl FnOnce(&PdfPage<'_>) -> T) -> Result<T, String> {
@@ -198,6 +219,7 @@ impl EngineDocument for InProcessDocument<'_> {
         }).collect()
     }
     fn is_unprotected(&self) -> bool { matches!(self.inner.permissions().security_handler_revision(), Ok(PdfSecurityHandlerRevision::Unprotected)) }
+    fn text_extraction_allowed(&self) -> bool { self.text_extraction_allowed }
     fn planned_page_size(&self, spec: &PageSpec) -> Result<(f32, f32), String> {
         with_planned_page(&self.inner, spec, |page| Ok((page.width().value, page.height().value)))
     }

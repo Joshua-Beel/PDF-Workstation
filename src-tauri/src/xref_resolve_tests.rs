@@ -505,6 +505,73 @@ fn a_refused_encrypted_file_keeps_its_copy_permission() {
     assert_eq!(crate::editor::EditSession::new(allowed, 0).text_extraction_permission(), Ok(()));
 }
 
+/// A one-page file encrypted with the empty user password and owner password "owner" (RC4 128, revision 3).
+fn encrypted_page(permissions: lopdf::Permissions) -> Vec<u8> {
+    use lopdf::{dictionary, EncryptionState, EncryptionVersion};
+    let mut document = Document::with_version("1.7");
+    let pages = document.new_object_id();
+    let page = document.add_object(dictionary! { "Type" => "Page", "Parent" => pages, "MediaBox" => vec![0.into(), 0.into(), 200.into(), 200.into()] });
+    document.objects.insert(pages, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }));
+    let root = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    document.trailer.set("Root", root);
+    document.trailer.set("ID", vec![Object::string_literal("pdfium-perm-id"), Object::string_literal("pdfium-perm-id")]);
+    let state = EncryptionState::try_from(EncryptionVersion::V2 { document: &document, owner_password: "owner", user_password: "", key_length: 128, permissions }).unwrap();
+    document.encrypt(&state).unwrap();
+    let mut bytes = Vec::new();
+    document.save_to(&mut bytes).unwrap();
+    bytes
+}
+
+/// The same file with a later trailer that has no `/Encrypt` and a `startxref` past the end. lopdf rebuilds its
+/// table and takes the newest `trailer` with a usable `/Root` (so it sees no encryption); PDFium rebuilds too and
+/// keeps the `/Encrypt` it found, so it decrypts with the empty password and applies `/P`.
+fn trailer_disagreement(permissions: lopdf::Permissions) -> Vec<u8> {
+    let mut bytes = encrypted_page(permissions);
+    let original = Document::load_mem(&bytes).unwrap();
+    let root = original.trailer.get(b"Root").unwrap().as_reference().unwrap();
+    let past_end = bytes.len() + 4096;
+    bytes.extend_from_slice(format!("trailer\n<</Size {}/Root {} 0 R>>\nstartxref\n{past_end}\n%%EOF\n", original.max_id + 1, root.0).as_bytes());
+    bytes
+}
+
+/// The text gate allows only when lopdf and PDFium both allow copying. Runs in a child process so this test binary
+/// binds PDFium only once per process.
+#[test]
+fn text_extraction_needs_lopdf_and_pdfium_to_agree() {
+    use crate::pdf_engine::{EngineDocument, InProcessEngine, PdfEngine};
+    const CHILD: &str = "SM3_PDFIUM_PERMISSION_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "xref_resolve::tests::text_extraction_needs_lopdf_and_pdfium_to_agree", "--nocapture", "--test-threads=1"]).env(CHILD, "1").output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success() && stdout.contains("pdfium-permission-ok"), "child failed:\n{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let engine = InProcessEngine::bind(root.join("resources/pdfium/bin/pdfium.dll")).unwrap();
+    let denied_message = Err::<(), String>("This PDF does not allow text and graphics extraction.".into());
+    let gate = |bytes: &[u8], password: Option<&str>| {
+        let document = engine.load_from_vec(bytes.to_vec(), password).unwrap();
+        let session = crate::editor::EditSession::opened(bytes.to_vec(), crate::pdf_load::load_for_open(bytes).unwrap(), document.page_count(), password);
+        (session.text_extraction_permission(), document.is_unprotected(), document.text_extraction_allowed(), crate::service::text_extraction_permission(&session, &document))
+    };
+
+    let plain = std::fs::read(root.join("resources/welcome.pdf")).unwrap();
+    assert_eq!(gate(&plain, None), (Ok(()), true, true, Ok(())), "an unprotected file");
+    let allowed = encrypted_page(lopdf::Permissions::all());
+    assert_eq!(gate(&allowed, None), (Ok(()), false, true, Ok(())), "both readers allow");
+    let denied = encrypted_page(lopdf::Permissions::all() - lopdf::Permissions::COPYABLE);
+    assert_eq!(gate(&denied, None), (denied_message.clone(), false, false, denied_message.clone()), "both readers deny");
+
+    let disagreeing = trailer_disagreement(lopdf::Permissions::all() - lopdf::Permissions::COPYABLE);
+    let lopdf_view = crate::pdf_load::load(&disagreeing).unwrap();
+    assert!(lopdf_view.trailer.get(b"Encrypt").is_err() && lopdf_view.encryption_state.is_none() && lopdf_view.xref_start == 0, "lopdf rebuilt and sees no encryption");
+    assert_eq!(gate(&disagreeing, None), (Ok(()), false, false, denied_message.clone()), "PDFium decrypts and denies, so the gate denies");
+    let disagreeing_allowed = trailer_disagreement(lopdf::Permissions::all());
+    assert_eq!(gate(&disagreeing_allowed, None), (Ok(()), false, true, Ok(())), "both allow although they disagree on encryption");
+    println!("pdfium-permission-ok");
+}
+
 /// Read-only measurement over a folder of real PDFs: `SM3_XREF_PROBE_DIR=<folder> cargo test --bins xref_probe -- --ignored --nocapture`.
 /// Prints counts only, never file names.
 #[test]

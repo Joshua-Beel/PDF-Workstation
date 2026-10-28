@@ -376,7 +376,7 @@ impl<'e> State<'e> {
         let document = self.engine.load_from_slice(bytes, password).map_err(load_error)?;
         let handle = self.next_handle;
         self.next_handle = self.next_handle.checked_add(1).unwrap_or(1);
-        let loaded = Loaded { handle, page_count: document.page_count(), unprotected: document.is_unprotected() };
+        let loaded = Loaded { handle, page_count: document.page_count(), unprotected: document.is_unprotected(), text_extraction_allowed: document.text_extraction_allowed() };
         self.documents.insert(handle, HelperDocument { document, _source: source });
         let mut out = FrameWriter::new(kind::LOAD, sequence);
         put_loaded(&mut out, &loaded);

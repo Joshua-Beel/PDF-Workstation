@@ -576,7 +576,7 @@ impl PdfService {
                             cancellation.ensure_runnable().map_err(|error| error.to_string())?;
                             let (session, _) = sessions.get(&request.document_id).ok_or("Document is closed")?;
                             let original = documents.get(&request.document_id).ok_or("Document is closed")?;
-                            session.text_extraction_permission()?;
+                            text_extraction_permission(session, &**original)?;
                             let (dimensions, spec, page_width, page_height) = checked_ocr_request(session, original, request)?;
                             #[cfg(test)]
                             { ocr_work.entry(request.document_id).or_default().preflighted += 1; }
@@ -633,7 +633,7 @@ impl PdfService {
                             if session.revision != revision { return Err("Document changed. Start searchable OCR again.".into()); }
                             if !document.is_unprotected() { return Err("Searchable OCR of encrypted or restricted PDFs is not supported in this build.".into()); }
                             session.page_image_export_guard()?;
-                            session.text_extraction_permission()?;
+                            text_extraction_permission(session, &**document)?;
                             let count = session.plan.len();
                             if count == 0 || count > crate::searchable_pdf_stream::MAX_STREAM_PAGES as usize { return Err("Searchable OCR supports 1 to 10,000 current pages.".into()); }
                             let page_sizes = session.plan.iter().map(|spec| document.planned_page_size(spec)).collect::<Result<Vec<_>, _>>()?;
@@ -660,7 +660,7 @@ impl PdfService {
                             if session.revision != request.revision { return Err("Document changed. Start OCR again.".into()); }
                             if !original.is_unprotected() { return Err("OCR of encrypted or restricted PDFs is not supported in this build.".into()); }
                             session.page_image_export_guard()?;
-                            session.text_extraction_permission()?;
+                            text_extraction_permission(session, &**original)?;
                             let spec = session.plan.get(usize::from(request.page)).ok_or("OCR page is out of range")?.clone();
                             let (page_width, page_height) = original.planned_page_size(&spec)?;
                             let (dimensions, reduced) = match crate::ocr::raster_dimensions_fitting(page_width, page_height) {
@@ -962,7 +962,7 @@ impl PdfService {
                             if session.revision != revision { return Err("Document changed. Select text again.".into()); }
                             let spec = session.plan.get(index as usize).ok_or("Page is out of range")?;
                             let document = documents.get(&id).ok_or("Document is closed")?;
-                            session.text_extraction_permission()?;
+                            text_extraction_permission(session, &**document)?;
                             document.text_geometry(PageTarget::Planned(spec), id, index, revision)
                         })();
                         let _ = reply.send(result);
@@ -974,7 +974,7 @@ impl PdfService {
                             if session.revision != revision { return Err("Document changed. Search again.".into()); }
                             let spec = session.plan.get(page as usize).ok_or("Page is out of range")?;
                             let document = documents.get(&id).ok_or("Document is closed")?;
-                            session.text_extraction_permission()?;
+                            text_extraction_permission(session, &**document)?;
                             let visible = document.visible_text(PageTarget::Planned(spec))?;
                             checked_read_text_bytes(0, visible.len(), "This page has too much embedded text to read or search.")?;
                             Ok(visible)
@@ -1706,6 +1706,13 @@ fn replacement_sessions(sessions: &HashMap<u64, (EditSession, DocumentInfo)>, ta
     Ok((target_session, donor_session))
 }
 
+/// Text, selection and OCR reads need both readers to allow copying: lopdf's view (the session) and PDFium's,
+/// which can resolve a different trailer (and so a different `/Encrypt`) than lopdf does.
+pub(crate) fn text_extraction_permission(session: &EditSession, document: &impl EngineDocument) -> Result<(), String> {
+    session.text_extraction_permission()?;
+    if document.text_extraction_allowed() { Ok(()) } else { Err("This PDF does not allow text and graphics extraction.".into()) }
+}
+
 fn checked_read_text_bytes(current: usize, additional: usize, message: &str) -> Result<usize, String> {
     let total = current.checked_add(additional).ok_or_else(|| message.to_owned())?;
     if total > MAX_READ_TEXT_BYTES { return Err(message.into()); }
@@ -1933,7 +1940,7 @@ fn checked_searchable_ocr_request(session: &EditSession, document: &EngineDoc<'_
     if session.revision != revision { return Err("Document changed. Start searchable OCR again.".into()); }
     if !document.is_unprotected() { return Err("Searchable OCR of encrypted or restricted PDFs is not supported in this build.".into()); }
     session.page_image_export_guard()?;
-    session.text_extraction_permission()?;
+    text_extraction_permission(session, document)?;
     if session.plan.is_empty() || session.plan.len() > crate::searchable_ocr_job::MAX_DOCUMENT_PAGES { return Err("Searchable OCR supports 1 to 32 current pages.".into()); }
     let mut pixels = 0_u64;
     for spec in &session.plan {

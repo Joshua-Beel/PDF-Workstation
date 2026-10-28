@@ -119,6 +119,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 Full history: [docs/changelog.md](docs/changelog.md)
 
 - In-app update test file gets a 60 s per-test timeout, so pwsh start-up on a busy CI runner no longer trips the 5 s default (SM0; test only).
+- Text search, selection, copy and OCR now also need PDFium's own copy permission (`/P` bit 5), so a file whose readers pick different trailers cannot bypass a restriction (SM3).
 - OCR save-in-parts review fixes: Discard after some parts are saved asks first and names them, a paused job lists saved parts, crash recovery after a cross-volume copy, no junction following, free-space check before each new part (SM4).
 - Large-document OCR (source build): a copy that would pass 1 GiB can be saved in parts, `<name> (part 1 of N).pdf`, each at most 1 GiB, checked from disk and never overwriting; unit-tested with a small size limit only (SM4).
 - The Open dialog is now titled "Open a PDF" (it showed the Windows default "Open"), matching the other titled native dialogs; both dialog verifiers expect it (SM3).
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - Large-document OCR, step 2: job engine with a bounded worker pool, retry-then-degrade per page, a five-in-a-row breaker, pause, cancel and resume; not wired to the app yet (SM4).
 - Large-document OCR, step 1: a streaming, resumable searchable-PDF writer (lossless images, journal, final check from disk); not wired to the app yet (SM4; no user-visible change).
 - Debug builds only: `SMACROBAT_TEST_DATA_DIR=<absolute folder>` puts recovery records, the update-attempt note and the WebView2 profile under that folder instead of the user profile; compiled out of release (SM5).
-- Docs: OCR packaging evidence in `docs/features.md` and `docs/ocr-feasibility.md` now cites only what `docs/releases.md` states (SM4; docs only).
