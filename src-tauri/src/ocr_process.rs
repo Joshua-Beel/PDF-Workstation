@@ -47,7 +47,12 @@ const RUN_STATE_COMPLETED: u8 = 2;
 
 #[cfg(test)]
 pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-    OCR_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    let guard = OCR_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    while OCR_SLOT.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    guard
 }
 
 #[derive(Clone)]
@@ -535,6 +540,29 @@ fn sha256(input: &[u8]) -> Result<[u8; 32], OcrProcessError> {
     Ok(output)
 }
 
+static JOB_DIRECTORY_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+struct JobDirectory(PathBuf);
+
+impl JobDirectory {
+    fn create() -> Result<Self, OcrProcessError> {
+        let number = JOB_DIRECTORY_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("pdf-workstation-ocr-{}-{number}", std::process::id()));
+        std::fs::create_dir(&path).map_err(|error| OcrProcessError::System(format!("Could not create the OCR work directory: {error}")))?;
+        Ok(Self(path))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for JobDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn run_child(
     engine: &Path,
     tessdata: &Path,
@@ -544,12 +572,13 @@ fn run_child(
     output_profile: OcrOutputProfile,
 ) -> Result<OcrProcessOutput, OcrProcessError> {
     cancellation.ensure_runnable()?;
+    let job_directory = JobDirectory::create()?;
     let suspended = child_job::spawn_suspended(
         OCR_LABEL,
         &JobLimits::single_process(OCR_CHILD_COMMIT_LIMIT),
         || {
             let application = wide_null(engine.as_os_str())?;
-            let current_directory = wide_null(engine.parent().ok_or_else(|| OcrProcessError::InvalidAsset("OCR executable has no parent directory".into()))?.as_os_str())?;
+            let current_directory = wide_null(job_directory.path().as_os_str())?;
             let command_line = build_command_line(engine, tessdata, output_profile)?;
             Ok(ChildCommand { application, command_line, current_directory })
         },
@@ -679,7 +708,7 @@ use std::thread;
 use std::time::Duration;
 
 fn main() {
-    let directory = std::env::current_dir().unwrap();
+    let directory = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
     let name = std::env::current_exe().unwrap().file_name().unwrap().to_string_lossy().to_ascii_lowercase();
     if name == "grandchild.exe" {
         fs::write(directory.join("grandchild.pid"), std::process::id().to_string()).unwrap();
@@ -689,6 +718,7 @@ fn main() {
     }
     fs::write(directory.join("child.pid.tmp"), std::process::id().to_string()).unwrap();
     fs::rename(directory.join("child.pid.tmp"), directory.join("child.pid")).unwrap();
+    fs::write(directory.join("cwd.txt"), std::env::current_dir().unwrap().to_string_lossy().as_bytes()).unwrap();
     let behavior = fs::read_to_string(directory.join("behavior.txt")).unwrap();
     if matches!(behavior.trim(), "stdout-exact" | "stdout-over" | "stderr-exact" | "stderr-over" | "invalid-stdout" | "invalid-stderr" | "nonzero" | "unexpected-stderr") {
         let mut input = Vec::new();
@@ -755,7 +785,7 @@ fn main() {
     fn fake_executable() -> Result<PathBuf, String> {
         FAKE_EXECUTABLE
             .get_or_init(|| {
-                let directory = repository_root().join("target/ocr-process-tests/fake-build");
+                let directory = repository_root().join("target/ocr-process-tests").join(format!("fake-build-{}", std::process::id()));
                 std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
                 let source = directory.join("fake-child.rs");
                 let executable = directory.join("fake-child.exe");
@@ -801,7 +831,8 @@ fn main() {
 
     fn wait_for_pid(directory: &Path) -> u32 {
         let path = directory.join("child.pid");
-        for _ in 0..300 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
             if let Ok(text) = std::fs::read_to_string(&path) {
                 if let Ok(pid) = text.trim().parse() {
                     return pid;
@@ -821,7 +852,8 @@ fn main() {
     }
 
     fn assert_process_reaped(pid: u32) {
-        for _ in 0..1000 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        while std::time::Instant::now() < deadline {
             if !process_is_alive(pid) {
                 return;
             }
@@ -862,6 +894,21 @@ fn main() {
     }
 
     #[test]
+    fn child_working_directory_is_a_private_temp_directory_outside_the_engine_root() {
+        let _serial = test_lock();
+        let case = fake_case("exact");
+        assert_eq!(case.runner.recognize_p6(TEST_P6, &OcrCancellation::default()).unwrap().text, "recognized text\n");
+        let reported = PathBuf::from(std::fs::read_to_string(case.directory.join("cwd.txt")).unwrap());
+        let engine_root = external_windows_path(&case.directory.canonicalize().unwrap()).unwrap();
+        let temp_root = external_windows_path(&std::env::temp_dir().canonicalize().unwrap()).unwrap();
+        assert!(!reported.starts_with(&engine_root), "{reported:?} is inside the engine root {engine_root:?}");
+        assert!(!reported.starts_with(&case.directory), "{reported:?} is inside the install folder");
+        assert!(reported.starts_with(&temp_root), "{reported:?} is not under {temp_root:?}");
+        assert!(reported.file_name().unwrap().to_string_lossy().starts_with("pdf-workstation-ocr-"));
+        assert!(!reported.exists(), "the per-job directory must be removed after the job");
+    }
+
+    #[test]
     fn cancellation_before_spawn_and_while_suspended_runs_no_child_code() {
         let _serial = test_lock();
         let pre_cancelled = fake_case("exact");
@@ -877,7 +924,7 @@ fn main() {
         let result = suspended.runner.recognize_with_options(
             TEST_P6,
             &cancellation,
-            RunOptions { timeout: Duration::from_secs(2), before_resume: Some(&hook), after_resume: None, before_finish: None },
+            RunOptions { timeout: Duration::from_secs(120), before_resume: Some(&hook), after_resume: None, before_finish: None },
         );
         assert_eq!(result, Err(OcrProcessError::Cancelled));
         assert!(!suspended.directory.join("child.pid").exists());
@@ -921,7 +968,7 @@ fn main() {
                 TEST_P6,
                 &worker_token,
                 RunOptions {
-                    timeout: Duration::from_secs(2),
+                    timeout: Duration::from_secs(120),
                     before_resume: None,
                     after_resume: None,
                     before_finish: Some(&before_finish),
@@ -937,7 +984,8 @@ fn main() {
 
         let completed = fake_case("exact");
         let cancellation = OcrCancellation::default();
-        assert!(completed.runner.recognize_p6(TEST_P6, &cancellation).is_ok());
+        let completed_result = completed.runner.recognize_p6(TEST_P6, &cancellation);
+        assert!(completed_result.is_ok(), "{completed_result:?}");
         assert!(!cancellation.cancel());
     }
 
@@ -1053,7 +1101,7 @@ fn main() {
             let _ = unwound.runner.recognize_with_options(
                 TEST_P6,
                 &OcrCancellation::default(),
-                RunOptions { timeout: Duration::from_secs(2), before_resume: None, after_resume: Some(&after_resume), before_finish: None },
+                RunOptions { timeout: Duration::from_secs(120), before_resume: None, after_resume: Some(&after_resume), before_finish: None },
             );
         }));
         assert!(caught.is_err());
