@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Release scripts: the installed print-dialog diagnostic keeps its last completed native-window receipt when the final poll is cut short by the deadline (fixes a CI flake), and the `WEBDRIVER_ERROR_DIAG` sanitizer now also redacts `file://server/share` and a UNC path glued to a word (SM6; scripts and tests only).
 - Text replacement and selected-text highlights now pass the same two-reader copy-permission check as search and copy (SM3).
 - In-app update test file gets a 60 s per-test timeout, so pwsh start-up on a busy CI runner no longer trips the 5 s default (SM0; test only).
 - Text search, selection, copy and OCR now also need PDFium's own copy permission (`/P` bit 5), so a file whose readers pick different trailers cannot bypass a restriction (SM3).
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - Large-document OCR review fixes: crash-safe after finalize, panics degrade one page instead of hanging, Save elsewhere, bounded final check, stale-folder cleanup (SM4).
 - Large-document OCR, step 3 (source build): documents over 32 pages get a background searchable OCR copy (up to 10,000 pages) with a progress panel, Pause, Cancel and Resume; not in any release (SM4).
 - Large-document OCR, step 2: job engine with a bounded worker pool, retry-then-degrade per page, a five-in-a-row breaker, pause, cancel and resume; not wired to the app yet (SM4).
-- Large-document OCR, step 1: a streaming, resumable searchable-PDF writer (lossless images, journal, final check from disk); not wired to the app yet (SM4; no user-visible change).
