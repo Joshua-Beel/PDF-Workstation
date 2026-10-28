@@ -54,12 +54,14 @@ fn add_outline(document: &mut lopdf::Document, nodes: Vec<Node>) {
 
 /// Six pages: nested bookmarks using a direct /Dest, an inline and an indirect GoTo, a /Dests name, name-tree
 /// strings and an external action; a two-leaf name tree with /Limits; labels i, ii, P-1, P-2, P-3, A. Bookmarks
-/// E, F and G and the names tree-int-p0, Int-p4 and Int-p2 use page numbers instead of page references.
+/// E-K and the names tree-int-p0, Int-p4, Int-p2 and Real-p5 use page numbers instead of page references,
+/// including a real (`[2.5 /Fit]`, truncated), no view mode (`[3]`) and a reference to a number, all of which PDFium follows.
 fn fixture() -> lopdf::Document {
     let mut document = sample();
     let p: Vec<ObjectId> = document.get_pages().values().copied().collect();
     assert_eq!(p.len(), 6);
     let tree_p1 = document.add_object(fit(p[1]));
+    let four = document.add_object(Object::Integer(4));
     let goto_b = document.add_object(dictionary! { "S" => "GoTo", "D" => string("tree-p1") });
     let mut d = node("D", Target::Dest(fit(p[5])), vec![node("D1", Target::Dest(fit(p[3])), vec![])]);
     d.closed = true;
@@ -81,8 +83,12 @@ fn fixture() -> lopdf::Document {
             node("F1", Target::Dest(Object::Name(b"Int-p4".to_vec())), vec![]),
         ]),
         node("G", Target::Dest(Object::Name(b"Int-p2".to_vec())), vec![]),
+        node("H", Target::Dest(Object::Array(vec![Object::Real(2.5), Object::Name(b"Fit".to_vec())])), vec![]),
+        node("I", Target::Dest(Object::Array(vec![Object::Integer(3)])), vec![]),
+        node("J", Target::Dest(Object::Array(vec![Object::Reference(four), Object::Name(b"Fit".to_vec())])), vec![]),
+        node("K", Target::Dest(Object::Name(b"Real-p5".to_vec())), vec![]),
     ]);
-    let dests = document.add_object(dictionary! { "Named-p3" => fit(p[3]), "Named-p1" => dictionary! { "D" => fit(p[1]) }, "Int-p4" => fit_n(4), "Int-p2" => dictionary! { "D" => fit_n(2) } });
+    let dests = document.add_object(dictionary! { "Named-p3" => fit(p[3]), "Named-p1" => dictionary! { "D" => fit(p[1]) }, "Int-p4" => fit_n(4), "Int-p2" => dictionary! { "D" => fit_n(2) }, "Real-p5" => vec![Object::Real(5.5), "XYZ".into(), Object::Null, Object::Null, Object::Null] });
     let leaf1 = document.add_object(dictionary! { "Limits" => vec![string("tree-int-p0"), string("tree-p2")], "Names" => vec![string("tree-int-p0"), fit_n(0), string("tree-p1"), Object::Reference(tree_p1), string("tree-p2"), fit(p[2])] });
     let leaf2 = document.add_object(dictionary! { "Limits" => vec![string("tree-p5"), string("tree-p5")], "Names" => vec![string("tree-p5"), fit(p[5])] });
     let root = document.add_object(dictionary! { "Kids" => vec![Object::Reference(leaf1), Object::Reference(leaf2)] });
@@ -148,21 +154,23 @@ fn delete_move_and_extract_keep_bookmarks_named_destinations_and_labels_on_their
     let source_bytes = std::fs::read(&source).unwrap();
     let info = open(&service, &source);
     let original = lopdf::Document::load(&source).unwrap();
-    let all = vec![row("A", 0, Some(0)), row("A1", 1, Some(1)), row("A1a", 2, Some(2)), row("A2", 1, Some(3)), row("B", 0, Some(1)), row("B1", 1, Some(4)), row("B2", 1, Some(5)), row("C", 0, None), row("D", 0, Some(5)), row("D1", 1, Some(3)), row("E", 0, Some(3)), row("E2", 1, Some(0)), row("F", 0, Some(1)), row("F1", 1, Some(4)), row("G", 0, Some(2))];
+    let h = original.objects.values().filter_map(|object| object.as_dict().ok()).find(|dict| dict.get(b"Title").ok().and_then(|title| lopdf::decode_text_string(title).ok()).as_deref() == Some("H")).unwrap();
+    assert!(matches!(h.get(b"Dest").unwrap().as_array().unwrap()[0], Object::Real(_)), "the saved fixture keeps a real page number");
+    let all = vec![row("A", 0, Some(0)), row("A1", 1, Some(1)), row("A1a", 2, Some(2)), row("A2", 1, Some(3)), row("B", 0, Some(1)), row("B1", 1, Some(4)), row("B2", 1, Some(5)), row("C", 0, None), row("D", 0, Some(5)), row("D1", 1, Some(3)), row("E", 0, Some(3)), row("E2", 1, Some(0)), row("F", 0, Some(1)), row("F1", 1, Some(4)), row("G", 0, Some(2)), row("H", 0, Some(2)), row("I", 0, Some(3)), row("J", 0, Some(4)), row("K", 0, Some(5))];
     assert_eq!(lopdf_rows(&original), all, "the reader resolves direct, GoTo, /Dests and name-tree destinations");
     assert_eq!(pdfium_rows(&service, &info), all, "PDFium follows page-number destinations as page indexes");
     assert_eq!(pdfium_labels(&service, &info), ["i", "ii", "P-1", "P-2", "P-3", "A"]);
 
     let deleted = direct(&service, |reply| Request::Edit(info.id, PageEdit::Delete { pages: vec![1, 4] }, reply)).unwrap();
     let (copy, rows, labels) = saved(&service, &deleted, folder.path(), "deleted.pdf", None);
-    assert_eq!(rows, vec![row("A", 0, Some(0)), row("A1a", 1, Some(1)), row("A2", 1, Some(2)), row("B2", 0, Some(3)), row("C", 0, None), row("D", 0, Some(3)), row("D1", 1, Some(2)), row("E", 0, Some(2)), row("E2", 1, Some(0)), row("G", 0, Some(1))],
+    assert_eq!(rows, vec![row("A", 0, Some(0)), row("A1a", 1, Some(1)), row("A2", 1, Some(2)), row("B2", 0, Some(3)), row("C", 0, None), row("D", 0, Some(3)), row("D1", 1, Some(2)), row("E", 0, Some(2)), row("E2", 1, Some(0)), row("G", 0, Some(1)), row("H", 0, Some(1)), row("I", 0, Some(2)), row("K", 0, Some(3))],
         "bookmarks to removed pages are dropped and their children promoted; the rest keep their pages");
     assert_eq!(verify(&copy).iter().map(|(title, _, open)| (title.as_str(), *open)).filter(|(title, _)| *title == "D").collect::<Vec<_>>(), [("D", false)], "a closed bookmark stays closed");
     assert_eq!(labels, ["i", "P-1", "P-2", "A"], "each kept page keeps its original label");
-    assert_eq!(names(&copy), vec![("Int-p2".into(), Some(1)), ("Named-p3".into(), Some(2)), ("tree-int-p0".into(), Some(0)), ("tree-p2".into(), Some(1)), ("tree-p5".into(), Some(3))], "named destinations to removed pages are dropped");
+    assert_eq!(names(&copy), vec![("Int-p2".into(), Some(1)), ("Named-p3".into(), Some(2)), ("Real-p5".into(), Some(3)), ("tree-int-p0".into(), Some(0)), ("tree-p2".into(), Some(1)), ("tree-p5".into(), Some(3))], "named destinations to removed pages are dropped");
     assert_eq!(copy.get_pages().len(), 4);
     assert!(!crate::named_dests::page_number_destination_left(&copy, 6), "page numbers are turned into page references");
-    for title in ["A1", "B", "B1", "F", "F1"] { assert!(!has_title(&copy, title), "the dropped bookmark {title} is pruned from the copy"); }
+    for title in ["A1", "B", "B1", "F", "F1", "J"] { assert!(!has_title(&copy, title), "the dropped bookmark {title} is pruned from the copy"); }
     assert_eq!(copy.objects.values().filter(|object| object.as_dict().is_ok_and(|dict| dict.get(b"Type").and_then(Object::as_name).is_ok_and(|kind| kind == b"Page"))).count(), 4, "removed pages are pruned");
     assert!(!copy.objects.values().any(|object| object.as_array().is_ok_and(|array| matches!(array.first(), Some(Object::Null)))), "no destination is left pointing at null");
 
@@ -170,14 +178,14 @@ fn delete_move_and_extract_keep_bookmarks_named_destinations_and_labels_on_their
     let moved = { assert!(!moved.dirty); direct(&service, |reply| Request::Edit(moved.id, PageEdit::Move { from: 0, to: 5 }, reply)).unwrap() };
     let (copy, rows, labels) = saved(&service, &moved, folder.path(), "moved.pdf", None);
     assert_eq!(rows, vec![row("A", 0, Some(5)), row("A1", 1, Some(0)), row("A1a", 2, Some(1)), row("A2", 1, Some(2)), row("B", 0, Some(0)), row("B1", 1, Some(3)), row("B2", 1, Some(4)), row("C", 0, None), row("D", 0, Some(4)), row("D1", 1, Some(2)),
-        row("E", 0, Some(2)), row("E2", 1, Some(5)), row("F", 0, Some(0)), row("F1", 1, Some(3)), row("G", 0, Some(1))], "page-number bookmarks follow their pages on a move");
-    assert_eq!(names(&copy), vec![("Int-p2".into(), Some(1)), ("Int-p4".into(), Some(3)), ("Named-p1".into(), Some(0)), ("Named-p3".into(), Some(2)), ("tree-int-p0".into(), Some(5)), ("tree-p1".into(), Some(0)), ("tree-p2".into(), Some(1)), ("tree-p5".into(), Some(4))]);
+        row("E", 0, Some(2)), row("E2", 1, Some(5)), row("F", 0, Some(0)), row("F1", 1, Some(3)), row("G", 0, Some(1)), row("H", 0, Some(1)), row("I", 0, Some(2)), row("J", 0, Some(3)), row("K", 0, Some(4))], "page-number bookmarks follow their pages on a move");
+    assert_eq!(names(&copy), vec![("Int-p2".into(), Some(1)), ("Int-p4".into(), Some(3)), ("Named-p1".into(), Some(0)), ("Named-p3".into(), Some(2)), ("Real-p5".into(), Some(4)), ("tree-int-p0".into(), Some(5)), ("tree-p1".into(), Some(0)), ("tree-p2".into(), Some(1)), ("tree-p5".into(), Some(4))]);
     assert!(!crate::named_dests::page_number_destination_left(&copy, 6));
     assert_eq!(labels, ["ii", "P-1", "P-2", "P-3", "A", "i"], "a moved page keeps its label");
 
     let fresh = open(&service, &source);
     let (copy, rows, labels) = saved(&service, &fresh, folder.path(), "extracted.pdf", Some(vec![2, 3]));
-    assert_eq!(rows, vec![row("A1a", 0, Some(0)), row("A2", 0, Some(1)), row("C", 0, None), row("D1", 0, Some(1)), row("E", 0, Some(1)), row("G", 0, Some(0))]);
+    assert_eq!(rows, vec![row("A1a", 0, Some(0)), row("A2", 0, Some(1)), row("C", 0, None), row("D1", 0, Some(1)), row("E", 0, Some(1)), row("G", 0, Some(0)), row("H", 0, Some(0)), row("I", 0, Some(1))]);
     assert_eq!(labels, ["P-1", "P-2"]);
     assert_eq!(names(&copy), vec![("Int-p2".into(), Some(0)), ("Named-p3".into(), Some(1)), ("tree-p2".into(), Some(0))]);
     assert_eq!(std::fs::read(&source).unwrap(), source_bytes, "the source file is untouched");
@@ -194,7 +202,7 @@ fn pending_bookmark_edits_compose_with_page_deletion_and_pending_label_edits_sti
     session.apply(PageEdit::Delete { pages: vec![1, 4] }).unwrap();
     let copy = lopdf::Document::load_mem(&session.export(None).unwrap()).unwrap();
     verify(&copy);
-    assert_eq!(lopdf_rows(&copy), vec![row("A", 0, Some(0)), row("A1a", 1, Some(1)), row("Renamed", 1, Some(2)), row("B2", 0, Some(3)), row("C", 0, None), row("D", 0, Some(3)), row("D1", 1, Some(2)), row("E", 0, Some(2)), row("E2", 1, Some(0)), row("G", 0, Some(1))]);
+    assert_eq!(lopdf_rows(&copy), vec![row("A", 0, Some(0)), row("A1a", 1, Some(1)), row("Renamed", 1, Some(2)), row("B2", 0, Some(3)), row("C", 0, None), row("D", 0, Some(3)), row("D1", 1, Some(2)), row("E", 0, Some(2)), row("E2", 1, Some(0)), row("G", 0, Some(1)), row("H", 0, Some(1)), row("I", 0, Some(2)), row("K", 0, Some(3))]);
     assert_eq!(lopdf_labels(&copy), ["i", "P-1", "P-2", "A"]);
 
     let mut labelled = EditSession::new(save_bytes(&mut fixture()), 6);
@@ -225,7 +233,7 @@ fn hostile_or_unsupported_references_still_refuse_page_removal_and_leave_the_ses
     refused(&mut aliased, delete(), "also used by something else");
 
     let mut shared = fixture();
-    let (a1, d) = (title(&shared, "A1"), title(&shared, "G"));
+    let (a1, d) = (title(&shared, "A1"), title(&shared, "K"));
     shared.get_dictionary_mut(a1).unwrap().set("First", d);
     shared.get_dictionary_mut(a1).unwrap().set("Last", d);
     shared.get_dictionary_mut(d).unwrap().remove(b"Parent");
@@ -269,6 +277,10 @@ fn hostile_or_unsupported_references_still_refuse_page_removal_and_leave_the_ses
     let error = session.apply(PageEdit::Move { from: 0, to: 1 }).unwrap_err();
     assert!(error.contains("by its number"), "a page-number destination this copy cannot update refuses the move: {error}");
     assert_eq!(session.revision, 0); assert_eq!(session.source, bytes);
+    let mut plain = sample();
+    plain.catalog_mut().unwrap().set("OpenAction", Object::Array(vec![Object::Real(1.5)]));
+    let mut session = EditSession::new(save_bytes(&mut plain), 6);
+    assert!(session.apply(PageEdit::Move { from: 0, to: 1 }).unwrap_err().contains("by its number"), "without outlines, names or labels the cached source scan still refuses");
     numbered.catalog_mut().unwrap().set("OpenAction", dictionary! { "S" => "GoToR", "F" => string("other.pdf"), "D" => fit_n(0) });
     let mut session = EditSession::new(save_bytes(&mut numbered), 6);
     session.apply(PageEdit::Move { from: 0, to: 1 }).unwrap();
@@ -288,4 +300,46 @@ fn hostile_or_unsupported_references_still_refuse_page_removal_and_leave_the_ses
     let mut form = fixture();
     form.catalog_mut().unwrap().set("AcroForm", dictionary! {});
     refused(&mut form, PageEdit::Move { from: 0, to: 1 }, "forms");
+}
+
+/// A generated 2,000-page file of about 190 MiB (each page a ~96 KiB incompressible-text content stream).
+fn large(outline_and_labels: bool) -> Vec<u8> {
+    let mut document = lopdf::Document::with_version("1.7");
+    let pages = document.new_object_id();
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut kids = Vec::new();
+    for _ in 0..2000 {
+        let mut body = b"q Q\n%".to_vec();
+        for _ in 0..96 * 1024 { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; body.push(b'a' + (seed % 26) as u8); }
+        let content = document.add_object(lopdf::Stream::new(dictionary! {}, body));
+        kids.push(Object::Reference(document.add_object(dictionary! { "Type" => "Page", "Parent" => pages, "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()], "Contents" => content })));
+    }
+    document.objects.insert(pages, Object::Dictionary(dictionary! { "Type" => "Pages", "Count" => 2000, "Kids" => kids }));
+    let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    document.trailer.set("Root", catalog);
+    if outline_and_labels {
+        add_outline(&mut document, (0..10).map(|_| node("Chapter", Target::Dest(fit_n(0)), vec![])).collect());
+        let labels = document.add_object(dictionary! { "Nums" => vec![0.into(), dictionary! { "S" => "r" }.into(), 10.into(), dictionary! { "S" => "D" }.into()] });
+        document.catalog_mut().unwrap().set("PageLabels", labels);
+    }
+    save_bytes(&mut document)
+}
+
+#[test]
+#[ignore = "timing; run with --release --ignored --nocapture"]
+fn timing_move_and_delete_on_a_large_file() {
+    for outline_and_labels in [false, true] {
+        let bytes = large(outline_and_labels);
+        let mut session = EditSession::new(bytes.clone(), 2000);
+        let mut times = Vec::new();
+        for round in 0..3 {
+            let start = std::time::Instant::now();
+            session.apply(PageEdit::Move { from: round, to: 1999 }).unwrap();
+            times.push(start.elapsed().as_millis());
+        }
+        let start = std::time::Instant::now();
+        session.apply(PageEdit::Delete { pages: vec![5] }).unwrap();
+        let delete = start.elapsed().as_millis();
+        eprintln!("TIMING outline_and_labels={outline_and_labels} size={} MiB moves={times:?} ms delete={delete} ms", bytes.len() / (1024 * 1024));
+    }
 }

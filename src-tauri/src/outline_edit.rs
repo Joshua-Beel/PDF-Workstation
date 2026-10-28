@@ -130,7 +130,7 @@ fn destination_page(document: &Document, dict: &lopdf::Dictionary, pages: &HashM
         let (_, object) = document.dereference(object).ok()?;
         match object {
             Object::Name(name) | Object::String(name, _) => pages.get(&(*named.get(name)?)?).copied(),
-            _ => match object.as_array().ok()?.first()? { Object::Reference(id) => pages.get(id).copied(), _ => crate::named_dests::destination_page_number(document, object, pages.len()) },
+            _ => match object.as_array().ok()?.first()? { Object::Reference(id) if pages.contains_key(id) => pages.get(id).copied(), _ => crate::named_dests::destination_page_number(document, object, pages.len()) },
         }
     };
     if let Ok(dest) = dict.get(b"Dest") { return array_page(dest); }

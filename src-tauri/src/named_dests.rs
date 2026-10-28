@@ -13,7 +13,6 @@ const MAX_NODES: usize = 4096;
 const MAX_NAMES: usize = 65_536;
 const MAX_DEPTH: usize = 32;
 const MAX_HOPS: usize = 8;
-const VIEW_MODES: [&[u8]; 8] = [b"XYZ", b"Fit", b"FitH", b"FitV", b"FitR", b"FitB", b"FitBH", b"FitBV"];
 pub const REFUSAL: &str = "The named destinations use an unsupported structure, so pages cannot be removed or reordered safely.";
 
 /// The `/Dests` dictionary entries and the name-tree pairs, in document order; `None` when absent.
@@ -47,30 +46,35 @@ fn destination_array<'a>(document: &'a Document, value: &'a Object) -> Option<&'
     value.as_array().ok()
 }
 
-/// A destination array whose first element is a page number (`[3 /Fit]`), in range for `page_count`.
-fn page_number(array: &[Object], page_count: usize) -> Option<usize> {
-    match (array.first()?, array.get(1)?) {
-        (Object::Integer(number), Object::Name(mode)) if VIEW_MODES.contains(&mode.as_slice()) => usize::try_from(*number).ok().filter(|number| *number < page_count),
-        _ => None,
-    }
+/// A destination array whose first element is a page number, in range for `page_count`. Like PDFium, any
+/// number counts (`[3 /Fit]`, `[2.0 /Fit]`, a reference to a number, truncated toward zero), whatever the
+/// view mode, including none (`[3]`).
+fn page_number(document: &Document, array: &[Object], page_count: usize) -> Option<usize> {
+    let number = match follow(document, array.first()?)? {
+        Object::Integer(number) => *number,
+        Object::Real(number) if number.is_finite() => number.trunc() as i64,
+        _ => return None,
+    };
+    usize::try_from(number).ok().filter(|number| *number < page_count)
 }
 
 /// The page object a destination targets; a page number is resolved through `pages` (source page order).
 pub fn destination_target(document: &Document, value: &Object, pages: &[ObjectId]) -> Option<ObjectId> {
     let array = destination_array(document, value)?;
-    match array.first()? { Object::Reference(id) => Some(*id), _ => page_number(array, pages.len()).map(|number| pages[number]) }
+    if let Some(number) = page_number(document, array, pages.len()) { return Some(pages[number]); }
+    match array.first()? { Object::Reference(id) => Some(*id), _ => None }
 }
 
 /// The source page index of a page-number destination, or `None` for any other destination.
 pub fn destination_page_number(document: &Document, value: &Object, page_count: usize) -> Option<usize> {
-    page_number(destination_array(document, value)?, page_count)
+    page_number(document, destination_array(document, value)?, page_count)
 }
 
 /// A new, inline copy of `value` with its page number replaced by `page`, or `None` when `value` is not a
 /// page-number destination. The original objects are left untouched.
 pub fn with_page_reference(document: &Document, value: &Object, page: ObjectId, page_count: usize) -> Option<Object> {
     let fix = |array: &Vec<Object>| -> Option<Object> {
-        page_number(array, page_count)?;
+        page_number(document, array, page_count)?;
         let mut array = array.clone(); array[0] = Object::Reference(page); Some(Object::Array(array))
     };
     match follow(document, value)? {
@@ -83,22 +87,28 @@ pub fn with_page_reference(document: &Document, value: &Object, page: ObjectId, 
     }
 }
 
-/// Whether any destination-shaped array still starts with an in-range page number (remote `GoToR` / `GoToE`
-/// targets excepted, where a number names a page of another file). Structural copies refuse rather than
-/// leave such a destination pointing at whatever page now has that index.
+/// Whether any local destination still names an in-range page by number: a `/Dest`, the `/D` of a GoTo
+/// action, the catalog's `/OpenAction` array, or a named destination's value (remote `GoToR` / `GoToE`
+/// targets name pages of another file and are not looked at). Structural copies refuse rather than leave
+/// such a destination pointing at whatever page now has that index.
 pub fn page_number_destination_left(document: &Document, page_count: usize) -> bool {
-    fn remote(dict: &Dictionary) -> bool { dict.get(b"S").and_then(Object::as_name).is_ok_and(|name| name == b"GoToR" || name == b"GoToE") }
+    let numbered = |value: &Object| destination_array(document, value).is_some_and(|array| page_number(document, array, page_count).is_some());
     let mut pending: Vec<&Object> = document.objects.values().collect();
     pending.extend(document.trailer.iter().map(|(_, value)| value));
     while let Some(object) = pending.pop() {
         match object {
-            Object::Array(values) => { if page_number(values, page_count).is_some() { return true; } pending.extend(values.iter()); }
-            Object::Dictionary(dict) => { let skip = remote(dict); pending.extend(dict.iter().filter(|(key, _)| !(skip && key.as_slice() == b"D")).map(|(_, value)| value)); }
+            Object::Array(values) => pending.extend(values.iter()),
+            Object::Dictionary(dict) => {
+                let open_array = dict.get(b"OpenAction").ok().filter(|value| matches!(follow(document, value), Some(Object::Array(_))));
+                if dict.get(b"Dest").is_ok_and(numbered) || open_array.is_some_and(numbered) { return true; }
+                if dict.get(b"S").and_then(Object::as_name).is_ok_and(|name| name == b"GoTo") && dict.get(b"D").is_ok_and(numbered) { return true; }
+                pending.extend(dict.iter().map(|(_, value)| value));
+            }
             Object::Stream(stream) => pending.extend(stream.dict.iter().map(|(_, value)| value)),
             _ => {}
         }
     }
-    false
+    read(document).ok().is_some_and(|named| named.dests.iter().flatten().map(|(_, value)| value).chain(named.tree.iter().flatten().map(|(_, value)| value)).any(numbered))
 }
 
 /// Whether the catalog's `/Names` holds anything besides `/Dests` (attachments, scripts, templates...), or is

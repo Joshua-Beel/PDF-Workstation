@@ -112,6 +112,8 @@ pub struct EditSession {
     next_note: u64,
     pub outline: crate::outline_edit::OutlineEdits,
     pub labels: crate::page_label_edit::LabelEdits,
+    /// Whether the source names a page by number in any local destination; scanned once per session.
+    page_numbers: std::sync::OnceLock<bool>,
 }
 
 pub(crate) struct EditSessionSnapshot {
@@ -152,11 +154,15 @@ impl EditSession {
         };
         let next_note = source_notes.iter().flatten().filter_map(|note| crate::comments::number(&note.id).ok()).max().unwrap_or(0).saturating_add(1);
         let plan: Vec<_> = (0..count).map(|source| PageSpec { source, turns: 0, crop: None, notes: source_notes[source].clone() }).collect();
-        Self { source, source_page_count: count, saved: plan.clone(), plan, undo: VecDeque::new(), redo: VecDeque::new(), history_bytes: 0, history_budget: HISTORY_BUDGET, revision: 0, source_notes, comments_reason, text_extraction_permission, next_note, outline: Default::default(), labels: Default::default() }
+        Self { source, source_page_count: count, saved: plan.clone(), plan, undo: VecDeque::new(), redo: VecDeque::new(), history_bytes: 0, history_budget: HISTORY_BUDGET, revision: 0, source_notes, comments_reason, text_extraction_permission, next_note, outline: Default::default(), labels: Default::default(), page_numbers: Default::default() }
     }
     pub fn dirty(&self) -> bool { self.plan != self.saved }
     /// Unsaved page edits, bookmark edits or page-label edits. The last two are not part of the page plan or of recovery points.
     pub fn unsaved(&self) -> bool { self.dirty() || self.outline.changed() || self.labels.changed() }
+    /// `document` must be the parsed source (before any copy is built from it); the answer is cached.
+    fn source_has_page_numbers(&self, document: &Document) -> bool {
+        *self.page_numbers.get_or_init(|| crate::named_dests::page_number_destination_left(document, self.source_page_count))
+    }
     pub fn overlay_pending(&self) -> bool { self.outline.changed() || self.labels.changed() }
     /// Copies built from the source bytes cannot carry bookmark or page-label overlay edits, so they refuse while any are pending.
     pub fn overlay_guard(&self) -> Result<(), String> {
@@ -363,7 +369,10 @@ impl EditSession {
                     _ => unreachable!(),
                 }
                 if next == self.plan { return Ok(()); }
-                if structural { self.build(&next)?; }
+                // Only a document whose copy rewrites outlines, names or labels, or whose source names a page by
+                // number, can have that copy refused; everything else skips the build (one source load per edit).
+                let rewrites = document.catalog().is_ok_and(|catalog| [b"Outlines".as_slice(), b"Dests", b"Names", b"PageLabels"].iter().any(|key| catalog.has(key)));
+                if structural && (rewrites || self.source_has_page_numbers(&document)) { self.build(&next, document)?; }
                 self.commit_plan(next);
                 return Ok(());
             }
@@ -381,7 +390,7 @@ impl EditSession {
             }
             None => self.plan.clone(),
         };
-        let mut document = self.build(&plan)?;
+        let mut document = self.build(&plan, self.load_source()?)?;
         let mut bytes = Vec::new();
         document.save_to(&mut bytes).map_err(|e| e.to_string())?;
         Ok(bytes)
@@ -389,8 +398,8 @@ impl EditSession {
 
     /// The output document for `plan`, before serialization. Structural page edits also run it when they are
     /// made, so a page order whose copy would be refused is refused at the edit instead of at save time.
-    fn build(&self, plan: &[PageSpec]) -> Result<Document, String> {
-        let mut document = self.load_source()?;
+    fn build(&self, plan: &[PageSpec], mut document: Document) -> Result<Document, String> {
+        let numbered = self.source_has_page_numbers(&document);
         if self.notes_changed(&self.plan) { crate::comments::write(&mut document, &self.plan)?; }
         let original: Vec<_> = document.get_pages().values().copied().collect();
         if plan.iter().any(|p| p.source >= original.len()) { return Err("Source page mapping is invalid.".into()); }
@@ -453,7 +462,7 @@ impl EditSession {
         // Keep only objects reachable from the trailer (SM7 L-1): superseded incremental revisions and
         // freed objects reloaded from an object stream never reach a copy, structural edit or not.
         crate::pdf_load::prune_unreachable(&mut document);
-        if structural && crate::named_dests::page_number_destination_left(&document, original.len()) {
+        if structural && numbered && crate::named_dests::page_number_destination_left(&document, original.len()) {
             return Err("This PDF has a link or action that names a page by its number, which would then open the wrong page. Reordering, deleting or extracting pages is not supported for it yet.".into());
         }
         Ok(document)
