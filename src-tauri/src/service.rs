@@ -269,10 +269,12 @@ impl PdfService {
     fn start_worker_limited(library: PathBuf,render_limit:usize,recovery_root:Option<PathBuf>,document_limit:usize) -> Self {
         let (raw_sender, receiver) = mpsc::channel();
         let render_admission=Arc::new(Mutex::new(RenderAdmission::default()));
+        let worker_alive=Arc::new(());render_admission.lock().expect("render admission mutex poisoned").watch=Some(Arc::downgrade(&worker_alive));
         let sender=RequestSender{inner:raw_sender,renders:render_admission.clone(),limit:render_limit,pending:Arc::default(),queue_limit:if cfg!(test){4096}else{WORKER_QUEUE_LIMIT}};
         let resource_cleanup = sender.clone();
         let queue_pending = sender.pending.clone();
         std::thread::Builder::new().name("pdf-worker".into()).spawn(move || {
+            let _worker_alive = worker_alive;
             let pdfium = Engine::bind(library);
             let mut documents = HashMap::new();
             let mut sessions = HashMap::<u64, (EditSession, DocumentInfo)>::new();
@@ -1941,9 +1943,10 @@ fn restore_recovery_session(session: &mut EditSession, record: &crate::recovery_
     Ok(())
 }
 type RenderKey=(u64,u16,i32,u64);
-#[derive(Default)]struct RenderAdmission{epoch:u64,next:u64,keys:HashMap<RenderKey,u64>,replies:HashMap<u64,Reply<Vec<u8>>>,tickets:HashMap<u64,u64>,ticket_of:HashMap<u64,u64>,spare:HashMap<u64,u64>,cancelled:std::collections::VecDeque<u64>}
+#[derive(Default)]struct RenderAdmission{epoch:u64,next:u64,keys:HashMap<RenderKey,u64>,replies:HashMap<u64,Reply<Vec<u8>>>,tickets:HashMap<u64,u64>,ticket_of:HashMap<u64,u64>,spare:HashMap<u64,u64>,watch:Option<std::sync::Weak<()>>,cancelled:std::collections::VecDeque<u64>}
 const CANCELLED_TICKET_MEMORY:usize=256;
 impl RenderAdmission{
+    fn worker_gone(&self)->bool{self.watch.as_ref().is_some_and(|alive|alive.strong_count()==0)}
     fn key_of(&self,token:u64)->Option<RenderKey>{self.keys.iter().find_map(|(key,value)|(*value==token).then_some(*key))}
     fn claim(&mut self,token:u64)->Option<(RenderKey,Reply<Vec<u8>>)>{if self.spare.remove(&token).is_some(){return None}let key=self.key_of(token)?;self.take(token).map(|reply|(key,reply))}
     fn remember_cancelled(&mut self,ticket:u64){if self.cancelled.contains(&ticket){return}if self.cancelled.len()>=CANCELLED_TICKET_MEMORY{self.cancelled.pop_front();}self.cancelled.push_back(ticket);}
@@ -1975,10 +1978,10 @@ impl RequestSender{
     fn send_render(&self,id:u64,page:u16,width:i32,ticket:Option<u64>,reply:Reply<Vec<u8>>)->Result<(),SendRejected>{
         let mut a=self.renders.lock().expect("render admission mutex poisoned");let key=(id,page,width,a.epoch);
         let register=|a:&mut RenderAdmission,token:u64|{a.forget_ticket(token);if let Some(ticket)=ticket{a.tickets.insert(ticket,token);a.ticket_of.insert(token,ticket);}};
-        if let Some(token)=a.keys.get(&key).copied(){register(&mut a,token);if let Some(old)=a.replies.insert(token,reply){let _=old.send(Err("Viewer render was superseded by a newer request.".into()));}return Ok(())}
         if let Some(t)=ticket{if let Some(at)=a.cancelled.iter().position(|c|*c==t){a.cancelled.remove(at);let _=reply.send(Err("Viewer render was cancelled because the page is no longer visible.".into()));return Ok(())}}
+        if let Some(token)=a.keys.get(&key).copied(){register(&mut a,token);if let Some(old)=a.replies.insert(token,reply){let _=old.send(Err("Viewer render was superseded by a newer request.".into()));}return Ok(())}
         if a.keys.len()>=self.limit{let _=reply.send(Err("Viewer render queue is full. Try again.".into()));return Ok(())}
-        if let Some(token)=a.spare.iter().find_map(|(token,epoch)|(*epoch==key.3).then_some(*token)){a.spare.remove(&token);a.keys.insert(key,token);a.replies.insert(token,reply);register(&mut a,token);return Ok(())}
+        if let Some(token)=a.spare.iter().find_map(|(token,epoch)|(*epoch==key.3).then_some(*token)){if a.worker_gone(){return Err(SendRejected::Closed)}a.spare.remove(&token);a.keys.insert(key,token);a.replies.insert(token,reply);register(&mut a,token);return Ok(())}
         a.next=a.next.wrapping_add(1);let token=a.next;a.keys.insert(key,token);a.replies.insert(token,reply);register(&mut a,token);
         if self.inner.send(Request::AdmittedRender(id,page,width,token)).is_err(){a.take(token);return Err(SendRejected::Closed)}Ok(())
     }
@@ -1987,7 +1990,7 @@ impl RequestSender{
             self.send_render(id,page,width,None,reply)
         }else{
             if !self.admit(&request){return Err(SendRejected::Busy)}
-            {let mut a=self.renders.lock().expect("render admission mutex poisoned");a.epoch=a.epoch.wrapping_add(1);}
+            let mut a=self.renders.lock().expect("render admission mutex poisoned");a.epoch=a.epoch.wrapping_add(1);a.spare.clear();
             self.inner.send(request).map_err(|error|{self.release();error.into()})
         }
     }
@@ -3134,6 +3137,49 @@ mod tests {
         let order: Vec<&'static str> = receiver.try_iter().map(|request| match request { Request::AdmittedRender(..) => "render", Request::Close(..) => "close", _ => "other" }).collect();
         assert_eq!(order, ["render", "close", "render"], "a render queued after a mutation must run after it, never in a stale earlier slot");
         assert_eq!(state.lock().unwrap().keys.len(), 1);
+    }
+    #[test]
+    fn render_epoch_bump_and_enqueue_are_atomic_and_drop_stale_spares() {
+        let (sender, receiver, state) = admission_sender();
+        let (tx, _old) = oneshot::channel(); sender.send_render(1, 0, 64, Some(1), tx).unwrap();
+        assert!(sender.cancel_render(1)); assert_eq!(state.lock().unwrap().spare.len(), 1);
+        let held = state.lock().unwrap();
+        let racer = { let sender = sender.clone(); std::thread::spawn(move || { let (tx, rx) = oneshot::channel(); sender.send_render(1, 5, 64, Some(2), tx).unwrap(); rx }) };
+        let editor = { let sender = sender.clone(); std::thread::spawn(move || sender.send(Request::Close(9, oneshot::channel().0)).unwrap()) };
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(held);
+        let _rx = racer.join().unwrap(); editor.join().unwrap();
+        let epochs_and_order: Vec<&'static str> = receiver.try_iter().map(|request| match request { Request::AdmittedRender(..) => "render", Request::Close(..) => "close", _ => "other" }).collect();
+        let a = state.lock().unwrap();
+        let render_key = a.keys.keys().find(|key| key.1 == 5).copied().unwrap();
+        let close_at = epochs_and_order.iter().position(|kind| *kind == "close").unwrap();
+        let render_at = epochs_and_order.iter().rposition(|kind| *kind == "render").unwrap();
+        assert_eq!(render_key.3 == a.epoch, render_at > close_at, "a render carrying the post-edit epoch is queued after the edit, never before it");
+        assert!(a.spare.is_empty() || a.spare.values().all(|epoch| *epoch == a.epoch), "spares of older epochs are dropped at the bump");
+    }
+    #[test]
+    fn render_reuse_of_a_spare_fails_fast_when_the_worker_is_gone() {
+        let (sender, _receiver, state) = admission_sender();
+        let alive = Arc::new(()); state.lock().unwrap().watch = Some(Arc::downgrade(&alive));
+        let (tx, _old) = oneshot::channel(); sender.send_render(1, 0, 64, Some(1), tx).unwrap();
+        assert!(sender.cancel_render(1));
+        let (tx, _live) = oneshot::channel(); sender.send_render(1, 1, 64, Some(2), tx).unwrap();
+        assert!(sender.cancel_render(2));
+        drop(alive);
+        let (tx, _gone) = oneshot::channel();
+        assert!(matches!(sender.send_render(1, 2, 64, Some(3), tx), Err(SendRejected::Closed)), "a dead worker is reported, not waited on");
+    }
+    #[test]
+    fn render_early_cancel_beats_the_dedupe_and_leaves_the_queued_waiter() {
+        let (sender, receiver, state) = admission_sender();
+        let (tx, mut waiter) = oneshot::channel(); sender.send_render(1, 3, 64, Some(10), tx).unwrap();
+        assert!(!sender.cancel_render(11));
+        let (tx, late) = oneshot::channel(); sender.send_render(1, 3, 64, Some(11), tx).unwrap();
+        assert!(late.blocking_recv().unwrap().unwrap_err().contains("cancelled"));
+        assert!(waiter.try_recv().is_err(), "the queued waiter was not superseded");
+        assert_eq!(receiver.try_iter().count(), 1);
+        assert!(sender.cancel_render(10), "the original ticket still owns the queued render");
+        assert!(state.lock().unwrap().keys.is_empty());
     }
     #[test]
     fn render_cancel_arriving_before_its_render_sticks() {
