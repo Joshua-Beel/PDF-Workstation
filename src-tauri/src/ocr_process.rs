@@ -11,8 +11,9 @@ use std::time::Duration;
 
 use windows::core::PCWSTR;
 use windows::Win32::Security::Cryptography::{
-    BCryptCloseAlgorithmProvider, BCryptHash, BCryptOpenAlgorithmProvider,
+    BCryptCloseAlgorithmProvider, BCryptGenRandom, BCryptHash, BCryptOpenAlgorithmProvider,
     BCRYPT_ALG_HANDLE, BCRYPT_OPEN_ALGORITHM_PROVIDER_FLAGS, BCRYPT_SHA256_ALGORITHM,
+    BCRYPT_USE_SYSTEM_PREFERRED_RNG,
 };
 use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
 
@@ -52,6 +53,7 @@ pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
     while OCR_SLOT.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(1));
     }
+    assert!(!OCR_SLOT.load(Ordering::Acquire), "the OCR slot stayed held after the previous test released the test lock");
     guard
 }
 
@@ -540,16 +542,58 @@ fn sha256(input: &[u8]) -> Result<[u8; 32], OcrProcessError> {
     Ok(output)
 }
 
-static JOB_DIRECTORY_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const JOB_DIRECTORY_PREFIX: &str = "pdf-workstation-ocr-";
+const JOB_DIRECTORY_STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+const JOB_DIRECTORY_ATTEMPTS: usize = 5;
 
 struct JobDirectory(PathBuf);
 
+fn random_directory_name() -> Result<String, OcrProcessError> {
+    let mut random = [0_u8; 16];
+    let status = unsafe { BCryptGenRandom(None, &mut random, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+    if status.0 < 0 {
+        return Err(OcrProcessError::System(format!("Could not generate an OCR work directory name: {status:?}")));
+    }
+    Ok(format!("{JOB_DIRECTORY_PREFIX}{}", random.iter().map(|byte| format!("{byte:02x}")).collect::<String>()))
+}
+
+fn is_job_directory_name(name: &str) -> bool {
+    name.strip_prefix(JOB_DIRECTORY_PREFIX)
+        .is_some_and(|rest| rest.len() == 32 && rest.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+}
+
+fn sweep_stale_job_directories(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_str().is_some_and(is_job_directory_name) {
+            continue;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else { continue };
+        if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT_VALUE != 0 {
+            continue;
+        }
+        let stale = metadata.modified().ok().and_then(|modified| modified.elapsed().ok()).is_some_and(|age| age > JOB_DIRECTORY_STALE_AFTER);
+        if stale {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 impl JobDirectory {
     fn create() -> Result<Self, OcrProcessError> {
-        let number = JOB_DIRECTORY_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("pdf-workstation-ocr-{}-{number}", std::process::id()));
-        std::fs::create_dir(&path).map_err(|error| OcrProcessError::System(format!("Could not create the OCR work directory: {error}")))?;
-        Ok(Self(path))
+        let root = std::env::temp_dir();
+        sweep_stale_job_directories(&root);
+        let mut last_error = None;
+        for _ in 0..JOB_DIRECTORY_ATTEMPTS {
+            let path = root.join(random_directory_name()?);
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => last_error = Some(error),
+                Err(error) => return Err(OcrProcessError::System(format!("Could not create the OCR work directory: {error}"))),
+            }
+        }
+        Err(OcrProcessError::System(format!("Could not create the OCR work directory: {}", last_error.map(|error| error.to_string()).unwrap_or_default())))
     }
 
     fn path(&self) -> &Path {
@@ -904,8 +948,29 @@ fn main() {
         assert!(!reported.starts_with(&engine_root), "{reported:?} is inside the engine root {engine_root:?}");
         assert!(!reported.starts_with(&case.directory), "{reported:?} is inside the install folder");
         assert!(reported.starts_with(&temp_root), "{reported:?} is not under {temp_root:?}");
-        assert!(reported.file_name().unwrap().to_string_lossy().starts_with("pdf-workstation-ocr-"));
+        assert!(is_job_directory_name(&reported.file_name().unwrap().to_string_lossy()));
         assert!(!reported.exists(), "the per-job directory must be removed after the job");
+    }
+
+    #[test]
+    fn job_directories_are_random_exclusive_and_the_sweep_spares_fresh_and_foreign_entries() {
+        let first = random_directory_name().unwrap();
+        assert!(is_job_directory_name(&first));
+        assert_ne!(first, random_directory_name().unwrap());
+        for bad in ["pdf-workstation-ocr-", "pdf-workstation-ocr-1234-0", "pdf-workstation-ocr-0123456789ABCDEF0123456789abcdef", "other-0123456789abcdef0123456789abcdef"] {
+            assert!(!is_job_directory_name(bad), "{bad}");
+        }
+        let root = tempfile::tempdir().unwrap();
+        let fresh = root.path().join(random_directory_name().unwrap());
+        let foreign = root.path().join("pdf-workstation-ocr-keep-me");
+        std::fs::create_dir(&fresh).unwrap();
+        std::fs::create_dir(&foreign).unwrap();
+        sweep_stale_job_directories(root.path());
+        assert!(fresh.exists() && foreign.exists());
+        let one = JobDirectory::create().unwrap();
+        let two = JobDirectory::create().unwrap();
+        assert_ne!(one.path(), two.path());
+        assert!(one.path().is_dir() && two.path().is_dir());
     }
 
     #[test]
