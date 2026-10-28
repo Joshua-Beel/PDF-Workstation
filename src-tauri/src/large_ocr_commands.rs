@@ -532,7 +532,7 @@ mod tests {
         let foreign = root.join("keep-me");
         for path in [&fresh, &missing, &corrupt, &newer, &locked, &foreign] { std::fs::create_dir_all(path).unwrap(); }
         std::fs::write(corrupt.join(crate::searchable_pdf_stream::MANIFEST_FILE), b"{not json").unwrap();
-        std::fs::write(newer.join(crate::searchable_pdf_stream::MANIFEST_FILE), br#"{"format": 2, "somethingNew": true}"#).unwrap();
+        std::fs::write(newer.join(crate::searchable_pdf_stream::MANIFEST_FILE), br#"{"format": 3, "somethingNew": true}"#).unwrap();
         std::fs::write(locked.join(crate::searchable_pdf_stream::MANIFEST_FILE), b"{}").unwrap();
         let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 60 * 60);
         let age = |path: &Path| { std::fs::OpenOptions::new().write(true).custom_flags(0x0200_0000).open(path).unwrap().set_modified(day_ago).unwrap(); };

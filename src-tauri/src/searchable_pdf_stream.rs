@@ -47,7 +47,9 @@ const MANIFEST_LIMIT: u64 = 64 * 1024;
 /// are appended and flushed. A killed app or a power loss therefore loses at
 /// most about this interval of pages, which resume redoes.
 const SYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
-pub(crate) const MANIFEST_FORMAT: u32 = 1;
+/// 2: the text layer draws word separators (`page_text_content`); a job paused
+/// by a format-1 build is refused rather than finished with mixed page text.
+pub(crate) const MANIFEST_FORMAT: u32 = 2;
 
 pub(crate) const PART_FILE: &str = "output.part";
 pub(crate) const JOURNAL_FILE: &str = "journal";
@@ -1045,6 +1047,11 @@ pub(crate) mod tests {
         writer.append(&synthetic_page(0)).unwrap();
         writer.checkpoint().unwrap();
         drop(writer);
+        let current = std::fs::read_to_string(directory.join(MANIFEST_FILE)).unwrap();
+        let older = current.replacen(&format!("\"format\": {MANIFEST_FORMAT},"), "\"format\": 1,", 1);
+        assert_ne!(older, current, "the manifest names its format");
+        std::fs::write(directory.join(MANIFEST_FILE), older).unwrap();
+        assert!(matches!(PartialWriter::resume(&directory), Err(StreamError::Unusable(_))), "a job from the format-1 writer is not finished by this one");
         std::fs::write(directory.join(MANIFEST_FILE), b"{\"format\":1}").unwrap();
         assert!(matches!(PartialWriter::resume(&directory), Err(StreamError::Unusable(_))));
         let other = folder.path().join("other");

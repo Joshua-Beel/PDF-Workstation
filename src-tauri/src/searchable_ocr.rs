@@ -302,7 +302,12 @@ impl Bounds {
         word.top < bottom && self.top < word_bottom
     }
 
-    fn contains_within(self, child: Self, slack: u32) -> bool {
+    /// With automatic page segmentation (`--psm 3`) paragraph and line boxes
+    /// do not nest either: on real scans a line started 29 px left of its
+    /// paragraph, a paragraph was 14 px wider than its block and a line box
+    /// reached 43 px above its paragraph. A paragraph must still overlap its
+    /// block and a line its paragraph (and every box lies inside the page).
+    fn overlaps(self, child: Self) -> bool {
         let (Some(right), Some(bottom), Some(child_right), Some(child_bottom)) = (
             self.left.checked_add(self.width),
             self.top.checked_add(self.height),
@@ -311,20 +316,13 @@ impl Bounds {
         ) else {
             return false;
         };
-        child.left.saturating_add(slack) >= self.left
-            && child.top.saturating_add(slack) >= self.top
-            && child_right <= right.saturating_add(slack)
-            && child_bottom <= bottom.saturating_add(slack)
+        child.left < right && self.left < child_right && child.top < bottom && self.top < child_bottom
     }
 }
 
 /// Raster resolution the OCR page images are rendered at (matches `ocr.rs`).
+#[allow(dead_code)]
 pub(crate) const RASTER_DPI: u32 = 150;
-/// Rounding slack for parent/child TSV boxes: 3.84 pt at the raster DPI,
-/// 8 px at 150 DPI. It applies at three levels (paragraph in block, line in
-/// paragraph, word in line), so a word can sit up to three times this far
-/// outside its block while staying exactly inside the page.
-const CONTAINMENT_SLACK_PIXELS: u32 = (RASTER_DPI * 384).div_ceil(7200);
 
 #[derive(Default)]
 struct Hierarchy {
@@ -387,7 +385,7 @@ impl Hierarchy {
                 && self.last_paragraph.checked_add(1) == Some(paragraph)
                 && line == 0
                 && word == 0
-                && self.block.unwrap().1.contains_within(bounds, CONTAINMENT_SLACK_PIXELS) =>
+                && self.block.unwrap().1.overlaps(bounds) =>
             {
                 self.paragraph = Some((paragraph, bounds));
                 self.line = None;
@@ -401,7 +399,7 @@ impl Hierarchy {
                 && paragraph == self.last_paragraph
                 && self.last_line.checked_add(1) == Some(line)
                 && word == 0
-                && self.paragraph.unwrap().1.contains_within(bounds, CONTAINMENT_SLACK_PIXELS) =>
+                && self.paragraph.unwrap().1.overlaps(bounds) =>
             {
                 self.line = Some((line, bounds));
                 self.last_line = line;
