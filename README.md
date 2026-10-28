@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Post-release P3s: 0.2.0 described as lacking a publisher signature, not "unsigned"; in-app record leak scan also blocks `github_pat_` tokens (SM6).
 - Docs: 0.3.1 release evidence (rehearsal, release, Step 1/2, publish, in-app update run 40625100964) in `docs/releases.md`; README and features name 0.3.1 as the published release (SM6).
 - In-app update record schema 4: API metadata reads recorded as authenticated, public latest.json as unauthenticated; setup exit claimed only if a setup process was seen; JWT-shaped tokens blocked from the record (SM6).
 - In-app update check: accepts GitHub's longer token format (`.`, `-`), anchored so a trailing newline is rejected (SM0; script and test only).
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - In-app update check: automatic relaunch still required when an Explorer shell window exists; without one it is recorded as not observed, with its reason (schema v3) (SM6; script, tests, docs).
 - In-app update check: WebDriver lifecycle now uses the shared hosted-proven launch helpers (30 s session create, native-driver wait, owned-process cleanup); firewall precheck added (SM6; scripts and tests).
 - In-app update check: stopped assigning the read-only `$HOME` (run 40618989631) and `$Matches`; suppressed stray `WaitForExit` output; AST test guards both (SM6; scripts and tests).
-- Save-copy prune follow-ups (SM2): dead page links are dropped when the `/Dest` or GoTo `/D` is an indirect array too; links that never had a destination stay; `/Annots` null cleanup tested.

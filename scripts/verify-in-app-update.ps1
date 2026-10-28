@@ -896,7 +896,7 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
         }
     }
     $json = $record | ConvertTo-Json -Depth 12
-    if ($json -match '(?i)([A-Z]:\\|\\Users\\|runneradmin|GITHUB_TOKEN|GH_TOKEN|IN_APP_UPDATE_API_TOKEN|gh[pousr]_[A-Za-z0-9_]{16,}|(?-i:eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})|AZURE_|TAURI_SIGNING|codesigning\.azure\.net|raw\.log|release-assets\.githubusercontent\.com)') {
+    if ($json -match '(?i)([A-Z]:\\|\\Users\\|runneradmin|GITHUB_TOKEN|GH_TOKEN|IN_APP_UPDATE_API_TOKEN|gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}|(?-i:eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})|AZURE_|TAURI_SIGNING|codesigning\.azure\.net|raw\.log|release-assets\.githubusercontent\.com)') {
         throw 'Sanitized in-app update record contains a host path, credential marker, raw log, or ephemeral download URL.'
     }
     $recordPath = Join-Path $output 'in-app-update-verification.json'

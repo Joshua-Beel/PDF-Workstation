@@ -472,7 +472,7 @@ public sealed class InAppRecordingHandler : HttpMessageHandler {
     expect(script).toContain('$outputFiles.Count -ne 1');
     expect(script).toContain('notes = $manifestNotesReceipt');
     expect(script).not.toContain('notes = [string]$manifest.notes');
-    expect(script).toContain('GITHUB_TOKEN|GH_TOKEN|IN_APP_UPDATE_API_TOKEN|gh[pousr]_[A-Za-z0-9_]{16,}|(?-i:eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,})|AZURE_|TAURI_SIGNING');
+    expect(script).toContain('GITHUB_TOKEN|GH_TOKEN|IN_APP_UPDATE_API_TOKEN|gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}|(?-i:eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,})|AZURE_|TAURI_SIGNING');
     expect(script).toContain('release-assets\\.githubusercontent\\.com');
     expect(script).not.toMatch(/Write-Host\s+\$json|Write-Output\s+\$json/);
   });
@@ -498,7 +498,7 @@ public sealed class InAppRecordingHandler : HttpMessageHandler {
       $pattern=[IO.File]::ReadAllText($env:LEAK_PATTERN_PATH)
       $clean='{"sha256":"67C685264ABC094246E95C04629BFFF5D4854BD4FE5B84FEDE8760261A119038","scope":"they eyJ do not.match here"}'
       if($clean -match $pattern){throw 'A clean receipt record was rejected.'}
-      foreach($leak in @('{"x":"${jwt}"}','{"x":"ghp_0123456789abcdefABCDEF"}','{"x":"C:\\Users\\a"}')){
+      foreach($leak in @('{"x":"${jwt}"}','{"x":"ghp_0123456789abcdefABCDEF"}','{"x":"github_pat_11ABCDEFG0123456789_abcdefghijKLMNOP"}','{"x":"C:\\Users\\a"}')){
         if($leak -notmatch $pattern){throw ('A leak was not rejected: '+$leak.Substring(0,8))}
       }
       if(('{"x":"'+'${jwt}'.ToUpperInvariant()+'"}') -match $pattern){throw 'The JWT prefix match is not case-sensitive.'}
