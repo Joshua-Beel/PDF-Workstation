@@ -360,11 +360,10 @@ mod tests {
 
     #[cfg(windows)]
     fn junction(link: &Path, target: &Path) {
-        let output = std::process::Command::new("cmd.exe")
+        let output = crate::child_job::test_output(std::process::Command::new("cmd.exe")
             .args(["/d", "/c", "mklink", "/J"])
             .arg(link)
-            .arg(target)
-            .output()
+            .arg(target))
             .unwrap();
         assert!(output.status.success(), "mklink failed: {}", String::from_utf8_lossy(&output.stderr));
     }
