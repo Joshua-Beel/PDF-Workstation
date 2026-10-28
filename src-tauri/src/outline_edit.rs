@@ -130,7 +130,7 @@ fn destination_page(document: &Document, dict: &lopdf::Dictionary, pages: &HashM
         let (_, object) = document.dereference(object).ok()?;
         match object {
             Object::Name(name) | Object::String(name, _) => pages.get(&(*named.get(name)?)?).copied(),
-            _ => match object.as_array().ok()?.first()? { Object::Reference(id) => pages.get(id).copied(), _ => None },
+            _ => match object.as_array().ok()?.first()? { Object::Reference(id) => pages.get(id).copied(), _ => crate::named_dests::destination_page_number(document, object, pages.len()) },
         }
     };
     if let Ok(dest) = dict.get(b"Dest") { return array_page(dest); }
@@ -172,6 +172,8 @@ pub fn read(document: &Document) -> Result<Vec<Entry>, String> {
     if root_id.is_some_and(|id| protected.contains(&id)) { return Err("The bookmark list points at the page tree or catalog, so the bookmarks cannot be edited safely.".into()); }
     if let Ok(kind) = root.get(b"Type") { if kind.as_name().ok() != Some(b"Outlines".as_slice()) { return Err("The bookmark list has an unexpected type, so the bookmarks cannot be edited safely.".into()); } }
     let pages: HashMap<ObjectId, usize> = document.get_pages().values().enumerate().map(|(index, id)| (*id, index)).collect();
+    // Lenient on purpose: viewing bookmarks must not fail on a bad name tree (its names just stay unresolved).
+    // Structural copies are safe because they read the names strictly (`named_dests::rewrite`) and refuse first.
     let named = crate::named_dests::read(document).map(|named| named.targets(document)).unwrap_or_default();
     let mut entries: Vec<Entry> = Vec::new();
     let mut seen = HashSet::new();
@@ -237,6 +239,21 @@ fn refuse_aliased_items(document: &Document, items: &HashSet<ObjectId>, root_id:
     Ok(())
 }
 
+/// A kept bookmark whose `/Dest` or GoTo `/D` is a page number (`[3 /Fit]`) gets an inline copy that names
+/// its page object instead, so the copy still opens that page after pages move or are removed (SM2). The
+/// original destination or action object is left untouched.
+fn retarget_page_number(document: &Document, dict: &mut lopdf::Dictionary, page: ObjectId, page_count: usize) {
+    if let Ok(dest) = dict.get(b"Dest") {
+        if let Some(fixed) = crate::named_dests::with_page_reference(document, dest, page, page_count) { dict.set("Dest", fixed); }
+        return;
+    }
+    let Some(action) = dict.get(b"A").ok().and_then(|action| document.dereference(action).ok()).and_then(|(_, action)| action.as_dict().ok()) else { return };
+    if !action.get(b"S").and_then(Object::as_name).is_ok_and(|name| name == b"GoTo") { return; }
+    let Some(fixed) = action.get(b"D").ok().and_then(|dest| crate::named_dests::with_page_reference(document, dest, page, page_count)) else { return };
+    let mut action = action.clone(); action.set("D", fixed);
+    dict.set("A", Object::Dictionary(action));
+}
+
 /// Writes the entries as the document's outline. `page_object` maps a source page index to its page object,
 /// or `None` when that page is not in the output. A bookmark whose page is not in the output is left out and
 /// its children move up one level; an existing bookmark whose destination did not resolve to a source page
@@ -288,6 +305,7 @@ pub fn write(document: &mut Document, entries: &[Entry], page_object: &dyn Fn(us
     }
     let root_id = match &existing_root { Some(Ok(id)) => *id, _ => document.new_object_id() };
     let ids: Vec<ObjectId> = kept.iter().map(|item| item.entry.origin.unwrap_or_else(|| document.new_object_id())).collect();
+    let page_count = document.get_pages().len();
     for index in 0..count {
         let item = &kept[index];
         let mut dict = match item.entry.origin {
@@ -297,6 +315,7 @@ pub fn write(document: &mut Document, entries: &[Entry], page_object: &dyn Fn(us
                 dictionary! { "Dest" => vec![Object::Reference(page), Object::Name(b"XYZ".to_vec()), Object::Null, Object::Null, Object::Null] }
             }
         };
+        if let (Some(_), Some(page)) = (item.entry.origin, item.page) { retarget_page_number(document, &mut dict, page, page_count); }
         if item.entry.origin.is_none() || item.entry.renamed { dict.set("Title", pdf_text(&item.entry.title)); }
         dict.set("Parent", Object::Reference(parent[index].map_or(root_id, |p| ids[p])));
         for (key, link) in [("First", first_child[index]), ("Last", last_child[index]), ("Prev", previous[index]), ("Next", next[index])] {

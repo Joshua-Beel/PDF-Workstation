@@ -363,6 +363,7 @@ impl EditSession {
                     _ => unreachable!(),
                 }
                 if next == self.plan { return Ok(()); }
+                if structural { self.build(&next)?; }
                 self.commit_plan(next);
                 return Ok(());
             }
@@ -380,6 +381,15 @@ impl EditSession {
             }
             None => self.plan.clone(),
         };
+        let mut document = self.build(&plan)?;
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).map_err(|e| e.to_string())?;
+        Ok(bytes)
+    }
+
+    /// The output document for `plan`, before serialization. Structural page edits also run it when they are
+    /// made, so a page order whose copy would be refused is refused at the edit instead of at save time.
+    fn build(&self, plan: &[PageSpec]) -> Result<Document, String> {
         let mut document = self.load_source()?;
         if self.notes_changed(&self.plan) { crate::comments::write(&mut document, &self.plan)?; }
         let original: Vec<_> = document.get_pages().values().copied().collect();
@@ -387,15 +397,16 @@ impl EditSession {
         let structural = plan.len() != original.len() || plan.iter().enumerate().any(|(i, p)| p.source != i);
         let removal = plan.len() < original.len();
         check_supported(&document, structural, removal)?;
-        // Removing pages rewrites the source outline too: bookmarks (and named destinations) whose target page
-        // is not kept are dropped, children promoted. The outline is read before the names are pruned.
+        // A structural copy rewrites the source outline and named destinations too: entries whose target page
+        // is not kept are dropped (bookmark children promoted), and page-number destinations (`[3 /Fit]`) are
+        // turned into references to the page they named. The outline is read before the names are rewritten.
         let source_outline = match self.outline.pending() {
-            None if removal && document.catalog().map_err(|e| e.to_string())?.has(b"Outlines") => Some(crate::outline_edit::read(&document)?),
+            None if structural && document.catalog().map_err(|e| e.to_string())?.has(b"Outlines") => Some(crate::outline_edit::read(&document)?),
             _ => None,
         };
-        if removal {
+        if structural {
             let kept: HashSet<ObjectId> = plan.iter().map(|spec| original[spec.source]).collect();
-            crate::named_dests::prune(&mut document, &original.iter().copied().filter(|id| !kept.contains(id)).collect())?;
+            crate::named_dests::rewrite(&mut document, &original, &original.iter().copied().filter(|id| !kept.contains(id)).collect())?;
         }
         if let Some(entries) = self.outline.pending().or(source_outline.as_deref()) {
             let kept: HashSet<usize> = plan.iter().map(|spec| spec.source).collect();
@@ -406,12 +417,12 @@ impl EditSession {
             _ => None,
         };
         if let Some(ranges) = self.labels.pending().or(source_labels.as_deref()) {
-            let output = crate::page_label_edit::output_ranges(ranges, original.len(), &plan)?;
+            let output = crate::page_label_edit::output_ranges(ranges, original.len(), plan)?;
             crate::page_label_edit::write(&mut document, &output)?;
         }
         let new_root = structural.then(|| document.new_object_id());
         let mut kids = Vec::new();
-        for spec in &plan {
+        for spec in plan {
             let id = original[spec.source];
             let rotation = inherited(&document, id, b"Rotate")?.map(|o| o.as_i64().map_err(|e| e.to_string())).transpose()?.unwrap_or(0);
             if rotation % 90 != 0 { return Err("This document has an unsupported page rotation.".into()); }
@@ -442,9 +453,10 @@ impl EditSession {
         // Keep only objects reachable from the trailer (SM7 L-1): superseded incremental revisions and
         // freed objects reloaded from an object stream never reach a copy, structural edit or not.
         crate::pdf_load::prune_unreachable(&mut document);
-        let mut bytes = Vec::new();
-        document.save_to(&mut bytes).map_err(|e| e.to_string())?;
-        Ok(bytes)
+        if structural && crate::named_dests::page_number_destination_left(&document, original.len()) {
+            return Err("This PDF has a link or action that names a page by its number, which would then open the wrong page. Reordering, deleting or extracting pages is not supported for it yet.".into());
+        }
+        Ok(document)
     }
 }
 
@@ -555,14 +567,15 @@ fn check_supported(document: &Document, structural: bool, removal: bool) -> Resu
         Ok(names) => crate::named_dests::names_besides_dests(document, names),
         Err(_) => false,
     };
-    if removal && (catalog.has(b"OpenAction") || other_names || (document.get_pages().values().any(|id| document.get_dictionary(*id).is_ok_and(|page| page.has(b"Annots"))) && crate::comments::read(document).is_err())) {
-        return Err("Deleting/extracting pages with attachments, scripts, open actions, or annotations is not supported yet. This avoids losing or breaking their references.".into());
+    if removal && (catalog.has(b"OpenAction") || other_names) {
+        return Err("Deleting/extracting pages with attachments, scripts, or open actions is not supported yet. This avoids losing or breaking their references.".into());
     }
-    if structural && catalog.has(b"PageLabels") { crate::page_labels::read_ranges(document, document.get_pages().len())?; }
-    if removal {
-        if catalog.has(b"Outlines") { crate::outline_edit::read(document)?; }
-        crate::named_dests::read(document)?;
+    if removal && document.get_pages().values().any(|id| document.get_dictionary(*id).is_ok_and(|page| page.has(b"Annots"))) {
+        if let Err(reason) = crate::comments::read(document) {
+            return Err(format!("Deleting/extracting pages is not supported yet for this document's annotations: {reason}"));
+        }
     }
+    // Outlines, named destinations and page labels are read (and refused if malformed) by `EditSession::build`.
     Ok(())
 }
 

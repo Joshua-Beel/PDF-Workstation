@@ -19,6 +19,8 @@ struct Node { title: &'static str, target: Target, closed: bool, kids: Vec<Node>
 fn node(title: &'static str, target: Target, kids: Vec<Node>) -> Node { Node { title, target, closed: false, kids } }
 fn fit(page: ObjectId) -> Object { Object::Array(vec![Object::Reference(page), Object::Name(b"Fit".to_vec())]) }
 fn string(value: &str) -> Object { Object::string_literal(value) }
+/// A page-number destination (`[3 /Fit]`): not conforming for a local target, but PDFium follows it as a page index.
+fn fit_n(page: i64) -> Object { Object::Array(vec![Object::Integer(page), Object::Name(b"Fit".to_vec())]) }
 
 fn add_outline(document: &mut lopdf::Document, nodes: Vec<Node>) {
     fn level(document: &mut lopdf::Document, parent: ObjectId, nodes: Vec<Node>) -> (Option<ObjectId>, Option<ObjectId>, i64) {
@@ -51,7 +53,8 @@ fn add_outline(document: &mut lopdf::Document, nodes: Vec<Node>) {
 }
 
 /// Six pages: nested bookmarks using a direct /Dest, an inline and an indirect GoTo, a /Dests name, name-tree
-/// strings and an external action; a two-leaf name tree with /Limits; labels i, ii, P-1, P-2, P-3, A.
+/// strings and an external action; a two-leaf name tree with /Limits; labels i, ii, P-1, P-2, P-3, A. Bookmarks
+/// E, F and G and the names tree-int-p0, Int-p4 and Int-p2 use page numbers instead of page references.
 fn fixture() -> lopdf::Document {
     let mut document = sample();
     let p: Vec<ObjectId> = document.get_pages().values().copied().collect();
@@ -73,9 +76,14 @@ fn fixture() -> lopdf::Document {
         ]),
         node("C", Target::External, vec![]),
         d,
+        node("E", Target::Dest(fit_n(3)), vec![node("E2", Target::Dest(string("tree-int-p0")), vec![])]),
+        node("F", Target::Action(Object::Dictionary(dictionary! { "S" => "GoTo", "D" => vec![Object::Integer(1), "XYZ".into(), Object::Null, Object::Null, Object::Null] })), vec![
+            node("F1", Target::Dest(Object::Name(b"Int-p4".to_vec())), vec![]),
+        ]),
+        node("G", Target::Dest(Object::Name(b"Int-p2".to_vec())), vec![]),
     ]);
-    let dests = document.add_object(dictionary! { "Named-p3" => fit(p[3]), "Named-p1" => dictionary! { "D" => fit(p[1]) } });
-    let leaf1 = document.add_object(dictionary! { "Limits" => vec![string("tree-p1"), string("tree-p2")], "Names" => vec![string("tree-p1"), Object::Reference(tree_p1), string("tree-p2"), fit(p[2])] });
+    let dests = document.add_object(dictionary! { "Named-p3" => fit(p[3]), "Named-p1" => dictionary! { "D" => fit(p[1]) }, "Int-p4" => fit_n(4), "Int-p2" => dictionary! { "D" => fit_n(2) } });
+    let leaf1 = document.add_object(dictionary! { "Limits" => vec![string("tree-int-p0"), string("tree-p2")], "Names" => vec![string("tree-int-p0"), fit_n(0), string("tree-p1"), Object::Reference(tree_p1), string("tree-p2"), fit(p[2])] });
     let leaf2 = document.add_object(dictionary! { "Limits" => vec![string("tree-p5"), string("tree-p5")], "Names" => vec![string("tree-p5"), fit(p[5])] });
     let root = document.add_object(dictionary! { "Kids" => vec![Object::Reference(leaf1), Object::Reference(leaf2)] });
     let labels = document.add_object(dictionary! { "Nums" => vec![
@@ -140,34 +148,38 @@ fn delete_move_and_extract_keep_bookmarks_named_destinations_and_labels_on_their
     let source_bytes = std::fs::read(&source).unwrap();
     let info = open(&service, &source);
     let original = lopdf::Document::load(&source).unwrap();
-    let all = vec![row("A", 0, Some(0)), row("A1", 1, Some(1)), row("A1a", 2, Some(2)), row("A2", 1, Some(3)), row("B", 0, Some(1)), row("B1", 1, Some(4)), row("B2", 1, Some(5)), row("C", 0, None), row("D", 0, Some(5)), row("D1", 1, Some(3))];
+    let all = vec![row("A", 0, Some(0)), row("A1", 1, Some(1)), row("A1a", 2, Some(2)), row("A2", 1, Some(3)), row("B", 0, Some(1)), row("B1", 1, Some(4)), row("B2", 1, Some(5)), row("C", 0, None), row("D", 0, Some(5)), row("D1", 1, Some(3)), row("E", 0, Some(3)), row("E2", 1, Some(0)), row("F", 0, Some(1)), row("F1", 1, Some(4)), row("G", 0, Some(2))];
     assert_eq!(lopdf_rows(&original), all, "the reader resolves direct, GoTo, /Dests and name-tree destinations");
-    assert_eq!(pdfium_rows(&service, &info), all);
+    assert_eq!(pdfium_rows(&service, &info), all, "PDFium follows page-number destinations as page indexes");
     assert_eq!(pdfium_labels(&service, &info), ["i", "ii", "P-1", "P-2", "P-3", "A"]);
 
     let deleted = direct(&service, |reply| Request::Edit(info.id, PageEdit::Delete { pages: vec![1, 4] }, reply)).unwrap();
     let (copy, rows, labels) = saved(&service, &deleted, folder.path(), "deleted.pdf", None);
-    assert_eq!(rows, vec![row("A", 0, Some(0)), row("A1a", 1, Some(1)), row("A2", 1, Some(2)), row("B2", 0, Some(3)), row("C", 0, None), row("D", 0, Some(3)), row("D1", 1, Some(2))],
+    assert_eq!(rows, vec![row("A", 0, Some(0)), row("A1a", 1, Some(1)), row("A2", 1, Some(2)), row("B2", 0, Some(3)), row("C", 0, None), row("D", 0, Some(3)), row("D1", 1, Some(2)), row("E", 0, Some(2)), row("E2", 1, Some(0)), row("G", 0, Some(1))],
         "bookmarks to removed pages are dropped and their children promoted; the rest keep their pages");
     assert_eq!(verify(&copy).iter().map(|(title, _, open)| (title.as_str(), *open)).filter(|(title, _)| *title == "D").collect::<Vec<_>>(), [("D", false)], "a closed bookmark stays closed");
     assert_eq!(labels, ["i", "P-1", "P-2", "A"], "each kept page keeps its original label");
-    assert_eq!(names(&copy), vec![("Named-p3".into(), Some(2)), ("tree-p2".into(), Some(1)), ("tree-p5".into(), Some(3))], "named destinations to removed pages are dropped");
+    assert_eq!(names(&copy), vec![("Int-p2".into(), Some(1)), ("Named-p3".into(), Some(2)), ("tree-int-p0".into(), Some(0)), ("tree-p2".into(), Some(1)), ("tree-p5".into(), Some(3))], "named destinations to removed pages are dropped");
     assert_eq!(copy.get_pages().len(), 4);
-    for title in ["A1", "B", "B1"] { assert!(!has_title(&copy, title), "the dropped bookmark {title} is pruned from the copy"); }
+    assert!(!crate::named_dests::page_number_destination_left(&copy, 6), "page numbers are turned into page references");
+    for title in ["A1", "B", "B1", "F", "F1"] { assert!(!has_title(&copy, title), "the dropped bookmark {title} is pruned from the copy"); }
     assert_eq!(copy.objects.values().filter(|object| object.as_dict().is_ok_and(|dict| dict.get(b"Type").and_then(Object::as_name).is_ok_and(|kind| kind == b"Page"))).count(), 4, "removed pages are pruned");
     assert!(!copy.objects.values().any(|object| object.as_array().is_ok_and(|array| matches!(array.first(), Some(Object::Null)))), "no destination is left pointing at null");
 
     let moved = direct(&service, |reply| Request::Edit(deleted.id, PageEdit::Undo, reply)).unwrap();
     let moved = { assert!(!moved.dirty); direct(&service, |reply| Request::Edit(moved.id, PageEdit::Move { from: 0, to: 5 }, reply)).unwrap() };
-    let (_, rows, labels) = saved(&service, &moved, folder.path(), "moved.pdf", None);
-    assert_eq!(rows, vec![row("A", 0, Some(5)), row("A1", 1, Some(0)), row("A1a", 2, Some(1)), row("A2", 1, Some(2)), row("B", 0, Some(0)), row("B1", 1, Some(3)), row("B2", 1, Some(4)), row("C", 0, None), row("D", 0, Some(4)), row("D1", 1, Some(2))]);
+    let (copy, rows, labels) = saved(&service, &moved, folder.path(), "moved.pdf", None);
+    assert_eq!(rows, vec![row("A", 0, Some(5)), row("A1", 1, Some(0)), row("A1a", 2, Some(1)), row("A2", 1, Some(2)), row("B", 0, Some(0)), row("B1", 1, Some(3)), row("B2", 1, Some(4)), row("C", 0, None), row("D", 0, Some(4)), row("D1", 1, Some(2)),
+        row("E", 0, Some(2)), row("E2", 1, Some(5)), row("F", 0, Some(0)), row("F1", 1, Some(3)), row("G", 0, Some(1))], "page-number bookmarks follow their pages on a move");
+    assert_eq!(names(&copy), vec![("Int-p2".into(), Some(1)), ("Int-p4".into(), Some(3)), ("Named-p1".into(), Some(0)), ("Named-p3".into(), Some(2)), ("tree-int-p0".into(), Some(5)), ("tree-p1".into(), Some(0)), ("tree-p2".into(), Some(1)), ("tree-p5".into(), Some(4))]);
+    assert!(!crate::named_dests::page_number_destination_left(&copy, 6));
     assert_eq!(labels, ["ii", "P-1", "P-2", "P-3", "A", "i"], "a moved page keeps its label");
 
     let fresh = open(&service, &source);
     let (copy, rows, labels) = saved(&service, &fresh, folder.path(), "extracted.pdf", Some(vec![2, 3]));
-    assert_eq!(rows, vec![row("A1a", 0, Some(0)), row("A2", 0, Some(1)), row("C", 0, None), row("D1", 0, Some(1))]);
+    assert_eq!(rows, vec![row("A1a", 0, Some(0)), row("A2", 0, Some(1)), row("C", 0, None), row("D1", 0, Some(1)), row("E", 0, Some(1)), row("G", 0, Some(0))]);
     assert_eq!(labels, ["P-1", "P-2"]);
-    assert_eq!(names(&copy), vec![("Named-p3".into(), Some(1)), ("tree-p2".into(), Some(0))]);
+    assert_eq!(names(&copy), vec![("Int-p2".into(), Some(0)), ("Named-p3".into(), Some(1)), ("tree-p2".into(), Some(0))]);
     assert_eq!(std::fs::read(&source).unwrap(), source_bytes, "the source file is untouched");
 }
 
@@ -182,7 +194,7 @@ fn pending_bookmark_edits_compose_with_page_deletion_and_pending_label_edits_sti
     session.apply(PageEdit::Delete { pages: vec![1, 4] }).unwrap();
     let copy = lopdf::Document::load_mem(&session.export(None).unwrap()).unwrap();
     verify(&copy);
-    assert_eq!(lopdf_rows(&copy), vec![row("A", 0, Some(0)), row("A1a", 1, Some(1)), row("Renamed", 1, Some(2)), row("B2", 0, Some(3)), row("C", 0, None), row("D", 0, Some(3)), row("D1", 1, Some(2))]);
+    assert_eq!(lopdf_rows(&copy), vec![row("A", 0, Some(0)), row("A1a", 1, Some(1)), row("Renamed", 1, Some(2)), row("B2", 0, Some(3)), row("C", 0, None), row("D", 0, Some(3)), row("D1", 1, Some(2)), row("E", 0, Some(2)), row("E2", 1, Some(0)), row("G", 0, Some(1))]);
     assert_eq!(lopdf_labels(&copy), ["i", "P-1", "P-2", "A"]);
 
     let mut labelled = EditSession::new(save_bytes(&mut fixture()), 6);
@@ -213,7 +225,7 @@ fn hostile_or_unsupported_references_still_refuse_page_removal_and_leave_the_ses
     refused(&mut aliased, delete(), "also used by something else");
 
     let mut shared = fixture();
-    let (a1, d) = (title(&shared, "A1"), title(&shared, "D"));
+    let (a1, d) = (title(&shared, "A1"), title(&shared, "G"));
     shared.get_dictionary_mut(a1).unwrap().set("First", d);
     shared.get_dictionary_mut(a1).unwrap().set("Last", d);
     shared.get_dictionary_mut(d).unwrap().remove(b"Parent");
@@ -242,6 +254,25 @@ fn hostile_or_unsupported_references_still_refuse_page_removal_and_leave_the_ses
     let first = open_action.get_pages()[&1];
     open_action.catalog_mut().unwrap().set("OpenAction", fit(first));
     refused(&mut open_action, delete(), "open actions");
+
+    let mut duplicate = fixture();
+    let root = duplicate.catalog().unwrap().get(b"Names").unwrap().as_dict().unwrap().get(b"Dests").unwrap().as_reference().unwrap();
+    let leaf2 = duplicate.get_dictionary(root).unwrap().get(b"Kids").unwrap().as_array().unwrap()[1].as_reference().unwrap();
+    let page = duplicate.get_pages()[&1];
+    duplicate.get_dictionary_mut(leaf2).unwrap().set("Names", vec![string("tree-p2"), fit(page), string("tree-p5"), fit(page)]);
+    refused(&mut duplicate, delete(), crate::named_dests::REFUSAL);
+
+    let mut numbered = fixture();
+    numbered.catalog_mut().unwrap().set("OpenAction", fit_n(0));
+    let bytes = save_bytes(&mut numbered);
+    let mut session = EditSession::new(bytes.clone(), 6);
+    let error = session.apply(PageEdit::Move { from: 0, to: 1 }).unwrap_err();
+    assert!(error.contains("by its number"), "a page-number destination this copy cannot update refuses the move: {error}");
+    assert_eq!(session.revision, 0); assert_eq!(session.source, bytes);
+    numbered.catalog_mut().unwrap().set("OpenAction", dictionary! { "S" => "GoToR", "F" => string("other.pdf"), "D" => fit_n(0) });
+    let mut session = EditSession::new(save_bytes(&mut numbered), 6);
+    session.apply(PageEdit::Move { from: 0, to: 1 }).unwrap();
+    assert!(session.export(None).is_ok(), "a page number in a remote GoToR names a page of another file and is left alone");
 
     let mut bad_labels = fixture();
     let labels = bad_labels.catalog().unwrap().get(b"PageLabels").unwrap().as_reference().unwrap();
