@@ -116,6 +116,8 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+Full history: [docs/changelog.md](docs/changelog.md)
+
 - In-app update check: accepts GitHub's longer token format (`.`, `-`), anchored so a trailing newline is rejected (SM0; script and test only).
 - In-app update check: tauri-driver start moved inside the session try, so a start failure is cleaned up and reported as itself (SM6; review P3).
 - In-app update check: 7-Zip and the standalone silent installers run with the shared minimal environment, as tauri-driver already does (SM6; review P3).
@@ -124,8 +126,6 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 - Docs: `docs/releases.md` in-app update section names the current receipt schema (v3) for the false publisher-UI claims (SM6; review P3).
 - In-app update check: the receipt also records the shell-window probe taken at the end of the relaunch wait (`updater.shellWindowAtRelaunch`) (SM6; review P3).
 - In-app update check: the two GitHub API release-metadata reads use the job's read-only token (API host only, no redirects, removed from the environment first); public downloads stay unauthenticated (SM6).
-Full history: [docs/changelog.md](docs/changelog.md)
-
 - Save-copy prune: regression test that an indirect destination to a kept page survives (SM2); README recent changes trimmed to 15 lines (SM0). Full entries in [docs/changelog.md](docs/changelog.md).
 - In-app update check: automatic relaunch still required when an Explorer shell window exists; without one it is recorded as not observed, with its reason (schema v3) (SM6; script, tests, docs).
 - In-app update check: WebDriver lifecycle now uses the shared hosted-proven launch helpers (30 s session create, native-driver wait, owned-process cleanup); firewall precheck added (SM6; scripts and tests).
