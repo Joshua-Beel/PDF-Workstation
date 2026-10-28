@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- OCR working-directory test accepts the hosted runner's short 8.3 temp path by comparing canonical parents exactly (SM0; test only).
 - Dependency notices inventory refreshed for the new test-only `rayon` dev-dependency; notice text unchanged (SM0).
 - OCR hardening follow-up: the stale OCR work-directory sweep runs once per process, and a test now proves it deletes a matching directory older than 24 h while sparing fresh and foreign-named ones (SM4; no version change).
 - In-app update check now starts from published, publisher-signed 0.3.1 (not 0.2.0) and answers its native install confirmation: No keeps 0.3.1, then Yes installs; record schema 5. Tests only until the next release (SM6).
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - In-app update check: accepts GitHub's longer token format (`.`, `-`), anchored so a trailing newline is rejected (SM0; script and test only).
 - In-app update check: tauri-driver start moved inside the session try, so a start failure is cleaned up and reported as itself (SM6; review P3).
 - In-app update check: 7-Zip and the standalone silent installers run with the shared minimal environment, as tauri-driver already does (SM6; review P3).
-- In-app update check: before the post-update session, waits up to 60 s for updater setup processes started from temp after the retry to exit, and fails if any remain (SM6; review P3).

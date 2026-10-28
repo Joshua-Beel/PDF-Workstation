@@ -948,7 +948,8 @@ fn main() {
         let temp_root = external_windows_path(&std::env::temp_dir().canonicalize().unwrap()).unwrap();
         assert!(!reported.starts_with(&engine_root), "{reported:?} is inside the engine root {engine_root:?}");
         assert!(!reported.starts_with(&case.directory), "{reported:?} is inside the install folder");
-        assert!(reported.starts_with(&temp_root), "{reported:?} is not under {temp_root:?}");
+        let reported_parent = external_windows_path(&reported.parent().unwrap().canonicalize().unwrap()).unwrap();
+        assert_eq!(reported_parent, temp_root, "{reported:?} is not directly under {temp_root:?}");
         assert!(is_job_directory_name(&reported.file_name().unwrap().to_string_lossy()));
         assert!(!reported.exists(), "the per-job directory must be removed after the job");
     }
