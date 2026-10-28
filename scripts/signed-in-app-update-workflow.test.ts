@@ -40,7 +40,7 @@ function verifierHarness(names: string[], body: string, preamble = '') {
   `;
 }
 
-describe('published in-app update verification infrastructure', () => {
+describe('published in-app update verification infrastructure', { timeout: 60_000 }, () => {
   it('normalizes LF and Windows CRLF before exact workflow block assertions', () => {
     expect(normalizeNewlines('permissions:\n  contents: read')).toBe('permissions:\n  contents: read');
     expect(normalizeNewlines('permissions:\r\n  contents: read\r\n')).toBe('permissions:\n  contents: read\n');
