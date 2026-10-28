@@ -62,7 +62,7 @@ pub enum PageEdit {
     Redo,
 }
 
-fn source_text_extraction_permission(document: &Document) -> Result<(), String> {
+pub(crate) fn source_text_extraction_permission(document: &Document) -> Result<(), String> {
     let permissions = if let Some(state) = document.encryption_state.as_ref() {
         state.permissions()
     } else if document.is_encrypted() {

@@ -335,13 +335,11 @@ fn remove_number(document: &mut Document, number: u32) {
 }
 
 /// The text-extraction permission of a source whose load `reconcile` refused, so search, selection and OCR (which
-/// read PDFium's text) keep working. It is read from lopdf's unreconciled load only for an unencrypted file: the
-/// newest trailer, which every reader starts from, then has no `/Encrypt`, so no disputed object can carry it.
+/// read PDFium's text) keep working. It goes through the same check as any open (`encryption_state` first: lopdf
+/// removes `/Encrypt` from the trailer once the empty user password decrypts the file), on lopdf's unreconciled load.
 pub(crate) fn refused_source_permission(source: &[u8]) -> Result<(), String> {
-    let unverified = || format!("The PDF extraction permission could not be verified. {AMBIGUOUS}");
-    let document = crate::pdf_load::load_unreconciled(source).map_err(|_| unverified())?;
-    if document.trailer.has(b"Encrypt") { return Err(unverified()); }
-    Ok(())
+    let document = crate::pdf_load::load_unreconciled(source).map_err(|_| format!("The PDF extraction permission could not be verified. {AMBIGUOUS}"))?;
+    crate::editor::source_text_extraction_permission(&document)
 }
 
 /// Makes a loaded document resolve objects as a conforming reader does, or refuses it (see the module notes).

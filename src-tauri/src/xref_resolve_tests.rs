@@ -472,6 +472,39 @@ fn repo_fixtures_load_unchanged() {
     assert!(checked > 0);
 }
 
+/// An empty-user-password encrypted file, refused because an update frees an object the catalog uses. lopdf drops
+/// `/Encrypt` from the trailer after decrypting, so the permission must come from its `encryption_state`.
+fn encrypted_then_refused(permissions: lopdf::Permissions) -> Vec<u8> {
+    use lopdf::{dictionary, EncryptionState, EncryptionVersion};
+    let mut document = Document::with_version("1.7");
+    let pages = document.new_object_id();
+    let used = document.add_object(dictionary! { "V" => Object::string_literal("used") });
+    document.objects.insert(pages, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => Vec::<Object>::new(), "Count" => 0 }));
+    let root = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages, "Uses" => used });
+    document.trailer.set("Root", root);
+    document.trailer.set("ID", vec![Object::string_literal("xref-perm-id"), Object::string_literal("xref-perm-id")]);
+    let state = EncryptionState::try_from(EncryptionVersion::V2 { document: &document, owner_password: "owner", user_password: "", key_length: 128, permissions }).unwrap();
+    document.encrypt(&state).unwrap();
+    let encrypt = document.trailer.get(b"Encrypt").unwrap().as_reference().unwrap();
+    let mut bytes = Vec::new();
+    document.save_to(&mut bytes).unwrap();
+    let previous = Document::load_mem(&bytes).unwrap().xref_start;
+    let at = bytes.len();
+    bytes.extend_from_slice(format!("xref\n0 1\n0000000000 65535 f \n{} 1\n0000000000 00001 f \ntrailer\n<</Size {}/Root {} 0 R/Encrypt {} 0 R/ID[(xref-perm-id)(xref-perm-id)]/Prev {previous}>>\nstartxref\n{at}\n%%EOF\n", used.0, document.max_id + 1, root.0, encrypt.0).as_bytes());
+    bytes
+}
+
+#[test]
+fn a_refused_encrypted_file_keeps_its_copy_permission() {
+    let denied = encrypted_then_refused(lopdf::Permissions::all() - lopdf::Permissions::COPYABLE);
+    assert!(crate::pdf_load::load_unreconciled(&denied).unwrap().trailer.get(b"Encrypt").is_err(), "lopdf drops /Encrypt after decrypting");
+    assert_eq!(reason(&denied), Err("a used object a newer revision freed"));
+    assert_eq!(crate::editor::EditSession::new(denied, 0).text_extraction_permission(), Err("This PDF does not allow text and graphics extraction.".into()));
+    let allowed = encrypted_then_refused(lopdf::Permissions::all());
+    assert_eq!(reason(&allowed), Err("a used object a newer revision freed"));
+    assert_eq!(crate::editor::EditSession::new(allowed, 0).text_extraction_permission(), Ok(()));
+}
+
 /// Read-only measurement over a folder of real PDFs: `SM3_XREF_PROBE_DIR=<folder> cargo test --bins xref_probe -- --ignored --nocapture`.
 /// Prints counts only, never file names.
 #[test]
