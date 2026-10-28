@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Large-document OCR, step 2: job engine with a bounded worker pool, retry-then-degrade per page, a five-in-a-row breaker, pause, cancel and resume; not wired to the app yet (SM4).
 - Large-document OCR, step 1: a streaming, resumable searchable-PDF writer (lossless images, journal, final check from disk); not wired to the app yet (SM4; no user-visible change).
 - Debug builds only: `SMACROBAT_TEST_DATA_DIR=<absolute folder>` puts recovery records, the update-attempt note and the WebView2 profile under that folder instead of the user profile; compiled out of release (SM5).
 - Docs: OCR packaging evidence in `docs/features.md` and `docs/ocr-feasibility.md` now cites only what `docs/releases.md` states (SM4; docs only).

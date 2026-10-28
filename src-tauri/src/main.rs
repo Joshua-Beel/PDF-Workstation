@@ -41,6 +41,9 @@ mod data_dirs;
 #[cfg(windows)]
 #[cfg_attr(not(test), allow(dead_code))]
 mod searchable_pdf_stream;
+#[cfg(windows)]
+#[cfg_attr(not(test), allow(dead_code))]
+mod large_ocr_job;
 mod update_attempt;
 mod update_commands;
 #[cfg(windows)]

@@ -358,10 +358,6 @@ impl PartialWriter {
     pub(crate) fn next_page(&self) -> u32 { self.records.len() as u32 }
     pub(crate) fn records(&self) -> &[PageRecord] { &self.records }
     pub(crate) fn bytes_written(&self) -> u64 { self.position }
-    pub(crate) fn directory(&self) -> &Path { &self.directory }
-
-    #[cfg(test)]
-    pub(crate) fn set_sync_interval(&mut self, interval: std::time::Duration) { self.sync_interval = interval; }
 
     /// Makes every appended page durable: flush the part file to disk, then
     /// append and flush the journal records that point into it. A journal
@@ -554,9 +550,21 @@ impl PartialWriter {
         let path = self.directory.join(PART_FILE);
         let total = self.position;
         drop(self.part);
-        check_finished(&path, &self.records, &self.characters, &offsets, page_count)?;
+        if let Err(error) = check_finished(&path, &self.records, &self.characters, &offsets, page_count) {
+            let _ = reopen_for_resume(&path);
+            return Err(error);
+        }
         Ok(FinishedCopy { path, bytes: total, records: self.records })
     }
+}
+
+/// Turns a finished but unpublished file back into a partial file, so the job
+/// can be resumed (resume truncates the font, tree and xref and writes them
+/// again, byte for byte).
+pub(crate) fn reopen_for_resume(path: &Path) -> Result<(), StreamError> {
+    let mut file = OpenOptions::new().write(true).open(path).map_err(io)?;
+    file.write_all(PARTIAL_HEADER).map_err(io)?;
+    file.sync_all().map_err(io)
 }
 
 pub(crate) struct FinishedCopy {
@@ -583,6 +591,20 @@ pub(crate) fn read_manifest(directory: &Path) -> Result<JobManifest, StreamError
     let manifest: JobManifest = serde_json::from_slice(&bytes).map_err(|_| StreamError::Unusable("the job description is unreadable".into()))?;
     validate_manifest(&manifest)?;
     Ok(manifest)
+}
+
+/// How many pages a job folder has saved, read only (nothing is truncated).
+pub(crate) fn saved_pages(directory: &Path) -> u32 {
+    let Ok(file) = File::open(directory.join(JOURNAL_FILE)) else { return 0 };
+    let mut bytes = Vec::new();
+    if file.take(u64::from(MAX_STREAM_PAGES) * (RECORD_MAX_PAYLOAD as u64 + 16)).read_to_end(&mut bytes).is_err() { return 0; }
+    let (mut cursor, mut pages) = (0_usize, 0_u32);
+    while let Some((record, used)) = parse_record(&bytes[cursor..]) {
+        if record.page != pages { break; }
+        pages += 1;
+        cursor += used;
+    }
+    pages
 }
 
 fn encode_record(record: &PageRecord) -> Vec<u8> {
