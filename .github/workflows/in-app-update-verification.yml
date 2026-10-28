@@ -136,6 +136,7 @@ jobs:
           TARGET_SIGNATURE_RECEIPT: ${{ inputs.target_signature_receipt }}
           TARGET_MANIFEST_RECEIPT: ${{ inputs.target_manifest_receipt }}
           EXPECTED_PUBLISHER: ${{ inputs.expected_publisher }}
+          IN_APP_UPDATE_API_TOKEN: ${{ github.token }}
         run: |
           $installer = $env:TARGET_INSTALLER_RECEIPT | ConvertFrom-Json
           $signature = $env:TARGET_SIGNATURE_RECEIPT | ConvertFrom-Json

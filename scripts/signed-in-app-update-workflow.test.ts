@@ -1,6 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+
+function runPwshFile(source: string, env: NodeJS.ProcessEnv = process.env) {
+  const root = `target/in-app-update-test-${randomUUID()}`;
+  mkdirSync(root, { recursive: true });
+  const path = `${root}/run.ps1`;
+  writeFileSync(path, source, 'utf8');
+  try {
+    return spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-File', path], { encoding: 'utf8', timeout: 60_000, env });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
 
 const workflowPath = '.github/workflows/in-app-update-verification.yml';
 const scriptPath = 'scripts/verify-in-app-update.ps1';
@@ -48,7 +61,12 @@ describe('published in-app update verification infrastructure', () => {
     expect(workflow).toContain("Assert-ReceiptProperties $manifest @('id','bytes','sha256') 'Manifest'");
     expect(workflow).toContain('permissions:\n  contents: read');
     expect(workflow).not.toMatch(/contents:\s*write|actions:\s*write|id-token:\s*write/);
-    expect(workflow).not.toMatch(/secrets\.|github\.token|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING/);
+    const tokenLine = '          IN_APP_UPDATE_API_TOKEN: ${{ github.token }}\n';
+    expect(workflow.split(tokenLine)).toHaveLength(2);
+    const exerciseStep = workflow.slice(workflow.indexOf('- name: Exercise the exact published in-app update'), workflow.indexOf('- name: Upload only the sanitized'));
+    expect(exerciseStep).toContain(tokenLine);
+    expect(workflow.replace(tokenLine, '')).not.toMatch(/secrets\.|github\.token|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|IN_APP_UPDATE_API_TOKEN/);
+    expect(workflow.match(/^ {2}[a-z-]+: (read|write)$/gm)).toEqual(['  contents: read']);
     expect(workflow).toContain('runs-on: windows-2022');
     expect(workflow).toContain('TARGET_TAG -cne "v$env:TARGET_VERSION"');
     expect(workflow).toContain('git rev-list -n 1 $env:TARGET_TAG');
@@ -78,8 +96,100 @@ describe('published in-app update verification infrastructure', () => {
     expect(script).toContain('Assert-TrustedWindowsSignature -Path $targetInstallerPath');
     expect(script).toContain('Assert-TrustedWindowsSignature -Path $extractedApp.FullName');
     expect(script).toContain('^PDF(?:\\.| )Workstation_');
-    expect(script).not.toMatch(/Authorization|Bearer|api[_-]?key|client[_-]?secret/i);
+    const apiReader = script.slice(script.indexOf('function Invoke-GitHubReleaseApi'), script.indexOf('function Invoke-PublicDownload'));
+    expect(apiReader).toContain("[Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer',$Token)");
+    expect(script.replace(apiReader, '')).not.toMatch(/Authorization|Bearer|api[_-]?key|client[_-]?secret/i);
+    expect(script.match(/Invoke-GitHubReleaseApi -Path "\/repos\/\$\(\$script:UpdatePins\.Repository\)\/releases\/(tags\/\$TargetTag|latest)" -Destination \$(metadataPath|latestMetadataPath) -Token \$script:ApiToken/g)).toHaveLength(2);
+    expect(script).not.toMatch(/Invoke-PublicDownload -Uri "https:\/\/api\.github\.com/);
     expect(script).not.toMatch(/dangerousInsecureTransportProtocol|dangerousAcceptInvalid|allowDowngrades|\.endpoints\(/);
+  });
+
+  it('authenticates only exact release API reads, never follows their redirects, and never leaks the token', () => {
+    const fakeToken = 'ghs_' + 'Q7'.repeat(18);
+    const source = verifierHarness(
+      ['Read-ApiTokenFromEnvironment', 'New-ApiHttpHandler', 'Get-RateLimitHeaderValue', 'Invoke-GitHubReleaseApi', 'Invoke-PublicDownload'],
+      String.raw`
+        $script:UpdatePins=[ordered]@{Repository='Joshua-Beel/PDF-Workstation';JsonBytesMaximum=[uint64]1MB;NetworkBytesMaximum=[uint64]1MB}
+        Add-Type -TypeDefinition @'
+using System; using System.Collections.Generic; using System.Net; using System.Net.Http; using System.Threading; using System.Threading.Tasks;
+public sealed class InAppRecordingHandler : HttpMessageHandler {
+  public readonly List<string> Log = new List<string>();
+  public int Status = 200; public string Location; public string Body = "{}";
+  public readonly Dictionary<string,string> Headers = new Dictionary<string,string>();
+  protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) {
+    Log.Add(request.RequestUri.Host + "|" + (request.Headers.Authorization == null ? "none" : request.Headers.Authorization.Scheme));
+    var response = new HttpResponseMessage((HttpStatusCode)Status) { RequestMessage = request, Content = new StringContent(Body) };
+    if (Location != null) response.Headers.Location = new Uri(Location);
+    foreach (var header in Headers) response.Headers.TryAddWithoutValidation(header.Key, header.Value);
+    return Task.FromResult(response);
+  }
+}
+'@
+        $root=Join-Path (Resolve-Path target) ('in-app-api-'+[Guid]::NewGuid().ToString('N'))
+        [IO.Directory]::CreateDirectory($root)|Out-Null
+        try{
+          $token=Read-ApiTokenFromEnvironment -Name 'IN_APP_UPDATE_API_TOKEN'
+          if($null-ne[Environment]::GetEnvironmentVariable('IN_APP_UPDATE_API_TOKEN')-or(Test-Path env:IN_APP_UPDATE_API_TOKEN)){throw 'Token stayed in the process environment.'}
+          $child=& pwsh.exe -NoProfile -NonInteractive -Command '[string][Environment]::GetEnvironmentVariable(''IN_APP_UPDATE_API_TOKEN'')'
+          if(-not[string]::IsNullOrEmpty(($child-join''))){throw 'A child process inherited the token.'}
+          foreach($bad in @('','short','has space in it 1234567890',('ghs_'+('x'*20)+'!'),('x'*256))){
+            [Environment]::SetEnvironmentVariable('IN_APP_UPDATE_API_TOKEN',$bad,'Process')
+            $rejected=$false;try{$null=Read-ApiTokenFromEnvironment -Name 'IN_APP_UPDATE_API_TOKEN'}catch{$rejected=$true}
+            if(-not$rejected){throw ('Malformed token was accepted: length '+$bad.Length)}
+            if($null-ne[Environment]::GetEnvironmentVariable('IN_APP_UPDATE_API_TOKEN')){throw 'Malformed token was left in the environment.'}
+          }
+          if((New-ApiHttpHandler).AllowAutoRedirect){throw 'API handler follows redirects.'}
+          $following={$h=[Net.Http.HttpClientHandler]::new();$h.AllowAutoRedirect=$true;$h}
+          $rejected=$false;try{Invoke-GitHubReleaseApi -Path '/repos/Joshua-Beel/PDF-Workstation/releases/latest' -Destination (Join-Path $root 'never.json') -Token $token -HandlerFactory $following}catch{$rejected=$true}
+          if(-not$rejected){throw 'A redirect-following API handler was accepted.'}
+          $ok=[InAppRecordingHandler]::new()
+          Invoke-GitHubReleaseApi -Path '/repos/Joshua-Beel/PDF-Workstation/releases/tags/v0.3.1' -Destination (Join-Path $root 'ok.json') -Token $token -HandlerFactory {$ok}.GetNewClosure()
+          if(($ok.Log-join',')-cne'api.github.com|Bearer'){throw ('API request log changed: '+($ok.Log-join','))}
+          $redirect=[InAppRecordingHandler]::new();$redirect.Status=302;$redirect.Location='https://objects.example.invalid/release.json'
+          $message='';try{Invoke-GitHubReleaseApi -Path '/repos/Joshua-Beel/PDF-Workstation/releases/latest' -Destination (Join-Path $root 'redirect.json') -Token $token -HandlerFactory {$redirect}.GetNewClosure()}catch{$message=$_.Exception.Message}
+          if(-not$message.Contains('redirect was not followed')-or$redirect.Log.Count-ne1){throw 'API redirect was followed or not refused.'}
+          foreach($path in @('/repos/Other/Repo/releases/latest','/repos/Joshua-Beel/PDF-Workstation/releases/latest?per_page=1','/repos/Joshua-Beel/PDF-Workstation/releases','/repos/Joshua-Beel/PDF-Workstation/releases/tags/latest','//evil.example/repos/Joshua-Beel/PDF-Workstation/releases/latest')){
+            $never=[InAppRecordingHandler]::new()
+            $rejected=$false;try{Invoke-GitHubReleaseApi -Path $path -Destination (Join-Path $root 'bad.json') -Token $token -HandlerFactory {$never}.GetNewClosure()}catch{$rejected=$true}
+            if(-not$rejected-or$never.Log.Count-ne0){throw ('API path was not refused before sending: '+$path)}
+          }
+          $limited=[InAppRecordingHandler]::new();$limited.Status=403;$limited.Headers['X-RateLimit-Remaining']='0';$limited.Headers['X-RateLimit-Reset']='1700000000';$limited.Body=('echo '+$token)
+          $message='';try{Invoke-GitHubReleaseApi -Path '/repos/Joshua-Beel/PDF-Workstation/releases/latest' -Destination (Join-Path $root 'limited.json') -Token $token -HandlerFactory {$limited}.GetNewClosure()}catch{$message=$_.Exception.Message}
+          if($message-cne'GitHub API release metadata request failed with status 403 (rate limit remaining 0, reset 1700000000).'){throw ('Rate-limit failure message changed: '+$message)}
+          Write-Output ('CAUGHT '+$message)
+          $tooMany=[InAppRecordingHandler]::new();$tooMany.Status=429;$tooMany.Headers['X-RateLimit-Remaining']=$token
+          $message='';try{Invoke-GitHubReleaseApi -Path '/repos/Joshua-Beel/PDF-Workstation/releases/latest' -Destination (Join-Path $root 'many.json') -Token $token -HandlerFactory {$tooMany}.GetNewClosure()}catch{$message=$_.Exception.Message}
+          if($message-cne'GitHub API release metadata request failed with status 429 (rate limit remaining invalid, reset absent).'){throw ('429 failure message changed: '+$message)}
+          Write-Output ('CAUGHT '+$message)
+          $public=[InAppRecordingHandler]::new();$public.Body='public bytes'
+          $null=Invoke-PublicDownload -Uri 'https://github.com/Joshua-Beel/PDF-Workstation/releases/latest/download/latest.json' -Destination (Join-Path $root 'latest.json') -HandlerFactory {$public}.GetNewClosure()
+          if(($public.Log-join',')-cne'github.com|none'){throw 'Public download carried an Authorization header.'}
+          $rejected=$false;try{$null=Invoke-PublicDownload -Uri 'https://api.github.com/repos/Joshua-Beel/PDF-Workstation/releases/latest' -Destination (Join-Path $root 'api.json') -HandlerFactory {[InAppRecordingHandler]::new()}}catch{$rejected=$true}
+          if(-not$rejected){throw 'Public downloader accepted the API host.'}
+          Write-Output 'API-AUTH-CHECKS-PASSED'
+        } finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+      `,
+    );
+    const result = runPwshFile(source, { ...process.env, IN_APP_UPDATE_API_TOKEN: fakeToken });
+    const output = `${result.stdout}\n${result.stderr}`;
+    expect(result.status, output).toBe(0);
+    expect(result.stdout).toContain('API-AUTH-CHECKS-PASSED');
+    expect(result.stdout).toContain('GITHUB_API_DIAG status=403 rateLimitRemaining=0 rateLimitReset=1700000000');
+    expect(result.stdout).toContain('GITHUB_API_DIAG status=429 rateLimitRemaining=invalid rateLimitReset=absent');
+    expect(output).not.toContain(fakeToken);
+    expect(output).not.toContain('Q7Q7Q7');
+  });
+
+  it('reads and clears the API token before any dot-source, download or child process', () => {
+    const script = readFileSync(scriptPath, 'utf8');
+    const read = script.indexOf("$script:ApiToken = Read-ApiTokenFromEnvironment -Name 'IN_APP_UPDATE_API_TOKEN'");
+    expect(read).toBeGreaterThan(0);
+    for (const later of [". (Join-Path $PSScriptRoot 'installed-app-launch.ps1')", '\nAssert-HostedRunner', 'Invoke-GitHubReleaseApi -Path "', '$null = Invoke-PublicDownload -Uri', 'Expand-TargetInstaller -Installer $targetInstallerPath', 'Invoke-SilentInstaller -Path $baselinePath', '$session = Start-WebDriverSession']) {
+      expect(script.indexOf(later), later).toBeGreaterThan(read);
+    }
+    expect(script).toMatch(/-Token \$script:ApiToken\r?\n\$script:ApiToken = \$null\r?\n/);
+    expect(script.match(/\$script:ApiToken/g)).toHaveLength(4);
+    expect(script).toContain('IN_APP_UPDATE_API_TOKEN|gh[pousr]_[A-Za-z0-9_]{16,}');
   });
 
   it('uses the real updater UI with deterministic blocked-download recovery and verifies relaunch', () => {
@@ -139,7 +249,7 @@ describe('published in-app update verification infrastructure', () => {
 
   it('drives WebDriver through the shared hosted-proven launch helpers', () => {
     const script = readFileSync(scriptPath, 'utf8');
-    expect(script).toMatch(/Set-StrictMode -Version Latest\r?\n\r?\n\. \(Join-Path \$PSScriptRoot 'installed-app-launch\.ps1'\)/);
+    expect(script).toMatch(/\r?\n\r?\n\. \(Join-Path \$PSScriptRoot 'installed-app-launch\.ps1'\)\r?\n\r?\n\$script:UpdatePins = \[ordered\]@\{/);
     for (const helper of [
       'Wait-FixedWebDriverPortsFree -Deadline', 'Start-BoundedDiscardProcess -Path $TauriDriverPath', '-Environment (Get-MinimalWindowsProcessEnvironment)',
       "Invoke-BoundedLoopbackJson -Method GET -Path '/status'", 'Wait-NativeDriverStatus -ExpectedVersion $ExpectedEdgeDriverVersion',
@@ -279,7 +389,7 @@ describe('published in-app update verification infrastructure', () => {
     expect(script).toContain('$outputFiles.Count -ne 1');
     expect(script).toContain('notes = $manifestNotesReceipt');
     expect(script).not.toContain('notes = [string]$manifest.notes');
-    expect(script).toContain('GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING');
+    expect(script).toContain('GITHUB_TOKEN|GH_TOKEN|IN_APP_UPDATE_API_TOKEN|gh[pousr]_[A-Za-z0-9_]{16,}|AZURE_|TAURI_SIGNING');
     expect(script).toContain('release-assets\\.githubusercontent\\.com');
     expect(script).not.toMatch(/Write-Host\s+\$json|Write-Output\s+\$json/);
   });

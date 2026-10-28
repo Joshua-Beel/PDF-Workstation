@@ -24,6 +24,17 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+function Read-ApiTokenFromEnvironment {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    $value = [Environment]::GetEnvironmentVariable($Name,[EnvironmentVariableTarget]::Process)
+    [Environment]::SetEnvironmentVariable($Name,[NullString]::Value,[EnvironmentVariableTarget]::Process)
+    if ($null -ne [Environment]::GetEnvironmentVariable($Name,[EnvironmentVariableTarget]::Process) -or (Test-Path -LiteralPath ('Env:' + $Name))) { throw 'The GitHub API token could not be removed from the process environment.' }
+    if ([string]::IsNullOrWhiteSpace($value) -or $value -cnotmatch '^[A-Za-z0-9_]{20,255}$') { throw 'The GitHub API token for release metadata is unavailable or malformed.' }
+    return $value
+}
+
+$script:ApiToken = Read-ApiTokenFromEnvironment -Name 'IN_APP_UPDATE_API_TOKEN'
+
 . (Join-Path $PSScriptRoot 'installed-app-launch.ps1')
 
 $script:UpdatePins = [ordered]@{
@@ -127,11 +138,84 @@ function Assert-TrustedWindowsSignature {
     return $facts
 }
 
+function New-ApiHttpHandler {
+    $handler = [Net.Http.HttpClientHandler]::new()
+    $handler.AllowAutoRedirect = $false
+    $handler.UseCookies = $false
+    return $handler
+}
+
+function Get-RateLimitHeaderValue {
+    param($Response,[string]$Name)
+    $values = $null
+    if ($Response.Headers.TryGetValues($Name,[ref]$values)) {
+        $first = [string](@($values)[0])
+        if ($first -cmatch '^\d{1,12}$') { return $first }
+        return 'invalid'
+    }
+    return 'absent'
+}
+
+function Invoke-GitHubReleaseApi {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][string]$Token,
+        [uint64]$MaximumBytes = $script:UpdatePins.JsonBytesMaximum,
+        [scriptblock]$HandlerFactory
+    )
+    $allowed = '^/repos/' + [regex]::Escape($script:UpdatePins.Repository) + '/releases/(?:latest|tags/v\d+\.\d+\.\d+)$'
+    if ($Path -cnotmatch $allowed) { throw 'GitHub API requests are restricted to this repository''s release metadata.' }
+    $uri = [Uri]::new('https://api.github.com' + $Path)
+    if ($uri.Scheme -cne 'https' -or $uri.DnsSafeHost -cne 'api.github.com' -or $uri.UserInfo -or $uri.Query -or $uri.Fragment -or $uri.AbsolutePath -cne $Path) {
+        throw 'GitHub API request URI is not the exact release metadata endpoint.'
+    }
+    $handler = if ($HandlerFactory) { & $HandlerFactory } else { New-ApiHttpHandler }
+    if ($handler -is [Net.Http.HttpClientHandler] -and $handler.AllowAutoRedirect) { $handler.Dispose(); throw 'GitHub API handler must not follow redirects.' }
+    $client = [Net.Http.HttpClient]::new($handler,$true); $client.Timeout = [TimeSpan]::FromSeconds(60)
+    $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get,$uri)
+    $request.Headers.UserAgent.ParseAdd('PDF-Workstation-published-update-verifier/1')
+    $request.Headers.Accept.ParseAdd('application/vnd.github+json')
+    $null = $request.Headers.TryAddWithoutValidation('X-GitHub-Api-Version','2022-11-28')
+    $request.Headers.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer',$Token)
+    $response = $null
+    try {
+        $response = $client.SendAsync($request,[Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+        $status = [int]$response.StatusCode
+        if ($status -ge 300 -and $status -lt 400) { throw "GitHub API release metadata request was redirected (status $status); the redirect was not followed." }
+        if ($status -eq 403 -or $status -eq 429) {
+            $remaining = Get-RateLimitHeaderValue -Response $response -Name 'X-RateLimit-Remaining'
+            $reset = Get-RateLimitHeaderValue -Response $response -Name 'X-RateLimit-Reset'
+            [Console]::Out.WriteLine(('GITHUB_API_DIAG status={0} rateLimitRemaining={1} rateLimitReset={2}' -f $status,$remaining,$reset))
+            throw "GitHub API release metadata request failed with status $status (rate limit remaining $remaining, reset $reset)."
+        }
+        if ($status -ne 200) { throw "GitHub API release metadata request failed with status $status." }
+        $length = $response.Content.Headers.ContentLength
+        if ($null -ne $length -and ([uint64]$length -eq 0 -or [uint64]$length -gt $MaximumBytes)) { throw 'GitHub API response length is outside its bound.' }
+        $stream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $file = [IO.File]::Open($Destination,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        try {
+            $buffer = [byte[]]::new(65536); [uint64]$total = 0
+            while (($read = $stream.Read($buffer,0,$buffer.Length)) -gt 0) {
+                $total += [uint64]$read
+                if ($total -gt $MaximumBytes) { throw 'GitHub API response exceeded its byte bound.' }
+                $file.Write($buffer,0,$read)
+            }
+            if ($total -eq 0) { throw 'GitHub API response was empty.' }
+        } finally { $file.Dispose(); $stream.Dispose() }
+    } finally {
+        if ($null -ne $response) { $response.Dispose() }
+        $request.Dispose(); $client.Dispose()
+    }
+}
+
 function Invoke-PublicDownload {
-    param([string]$Uri,[string]$Destination,[uint64]$MaximumBytes = $script:UpdatePins.NetworkBytesMaximum)
+    param([string]$Uri,[string]$Destination,[uint64]$MaximumBytes = $script:UpdatePins.NetworkBytesMaximum,[scriptblock]$HandlerFactory)
     $parsed = [Uri]$Uri
     if ($parsed.Scheme -cne 'https' -or $parsed.UserInfo) { throw 'Public download must use credential-free HTTPS.' }
-    $handler = [Net.Http.HttpClientHandler]::new(); $handler.AllowAutoRedirect = $true
+    if ($parsed.DnsSafeHost -ceq 'api.github.com') { throw 'GitHub API metadata must use the bounded release API reader.' }
+    $handler = if ($HandlerFactory) { & $HandlerFactory } else { [Net.Http.HttpClientHandler]::new() }
+    if ($handler -is [Net.Http.HttpClientHandler]) { $handler.AllowAutoRedirect = $true }
     $client = [Net.Http.HttpClient]::new($handler); $client.Timeout = [TimeSpan]::FromSeconds(90)
     $client.DefaultRequestHeaders.UserAgent.ParseAdd('PDF-Workstation-published-update-verifier/1')
     $response = $null
@@ -527,8 +611,9 @@ $targetInstallerPath = Join-Path $downloads $TargetInstallerName
 $targetSignatureName = "$TargetInstallerName.sig"
 $targetSignaturePath = Join-Path $downloads $targetSignatureName
 $targetManifestPath = Join-Path $downloads 'latest.json'
-$null = Invoke-PublicDownload -Uri "https://api.github.com/repos/$($script:UpdatePins.Repository)/releases/tags/$TargetTag" -Destination $metadataPath -MaximumBytes $script:UpdatePins.JsonBytesMaximum
-$null = Invoke-PublicDownload -Uri "https://api.github.com/repos/$($script:UpdatePins.Repository)/releases/latest" -Destination $latestMetadataPath -MaximumBytes $script:UpdatePins.JsonBytesMaximum
+Invoke-GitHubReleaseApi -Path "/repos/$($script:UpdatePins.Repository)/releases/tags/$TargetTag" -Destination $metadataPath -Token $script:ApiToken
+Invoke-GitHubReleaseApi -Path "/repos/$($script:UpdatePins.Repository)/releases/latest" -Destination $latestMetadataPath -Token $script:ApiToken
+$script:ApiToken = $null
 $release = Read-BoundedJson -Path $metadataPath
 $latestRelease = Read-BoundedJson -Path $latestMetadataPath
 if ([uint64]$release.id -ne $targetReleaseIdValue -or [uint64]$latestRelease.id -ne $targetReleaseIdValue -or
@@ -763,7 +848,7 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
         }
     }
     $json = $record | ConvertTo-Json -Depth 12
-    if ($json -match '(?i)([A-Z]:\\|\\Users\\|runneradmin|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|codesigning\.azure\.net|raw\.log|release-assets\.githubusercontent\.com)') {
+    if ($json -match '(?i)([A-Z]:\\|\\Users\\|runneradmin|GITHUB_TOKEN|GH_TOKEN|IN_APP_UPDATE_API_TOKEN|gh[pousr]_[A-Za-z0-9_]{16,}|AZURE_|TAURI_SIGNING|codesigning\.azure\.net|raw\.log|release-assets\.githubusercontent\.com)') {
         throw 'Sanitized in-app update record contains a host path, credential marker, raw log, or ephemeral download URL.'
     }
     $recordPath = Join-Path $output 'in-app-update-verification.json'

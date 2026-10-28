@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- In-app update check: the two GitHub API release-metadata reads use the job's read-only token (API host only, no redirects, removed from the environment first); public downloads stay unauthenticated (SM6).
 Full history: [docs/changelog.md](docs/changelog.md)
 
 - Save-copy prune: regression test that an indirect destination to a kept page survives (SM2); README recent changes trimmed to 15 lines (SM0). Full entries in [docs/changelog.md](docs/changelog.md).
