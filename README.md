@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- Docs: `docs/releases.md` in-app update section names the current receipt schema (v3) for the false publisher-UI claims (SM6; review P3).
 - In-app update check: the receipt also records the shell-window probe taken at the end of the relaunch wait (`updater.shellWindowAtRelaunch`) (SM6; review P3).
 - In-app update check: the two GitHub API release-metadata reads use the job's read-only token (API host only, no redirects, removed from the environment first); public downloads stay unauthenticated (SM6).
 Full history: [docs/changelog.md](docs/changelog.md)
