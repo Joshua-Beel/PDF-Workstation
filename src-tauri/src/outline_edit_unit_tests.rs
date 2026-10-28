@@ -502,3 +502,44 @@ fn link_annotations_and_named_destinations_pointing_at_pages_do_not_block_editin
     verify(&document);
     assert_eq!(read(&document).unwrap().len(), 8);
 }
+
+#[test]
+fn a_tagged_pdf_whose_bookmarks_carry_se_links_is_accepted_and_edits_save() {
+    let mut document = sample(); with_outline(&mut document, &tree());
+    let pages: Vec<ObjectId> = document.get_pages().values().copied().collect();
+    let tree_root = document.new_object_id();
+    let section = document.new_object_id();
+    let heading = document.new_object_id();
+    let paragraph = document.new_object_id();
+    let parent_tree = document.new_object_id();
+    let marked = document.new_object_id();
+    document.objects.insert(tree_root, Object::Dictionary(dictionary! { "Type" => "StructTreeRoot", "K" => section, "ParentTree" => parent_tree, "ParentTreeNextKey" => 1 }));
+    document.objects.insert(section, Object::Dictionary(dictionary! { "Type" => "StructElem", "S" => "Sect", "P" => tree_root, "Pg" => pages[0], "K" => vec![Object::Reference(heading), Object::Reference(paragraph)] }));
+    document.objects.insert(heading, Object::Dictionary(dictionary! { "Type" => "StructElem", "S" => "H1", "P" => section, "Pg" => pages[0], "K" => 0 }));
+    document.objects.insert(paragraph, Object::Dictionary(dictionary! { "Type" => "StructElem", "S" => "P", "P" => section, "Pg" => pages[2], "K" => 1 }));
+    document.objects.insert(marked, Object::Array(vec![Object::Reference(heading), Object::Reference(paragraph)]));
+    document.objects.insert(parent_tree, Object::Dictionary(dictionary! { "Nums" => vec![Object::Integer(0), Object::Reference(marked)] }));
+    document.get_dictionary_mut(pages[0]).unwrap().set("StructParents", 0);
+    document.catalog_mut().unwrap().set("StructTreeRoot", Object::Reference(tree_root));
+    document.catalog_mut().unwrap().set("MarkInfo", Object::Dictionary(dictionary! { "Marked" => true }));
+    for (title, target) in [("A", heading), ("A2", paragraph), ("B", section), ("C", tree_root)] {
+        let id = find(&document, title);
+        document.get_dictionary_mut(id).unwrap().set("SE", Object::Reference(target));
+    }
+    let entries = read(&document).expect("bookmarks that link into the structure tree are not aliases of it");
+    assert_eq!(entries.len(), 7);
+    let mut bytes = Vec::new(); document.save_to(&mut bytes).unwrap();
+    let mut session = crate::editor::EditSession::new(bytes, 6);
+    let view = session.bookmark_view();
+    assert!(view.editable, "{:?}", view.reason);
+    let version = view.version;
+    let a1 = view.entries.iter().find(|entry| entry.title == "A1").unwrap().uid;
+    session.bookmark_edit(version, BookmarkOp::Rename { uid: a1, title: "Intro".into() }).unwrap();
+    session.bookmark_edit(version + 1, BookmarkOp::Add { page: 3, title: "Added".into(), after: None }).unwrap();
+    let saved = Document::load_mem(&session.export(None).unwrap()).unwrap();
+    let written = verify(&saved);
+    assert_eq!(written.iter().map(|(title, depth, _)| (title.as_str(), *depth)).collect::<Vec<_>>(), [("A", 0), ("Intro", 1), ("A2", 1), ("A2x", 2), ("B", 0), ("B1", 1), ("C", 0), ("Added", 0)]);
+    assert!(saved.catalog().unwrap().has(b"StructTreeRoot"), "the structure tree travels with the copy");
+    let se_titles: Vec<String> = saved.objects.values().filter_map(|object| { let dict = object.as_dict().ok()?; dict.has(b"SE").then(|| lopdf::decode_text_string(dict.get(b"Title").ok()?).ok()).flatten() }).collect();
+    assert_eq!(se_titles.len(), 4, "every /SE link survives the rewrite: {se_titles:?}");
+}
