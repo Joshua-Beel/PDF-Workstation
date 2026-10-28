@@ -1,6 +1,6 @@
 use crate::editor::PageSpec;
 use lopdf::{Dictionary, Document, Object, ObjectId};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 
 const MAX_SOURCE_BYTES: usize = 64 * 1024 * 1024;
@@ -8,8 +8,8 @@ const MAX_PAGES: usize = 65_536;
 const MAX_REFERENCE_DEPTH: usize = 16;
 const MAX_TREE_DEPTH: usize = 16;
 const MAX_TREE_NODES: usize = 1_024;
-const MAX_RANGES: usize = 4_096;
-const MAX_PREFIX_BYTES: usize = 512;
+pub(crate) const MAX_RANGES: usize = 4_096;
+pub(crate) const MAX_PREFIX_BYTES: usize = 512;
 const MAX_LABEL_BYTES: usize = 1_024;
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const CACHE_BUDGET: usize = 8 * 1024 * 1024;
@@ -47,6 +47,15 @@ pub struct SourcePageLabels {
 }
 
 impl SourcePageLabels {
+    /// The labels the given ranges produce, for showing unsaved label edits. No ranges means no labels.
+    pub fn from_ranges(ranges: &[Range], page_count: usize) -> Self {
+        if ranges.is_empty() { return Self::none(); }
+        match expand_ranges(ranges, page_count) {
+            Ok(labels) => Self { status: PageLabelStatus::Supported, reason: None, labels },
+            Err(reason) => Self::unavailable(reason),
+        }
+    }
+
     fn none() -> Self {
         Self { status: PageLabelStatus::None, reason: None, labels: Vec::new() }
     }
@@ -138,14 +147,17 @@ fn read_source(source: &[u8], source_pages: usize) -> SourcePageLabels {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Style { Decimal, RomanUpper, RomanLower, AlphaUpper, AlphaLower }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Style { Decimal, RomanUpper, RomanLower, AlphaUpper, AlphaLower }
 
-struct Range {
-    start: usize,
-    prefix: String,
-    style: Option<Style>,
-    first: u64,
+/// One entry of the page-label number tree: pages from `start` (zero-based) up to the next range share it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Range {
+    pub start: usize,
+    pub prefix: String,
+    pub style: Option<Style>,
+    pub first: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -159,6 +171,23 @@ struct TreeState {
 }
 
 fn parse_source(document: &Document, page_count: usize) -> Result<Option<Vec<String>>, String> {
+    match parse_ranges(document, page_count)? {
+        Some(ranges) => expand_ranges(&ranges, page_count).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// The document's page-label ranges through the same bounded reader the viewer uses (depth, node, range and
+/// output caps, cycle and repeated-node checks, Limits checks). An empty list means the document has no labels.
+pub fn read_ranges(document: &Document, page_count: usize) -> Result<Vec<Range>, String> {
+    if page_count == 0 || page_count > MAX_PAGES { return Err("Page labels are unavailable for this source page count.".into()); }
+    match parse_ranges(document, page_count)? {
+        Some(ranges) => { expand_ranges(&ranges, page_count)?; Ok(ranges) }
+        None => Ok(Vec::new()),
+    }
+}
+
+fn parse_ranges(document: &Document, page_count: usize) -> Result<Option<Vec<Range>>, String> {
     let catalog = resolve(document, document.trailer.get(b"Root").map_err(|_| "The PDF catalog is missing.")?)?;
     let catalog = catalog.as_dict().map_err(|_| "The PDF catalog has an invalid type.")?;
     let root = match catalog.get(b"PageLabels") {
@@ -173,7 +202,7 @@ fn parse_source(document: &Document, page_count: usize) -> Result<Option<Vec<Str
     for pair in state.ranges.windows(2) {
         if pair[0].start >= pair[1].start { return Err("The page-label range indices must be sorted and unique.".into()); }
     }
-    expand_ranges(&state.ranges, page_count).map(Some)
+    Ok(Some(state.ranges))
 }
 
 fn parse_node(document: &Document, value: &Object, depth: usize, root: bool, page_count: usize, state: &mut TreeState) -> Result<Bounds, String> {
@@ -278,7 +307,7 @@ fn decode_prefix(value: &Object) -> Result<String, String> {
     }
 }
 
-fn expand_ranges(ranges: &[Range], page_count: usize) -> Result<Vec<String>, String> {
+pub(crate) fn expand_ranges(ranges: &[Range], page_count: usize) -> Result<Vec<String>, String> {
     let mut labels = Vec::with_capacity(page_count);
     let mut total = 0usize;
     for (range_index, range) in ranges.iter().enumerate() {

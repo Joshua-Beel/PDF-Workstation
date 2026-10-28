@@ -13,6 +13,7 @@ import ConfirmDialog from './ConfirmDialog';
 import Updates from './Updates';
 import SearchPanel, { type ActiveSearch } from './SearchPanel';
 import BookmarksPanel from './BookmarksPanel';
+import PageLabelsPanel from './PageLabelsPanel';
 import type { BookmarkDestination } from './bookmarkDestination';
 import PageText from './PageText';
 import PageOcrDialog, { type PageOcrTarget } from './PageOcrDialog';
@@ -79,6 +80,8 @@ export default function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [activeSearch, setActiveSearch] = useState<ActiveSearch | null>(null);
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
+  const [labelsOpen, setLabelsOpen] = useState(false);
+  const [labelsEpoch, setLabelsEpoch] = useState(0);
   const [pageTextOpen, setPageTextOpen] = useState(false);
   const [pageOcrTarget, setPageOcrTarget] = useState<PageOcrTarget | null>(null);
   const unavailableOcr = (reason: string): OcrCapability => ({ available: false, reason, language: null, searchablePdfAvailable: false, searchablePdfReason: reason, searchablePdfDpi: null, searchablePdfMaxPages: 32, searchablePdfMaxPixels: 33_554_432, searchablePdfMaxWords: 100_000, searchablePdfMaxTextBytes: 8_388_608, searchablePdfCharacters: null });
@@ -91,6 +94,7 @@ export default function App() {
   const [passwordRequest, setPasswordRequest] = useState<{ challenge: Extract<OpenResult, { status: 'password_required' }>; organize: boolean } | null>(null);
   const passwordBlocking = useRef(false);
   useEffect(() => { if (searchOpen) setBookmarksOpen(false); }, [searchOpen]);
+  useEffect(() => { if (searchOpen || bookmarksOpen || !nav) setLabelsOpen(false); }, [searchOpen, bookmarksOpen, nav]);
   const [menu, setMenu] = useState(false);
   const [updatesOpen, setUpdatesOpen] = useState(false);
   const [dark, setDark] = useState(preferences.dark);
@@ -213,7 +217,7 @@ export default function App() {
     return () => { disposed = true; };
   }, [doc?.id, doc?.revision, formsOpen, formsRequest]);
   const formFields = formsLoad.request === formsRequest ? formsLoad.fields : null;
-  const pageLabelsRequest = doc ? `${doc.id}:${doc.revision}` : '';
+  const pageLabelsRequest = doc ? `${doc.id}:${doc.revision}:${labelsEpoch}` : '';
   useEffect(() => {
     if (!doc || typeof documentPageLabels !== 'function') { setPageLabelsLoad({ request: '', labels: null }); return; }
     let disposed = false;
@@ -226,7 +230,7 @@ export default function App() {
       setPageLabelsLoad({ request: pageLabelsRequest, labels: snapshot });
     }).catch(() => {});
     return () => { disposed = true; };
-  }, [doc?.id, doc?.revision, doc?.pages.length, pageLabelsRequest]);
+  }, [doc?.id, doc?.revision, doc?.pages.length, pageLabelsRequest, labelsEpoch]);
   const pageLabels = pageLabelsLoad.request === pageLabelsRequest ? pageLabelsLoad.labels : null;
   const activate = (id: number) => {
     if (busy || recoveryOffer || redactionDraft || searchableOcrTarget || newCopyModalOpen || closingDocument.current !== null) return;
@@ -309,7 +313,7 @@ export default function App() {
     try {
       const receipt = await checkpointRecovery(captured.id, captured.revision, captured.currentPage);
       if (receipt.documentId !== captured.id || receipt.revision !== captured.revision || receipt.currentPage !== captured.currentPage) throw new Error('Recovery checkpoint acknowledgement did not match this document revision.');
-      if (mounted.current) setNotice('Recovery point saved for this revision. It holds page edits only; any bookmark edits are not included, so save a copy to keep them. Recovery is manual, not automatic; full power-loss durability is not proven.');
+      if (mounted.current) setNotice('Recovery point saved for this revision. It holds page edits only; any bookmark or page-label edits are not included, so save a copy to keep them. Recovery is manual, not automatic; full power-loss durability is not proven.');
     } catch (e) {
       if (!await handleCommittedRecoveryFailure(captured.id, captured.revision, e) && mounted.current) setError(String(e));
     } finally { if (mounted.current) setBusy(false); }
@@ -828,7 +832,8 @@ export default function App() {
         {!organizing && commentsOpen && doc && <CommentsPanel key={`${doc.id}-${doc.revision}`} document={doc} page={page} annotations={annotations} error={annotationsLoad.request === annotationsRequest ? annotationsLoad.error : ''} selectedId={commentEditor?.kind === 'edit' ? commentEditor.annotation.id : null} onAddComment={addCommentOnCurrentPage} onAddHighlight={addHighlightOnCurrentPage} onSelect={selectAnnotation} close={() => setCommentsOpen(false)} />}
         {!organizing && bookmarksOpen && <BookmarksPanel key={`${doc.id}-${doc.revision}`} document={doc} page={clampPage(page, doc.pages.length)} go={go} close={() => setBookmarksOpen(false)} onDocument={info => setDocuments(list => list.map(document => document.id === info.id ? info : document))} />}
         {!organizing && searchOpen && !bookmarksOpen && <SearchPanel key={`${doc.id}-${doc.revision}`} document={doc} go={go} close={closeSearch} onHighlights={receiveSearch} />}
-        {!organizing && nav && !searchOpen && !bookmarksOpen && <aside className={s.pagesPanel} aria-label="Pages"><div className={s.panelHeading}><h2>Pages</h2><IconButton icon={X} label="Close pages" onClick={() => setNav(false)} /></div><button onClick={() => setBookmarksOpen(true)}>Bookmarks</button><PageList key={`${doc.id}:${doc.revision}:${doc.pages.length}`} document={doc} page={page} pageLabels={pageLabels} go={go} /></aside>}
+        {!organizing && nav && !searchOpen && !bookmarksOpen && labelsOpen && <PageLabelsPanel key={`${doc.id}-${doc.revision}`} document={doc} page={clampPage(page, doc.pages.length)} close={() => setLabelsOpen(false)} onDocument={info => setDocuments(list => list.map(document => document.id === info.id ? info : document))} onChanged={() => setLabelsEpoch(value => value + 1)} />}
+        {!organizing && nav && !searchOpen && !bookmarksOpen && !labelsOpen && <aside className={s.pagesPanel} aria-label="Pages"><div className={s.panelHeading}><h2>Pages</h2><IconButton icon={X} label="Close pages" onClick={() => setNav(false)} /></div><button onClick={() => setBookmarksOpen(true)}>Bookmarks</button><button onClick={() => setLabelsOpen(true)}>Page labels</button><PageList key={`${doc.id}:${doc.revision}:${doc.pages.length}`} document={doc} page={page} pageLabels={pageLabels} go={go} /></aside>}
         <aside className={s.rightRail} aria-label="Panels and page controls"><div><IconButton icon={MessageSquare} label="Comments" active={commentsOpen} disabled={busy} onClick={() => { closeSearch(); setBookmarksOpen(false); setOrganizing(false); setCommentsOpen(value => !value); }} /><IconButton icon={Bookmark} label="Bookmarks" active={bookmarksOpen} onClick={() => { closeSearch(); setCommentsOpen(false); setOrganizing(false); setBookmarksOpen(v => !v); }} /><IconButton icon={Files} label="Pages" active={nav && !bookmarksOpen && !searchOpen} onClick={() => { closeSearch(); setCommentsOpen(false); setBookmarksOpen(false); setNav(v => !v); }} /></div><div className={s.pageControls}><IconButton icon={ChevronLeft} label="Previous page" disabled={page === 0} onClick={() => go(page - 1)} /><input aria-label="Page number" key={`${doc.id}-${page}`} type="number" min={1} max={doc.pages.length} defaultValue={page + 1} onKeyDown={e => { if (e.key === 'Enter') go(Number(e.currentTarget.value) - 1); }} onBlur={e => go(Number(e.currentTarget.value) - 1)} /><span className={s.pageCount}>/ {doc.pages.length}</span><IconButton icon={ChevronRight} label="Next page" disabled={page === doc.pages.length - 1} onClick={() => go(page + 1)} /><span className={s.horizontalDivider} /><IconButton icon={RotateCw} label="Rotate view" disabled /><IconButton icon={Maximize} label="Fit width" active={fit === 'width'} onClick={() => setFit('width')} /><IconButton icon={Minimize2} label="Fit page" active={fit === 'page'} onClick={selectPageFit} /><IconButton icon={ZoomIn} label="Zoom in" onClick={() => changeZoom(zoom + 25)} /><IconButton icon={ZoomOut} label="Zoom out" onClick={() => changeZoom(zoom - 25)} /></div></aside>
       </> : null}
     </main>

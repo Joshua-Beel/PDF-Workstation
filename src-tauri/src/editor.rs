@@ -111,6 +111,7 @@ pub struct EditSession {
     text_extraction_permission: Result<(), String>,
     next_note: u64,
     pub outline: crate::outline_edit::OutlineEdits,
+    pub labels: crate::page_label_edit::LabelEdits,
 }
 
 pub(crate) struct EditSessionSnapshot {
@@ -151,11 +152,24 @@ impl EditSession {
         };
         let next_note = source_notes.iter().flatten().filter_map(|note| crate::comments::number(&note.id).ok()).max().unwrap_or(0).saturating_add(1);
         let plan: Vec<_> = (0..count).map(|source| PageSpec { source, turns: 0, crop: None, notes: source_notes[source].clone() }).collect();
-        Self { source, source_page_count: count, saved: plan.clone(), plan, undo: VecDeque::new(), redo: VecDeque::new(), history_bytes: 0, history_budget: HISTORY_BUDGET, revision: 0, source_notes, comments_reason, text_extraction_permission, next_note, outline: Default::default() }
+        Self { source, source_page_count: count, saved: plan.clone(), plan, undo: VecDeque::new(), redo: VecDeque::new(), history_bytes: 0, history_budget: HISTORY_BUDGET, revision: 0, source_notes, comments_reason, text_extraction_permission, next_note, outline: Default::default(), labels: Default::default() }
     }
     pub fn dirty(&self) -> bool { self.plan != self.saved }
-    /// Unsaved page edits or bookmark edits. Bookmark edits are not part of the page plan or of recovery points.
-    pub fn unsaved(&self) -> bool { self.dirty() || self.outline.changed() }
+    /// Unsaved page edits, bookmark edits or page-label edits. The last two are not part of the page plan or of recovery points.
+    pub fn unsaved(&self) -> bool { self.dirty() || self.outline.changed() || self.labels.changed() }
+    pub fn discard_outline_and_labels(&mut self) { self.outline.discard(); self.labels.discard(); }
+    fn load_labels(&mut self) {
+        if self.labels.loaded() { return; }
+        let count = self.source_page_count;
+        let result = self.load_source().and_then(|document| { check_supported(&document, false, false)?; crate::page_labels::read_ranges(&document, count) });
+        self.labels.load(result, count);
+    }
+    pub fn label_view(&mut self) -> crate::page_label_edit::EditView { self.load_labels(); self.labels.view(&self.plan) }
+    pub fn label_edit(&mut self, version: u64, op: crate::page_label_edit::LabelOp) -> Result<crate::page_label_edit::EditView, String> {
+        self.load_labels();
+        self.labels.apply(version, op, &self.plan)?;
+        Ok(self.labels.view(&self.plan))
+    }
     fn load_outline(&mut self) {
         if self.outline.loaded() { return; }
         let result = self.load_source().and_then(|document| { check_supported(&document, false, false)?; crate::outline_edit::read(&document) });
@@ -275,6 +289,7 @@ impl EditSession {
     pub fn apply(&mut self, edit: PageEdit) -> Result<(), String> {
         match edit {
             PageEdit::Undo => {
+                if self.labels.changed() && !self.undo.back().is_some_and(|previous| crate::page_label_edit::plan_in_source_order(previous, self.source_page_count)) { return Err(crate::page_label_edit::PENDING_REFUSAL.into()); }
                 let previous = self.undo.pop_back().ok_or("Nothing to undo")?;
                 self.history_bytes -= snapshot_bytes(&previous);
                 let current = std::mem::replace(&mut self.plan, previous);
@@ -282,6 +297,7 @@ impl EditSession {
                 self.redo.push_back(current);
             }
             PageEdit::Redo => {
+                if self.labels.changed() && !self.redo.back().is_some_and(|next| crate::page_label_edit::plan_in_source_order(next, self.source_page_count)) { return Err(crate::page_label_edit::PENDING_REFUSAL.into()); }
                 let next = self.redo.pop_back().ok_or("Nothing to redo")?;
                 self.history_bytes -= snapshot_bytes(&next);
                 let current = std::mem::replace(&mut self.plan, next);
@@ -292,6 +308,7 @@ impl EditSession {
                 let mut next = self.plan.clone();
                 let structural = !matches!(&edit, PageEdit::Rotate { .. } | PageEdit::Crop { .. } | PageEdit::CropMany { .. } | PageEdit::ResetCropMany { .. });
                 let removal = matches!(&edit, PageEdit::Delete { .. });
+                if structural && self.labels.changed() { return Err(crate::page_label_edit::PENDING_REFUSAL.into()); }
                 let document = self.load_source()?;
                 check_supported(&document, structural, removal)?;
                 match edit {
@@ -367,6 +384,10 @@ impl EditSession {
         if let Some(entries) = self.outline.pending() {
             let kept: HashSet<usize> = plan.iter().map(|spec| spec.source).collect();
             crate::outline_edit::write(&mut document, entries, &|source| kept.contains(&source).then(|| original.get(source).copied()).flatten())?;
+        }
+        if let Some(ranges) = self.labels.pending() {
+            let output = crate::page_label_edit::output_ranges(ranges, original.len(), &plan)?;
+            crate::page_label_edit::write(&mut document, &output)?;
         }
         let new_root = structural.then(|| document.new_object_id());
         let mut kids = Vec::new();

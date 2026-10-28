@@ -18,6 +18,7 @@ mod combine;
 mod comments;
 mod forms;
 mod page_labels;
+mod page_label_edit;
 mod bookmark_destinations;
 mod outline_edit;
 mod image_pdf;
@@ -232,6 +233,9 @@ async fn document_bookmarks(service: State<'_, PdfService>, id: u64, revision: u
 
 #[tauri::command]
 async fn edit_bookmarks(service: State<'_, PdfService>, id: u64, revision: u64, version: Option<u64>, op: Option<outline_edit::BookmarkOp>) -> Result<service::BookmarkEditResult, String> { service.edit_bookmarks(id, revision, version.zip(op)).await }
+
+#[tauri::command]
+async fn edit_page_labels(service: State<'_, PdfService>, id: u64, revision: u64, version: Option<u64>, op: Option<page_label_edit::LabelOp>) -> Result<service::PageLabelEditResult, String> { service.edit_page_labels(id, revision, version.zip(op)).await }
 
 #[tauri::command]
 async fn document_page_labels(service: State<'_, PdfService>, id: u64, revision: u64) -> Result<page_labels::DocumentPageLabels, String> { service.page_labels(id, revision).await }
@@ -484,6 +488,6 @@ fn main() {
         app.manage(text_edit_commands::TextReplacementSelections::default());
         app.manage(recovery_commands::RecoveryCommands::default());
         Ok(())
-    }).invoke_handler(tauri::generate_handler![recovery_commands::checkpoint_recovery, recovery_commands::restore_recovery, recovery_commands::keep_recovered_edits, recovery_commands::open_original, recovery_commands::discard_recovery, read_update_attempt, write_update_attempt, clear_update_attempt, update_commands::check_for_update, update_commands::download_update, update_commands::install_update, update_commands::release_update, document_form_fields, fill_form_copy, open_document, reopen_document, open_example, render_page, cancel_render, export_page_image, retry_pdf_engine, close_document, edit_pages, crop_page, crop_pages, reset_crops, create_pdf_from_image, choose_image_pdf_sources, create_pdf_from_images, cancel_image_pdf_sources, inspect_image_replacement_target, replace_pdf_image_copy, cancel_image_replacement, inspect_text_replacement_target, replace_pdf_text_copy, cancel_text_replacement, create_comment, update_comment, delete_comment, document_comments, document_annotations, create_highlight, create_text_highlight, update_highlight, delete_highlight, save_copy, redact_document, split_document, combine_documents, insert_pages_copy, replace_pages_copy, page_text, page_text_geometry, document_bookmarks, edit_bookmarks, document_page_labels, document_properties, dependency_notices, unlock_document, cancel_password_request, ocr_capability, recognize_page_ocr, create_searchable_ocr_copy, cancel_page_ocr, large_ocr_status, start_large_ocr, resume_large_ocr, save_large_ocr_in_parts, relocate_large_ocr, pause_large_ocr, cancel_large_ocr, dismiss_large_ocr, print_commands::print_document, print_commands::cancel_print])
+    }).invoke_handler(tauri::generate_handler![recovery_commands::checkpoint_recovery, recovery_commands::restore_recovery, recovery_commands::keep_recovered_edits, recovery_commands::open_original, recovery_commands::discard_recovery, read_update_attempt, write_update_attempt, clear_update_attempt, update_commands::check_for_update, update_commands::download_update, update_commands::install_update, update_commands::release_update, document_form_fields, fill_form_copy, open_document, reopen_document, open_example, render_page, cancel_render, export_page_image, retry_pdf_engine, close_document, edit_pages, crop_page, crop_pages, reset_crops, create_pdf_from_image, choose_image_pdf_sources, create_pdf_from_images, cancel_image_pdf_sources, inspect_image_replacement_target, replace_pdf_image_copy, cancel_image_replacement, inspect_text_replacement_target, replace_pdf_text_copy, cancel_text_replacement, create_comment, update_comment, delete_comment, document_comments, document_annotations, create_highlight, create_text_highlight, update_highlight, delete_highlight, save_copy, redact_document, split_document, combine_documents, insert_pages_copy, replace_pages_copy, page_text, page_text_geometry, document_bookmarks, edit_bookmarks, edit_page_labels, document_page_labels, document_properties, dependency_notices, unlock_document, cancel_password_request, ocr_capability, recognize_page_ocr, create_searchable_ocr_copy, cancel_page_ocr, large_ocr_status, start_large_ocr, resume_large_ocr, save_large_ocr_in_parts, relocate_large_ocr, pause_large_ocr, cancel_large_ocr, dismiss_large_ocr, print_commands::print_document, print_commands::cancel_print])
       .run(context).expect("Desktop application failed");
 }

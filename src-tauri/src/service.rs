@@ -45,6 +45,8 @@ pub struct BookmarkInfo { title: String, page: Option<usize>, depth: usize, dest
 pub struct BookmarkList { items: Vec<BookmarkInfo>, truncated: bool, edited: bool }
 #[derive(Serialize)]
 pub struct BookmarkEditResult { view: crate::outline_edit::EditView, document: DocumentInfo }
+#[derive(Serialize)]
+pub struct PageLabelEditResult { view: crate::page_label_edit::EditView, document: DocumentInfo }
 const MAX_READ_TEXT_BYTES: usize = 1_048_576;
 const MAX_PASSWORD_BYTES: usize = 1024;
 const STALE_PAGE_PLAN: &str = "Document changed. Reload the page list and try again.";
@@ -160,6 +162,7 @@ enum Request {
     Bookmarks(u64, u64, Reply<BookmarkList>),
     BookmarkEdit(u64, u64, Option<(u64, crate::outline_edit::BookmarkOp)>, Reply<BookmarkEditResult>),
     PageLabels(u64, u64, Reply<crate::page_labels::DocumentPageLabels>),
+    PageLabelEdit(u64, u64, Option<(u64, crate::page_label_edit::LabelOp)>, Reply<PageLabelEditResult>),
     Properties(u64, u64, Reply<crate::document_properties::DocumentProperties>),
     FormFields(u64, u64, Reply<crate::forms::FormFields>),
     CheckFormCopy(u64, u64, Vec<crate::forms::FieldValue>, Reply<()>),
@@ -750,7 +753,7 @@ impl PdfService {
                             let (session, original) = sessions.get(&id).ok_or("Document is closed")?;
                             if recovery_locked.contains_key(&id) { return Err(format!("{RECOVERY_COMMITTED_REOPEN_REQUIRED}: Close and reopen this PDF before updating recovery.")); }
                             if session.revision != revision { return Err("Document changed. Save recovery again.".into()); }
-                            if !session.dirty() { return Err(if session.unsaved() { "Bookmark edits are not included in recovery points. Save a copy to keep them." } else { "Only unsaved edits can be stored for recovery." }.into()); }
+                            if !session.dirty() { return Err(if session.outline.changed() { "Bookmark edits are not included in recovery points. Save a copy to keep them." } else if session.labels.changed() { "Page-label edits are not included in recovery points. Save a copy to keep them." } else { "Only unsaved edits can be stored for recovery." }.into()); }
                             if current_page as usize >= session.plan.len() { return Err("Current page is out of range.".into()); }
                             ensure_recovery_owner(Some(&root), &recovery_heads, &mut recovery_floors, id, session)?;
                             if recovery_checkpoint_current(&root, recovery_heads.get(&id), session, original, current_page)? { return Ok(()); }
@@ -853,7 +856,7 @@ impl PdfService {
                                 return Ok(());
                             }
                             if session.revision != revision { return Err("Document changed. Discard again.".into()); }
-                            if !session.dirty() { if session.unsaved() { session.outline.discard(); return Ok(()); } return Err("Only unsaved edits can be discarded.".into()); }
+                            if !session.dirty() { if session.unsaved() { session.discard_outline_and_labels(); return Ok(()); } return Err("Only unsaved edits can be discarded.".into()); }
                             let root = recovery_root.as_deref().ok_or("Recovery is unavailable.")?;
                             let source = recovery_source_identity(&session.source)?;
                             if recovery_heads.iter().any(|(owner, (identity, _))| *owner != id && *identity == source) { return Err("Another open tab owns recovery for this PDF.".into()); }
@@ -919,8 +922,21 @@ impl PdfService {
                             let (session, _) = sessions.get(&id).ok_or("Document is closed")?;
                             if session.revision != revision { return Err("Document changed. Reopen page labels.".into()); }
                             let document = documents.get(&id).ok_or("Document is closed")?;
-                            let source = page_labels.read(id, &session.source, document.page_count());
+                            let source = session.labels.pending_labels().unwrap_or_else(|| page_labels.read(id, &session.source, document.page_count()));
                             Ok(crate::page_labels::project(&source, id, revision, &session.plan))
+                        })();
+                        let _ = reply.send(result);
+                    }
+                    Request::PageLabelEdit(id, revision, change, reply) => {
+                        if reply.is_closed() { continue; }
+                        let result = (|| {
+                            if change.is_some() && recovery_locked.contains_key(&id) { return Err(format!("{RECOVERY_COMMITTED_REOPEN_REQUIRED}: Close and reopen this PDF before making more edits.")); }
+                            if change.is_some() && recovery_offers.contains_key(&id) { return Err("Choose whether to keep the recovered edits before editing this PDF.".into()); }
+                            let (session, original) = sessions.get_mut(&id).ok_or("Document is closed")?;
+                            if session.revision != revision { return Err("Document changed. Reopen page labels.".into()); }
+                            let document = documents.get(&id).ok_or("Document is closed")?;
+                            let view = match change { None => session.label_view(), Some((version, op)) => session.label_edit(version, op)? };
+                            Ok(PageLabelEditResult { view, document: current_info(session, original, document)? })
                         })();
                         let _ = reply.send(result);
                     }
@@ -1592,6 +1608,9 @@ impl PdfService {
     pub async fn edit_bookmarks(&self, id: u64, revision: u64, change: Option<(u64, crate::outline_edit::BookmarkOp)>) -> Result<BookmarkEditResult, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::BookmarkEdit(id, revision, change, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
     }
+    pub async fn edit_page_labels(&self, id: u64, revision: u64, change: Option<(u64, crate::page_label_edit::LabelOp)>) -> Result<PageLabelEditResult, String> {
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::PageLabelEdit(id, revision, change, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
+    }
     pub async fn page_labels(&self, id: u64, revision: u64) -> Result<crate::page_labels::DocumentPageLabels, String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::PageLabels(id, revision, tx)).map_err(|error| error.to_string())?; rx.await.map_err(|error| error.to_string())?
     }
@@ -2155,6 +2174,9 @@ mod recovery_restart_tests;
 #[cfg(test)]
 #[path = "outline_edit_tests.rs"]
 mod outline_edit_tests;
+#[cfg(test)]
+#[path = "page_label_edit_service_tests.rs"]
+mod page_label_edit_service_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2174,7 +2196,7 @@ mod tests {
     macro_rules! accepted_reply_values {
         ($($value:ty),* $(,)?) => { $(impl TestReplyValue for $value { type Accepted = Self; fn accept(self) -> Self { self } })* };
     }
-    accepted_reply_values!((), Vec<u8>, Vec<u64>, Vec<Option<String>>, String, DocumentInfo, SavedCopy, OpenResult, RecoveredDocument, PrintSnapshotInfo, PrintBitmap, PageImagePreflight, RasterRedactionPreflight, SearchableOcrPreflight, PageImageReceipt, BookmarkList, RenderWork, BookmarkWork, OcrWork, OcrWorkerState, crate::ocr::OcrPageRaster, crate::image_edit::ImageEditTargetInfo, TextReplacementInspection, crate::page_labels::DocumentPageLabels, crate::document_properties::DocumentProperties, crate::text_geometry::PageTextGeometry, crate::split::SplitOutput, crate::comments::CommentList, crate::comments::AnnotationList, crate::forms::FormFields);
+    accepted_reply_values!((), Vec<u8>, Vec<u64>, Vec<Option<String>>, String, DocumentInfo, SavedCopy, OpenResult, RecoveredDocument, PrintSnapshotInfo, PrintBitmap, PageImagePreflight, RasterRedactionPreflight, SearchableOcrPreflight, PageImageReceipt, BookmarkList, PageLabelEditResult, RenderWork, BookmarkWork, OcrWork, OcrWorkerState, crate::ocr::OcrPageRaster, crate::image_edit::ImageEditTargetInfo, TextReplacementInspection, crate::page_labels::DocumentPageLabels, crate::document_properties::DocumentProperties, crate::text_geometry::PageTextGeometry, crate::split::SplitOutput, crate::comments::CommentList, crate::comments::AnnotationList, crate::forms::FormFields);
     fn call<T: TestReplyValue>(service: &PdfService, request: impl FnOnce(Reply<T>) -> Request) -> Result<T::Accepted, String> {
         let (tx, rx) = oneshot::channel(); service.sender.send(request(tx)).unwrap(); rx.blocking_recv().unwrap().map(TestReplyValue::accept)
     }

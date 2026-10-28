@@ -66,6 +66,12 @@ export type DocumentPropertiesInfo = {
 };
 export const documentProperties = (id: number, revision: number) => invoke<DocumentPropertiesInfo>('document_properties', { id, revision });
 export const documentPageLabels = (id: number, revision: number) => invoke<DocumentPageLabels>('document_page_labels', { id, revision });
+export type PageLabelStyle = 'decimal' | 'roman_upper' | 'roman_lower' | 'alpha_upper' | 'alpha_lower';
+export type PageLabelRange = { start_page: number; end_page: number; style: PageLabelStyle | null; prefix: string; first: number; first_label: string; last_label: string };
+export type PageLabelEditView = { editable: boolean; reason: string | null; version: number; page_count: number; ranges: PageLabelRange[]; can_undo: boolean; can_redo: boolean; changed: boolean };
+export type PageLabelEditResult = { view: PageLabelEditView; document: DocumentInfo };
+export type PageLabelOp = { kind: 'set'; start_page: number; style: PageLabelStyle | null; prefix: string; first: number } | { kind: 'delete'; start_page: number } | { kind: 'undo' | 'redo' };
+export const editPageLabels = (id: number, revision: number, change: { version: number; op: PageLabelOp } | null) => invoke<PageLabelEditResult>('edit_page_labels', { id, revision, version: change?.version ?? null, op: change?.op ?? null });
 export const dependencyNotices = () => invoke<string>('dependency_notices');
 export const pageText = (id: number, page: number, revision: number) => invoke<string>('page_text', { id, page, revision });
 export type PageTextGeometry = {
