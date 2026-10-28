@@ -49,6 +49,26 @@ describe('WebDriver error diagnostics', () => {
       if($s.message.Length-ne200){throw 'unbounded message'}
       $s=ConvertTo-SanitizedWebDriverError -StatusCode 500 -BodyText '{"value":{"error":"unknown error","message":"see \\\\server\\share\\file and D:/a/_temp/x"}}'
       if($s.message-match'server|share'){throw ('unc path leaked: '+$s.message)}
+      $cases=[ordered]@{
+        'open C:/Users/bob/app/x.js now'='open <path>'
+        'open c:\Program Files\My App\x.js'='open <path>'
+        'open C:/Program Files/My App/x.js'='open <path>'
+        'at ''C:\Program Files\My App\x.js'' failed'='at ''<path>'' failed'
+        'see //server/share/dir name/file'='see <path>'
+        'see \\server\share\dir name\file'='see <path>'
+        'see file:///C:/a b/c'='see <path>'
+      }
+      foreach($text in $cases.Keys){
+        $body=(@{value=@{error='unknown error';message=$text}}|ConvertTo-Json -Compress)
+        $s=ConvertTo-SanitizedWebDriverError -StatusCode 500 -BodyText $body
+        if($s.message-cne$cases[$text]){throw ('path case ['+$text+'] -> ['+$s.message+']')}
+      }
+      $clean=@('Element not found: a/b ratio 1/2','navigate to http://localhost:4444/session/x','ratio 3:4 of a:b','element click intercepted: <div> at (10, 20)')
+      foreach($text in $clean){
+        $body=(@{value=@{error='unknown error';message=$text}}|ConvertTo-Json -Compress)
+        $s=ConvertTo-SanitizedWebDriverError -StatusCode 500 -BodyText $body
+        if($s.message-cne$text){throw ('negative control altered ['+$text+'] -> ['+$s.message+']')}
+      }
       'PASS'
     `);
     expect(result.status, result.stderr || result.stdout).toBe(0);
@@ -80,20 +100,46 @@ describe('WebDriver error diagnostics', () => {
     }
   }, 60_000);
 
-  it('has no double-quoted PowerShell string in any script that ends in a backslash before its closing quote', async () => {
-    const result = await runPowerShellAsync(String.raw`
-      $ErrorActionPreference='Stop'; Set-Location -LiteralPath '${process.cwd().replaceAll("'", "''")}'
+  const backslashQuoteScan = String.raw`
+    function Find-BackslashQuoteStrings([string]$Directory){
       $found=@()
-      foreach($file in Get-ChildItem -LiteralPath scripts -Recurse -Filter '*.ps1'){
+      foreach($file in Get-ChildItem -LiteralPath $Directory -Recurse -Filter '*.ps1'){
         $tokens=$null;$errors=$null;[void][Management.Automation.Language.Parser]::ParseFile($file.FullName,[ref]$tokens,[ref]$errors)
         foreach($token in $tokens){ if(($token.Kind -eq 'StringExpandable' -or $token.Kind -eq 'StringLiteral') -and $token.Text.Length -gt 2 -and $token.Text.StartsWith('"') -and $token.Text.EndsWith('\"')){ $found+=('{0}:{1}' -f $file.Name,$token.Extent.StartLineNumber) } }
       }
+      return ,$found
+    }
+  `;
+
+  it('has no double-quoted PowerShell string in any script that ends in a backslash before its closing quote', async () => {
+    const result = await runPowerShellAsync(String.raw`
+      $ErrorActionPreference='Stop'; Set-Location -LiteralPath '${process.cwd().replaceAll("'", "''")}'
+    ` + backslashQuoteScan + String.raw`
+      $found=Find-BackslashQuoteStrings 'scripts'
       if($found.Count){throw ('Backslash-quote PowerShell strings: '+($found -join ', '))}
       'PASS'
     `);
     expect(result.status, result.stderr || result.stdout).toBe(0);
     expect(result.stdout).toContain('PASS');
   }, 120_000);
+
+  it('the backslash-quote scan detects a planted offender and ignores a planted clean string', async () => {
+    const result = await runPowerShellAsync(String.raw`
+      $ErrorActionPreference='Stop'
+    ` + backslashQuoteScan + String.raw`
+      $dir=Join-Path ([IO.Path]::GetTempPath()) ('scan-control-'+[guid]::NewGuid().ToString('N'))
+      New-Item -ItemType Directory -Path $dir | Out-Null
+      try {
+        Set-Content -LiteralPath (Join-Path $dir 'bad.ps1') -Value '$a = "C:\x\"' -Encoding utf8
+        Set-Content -LiteralPath (Join-Path $dir 'good.ps1') -Value '$a = "C:\x\y"' -Encoding utf8
+        $found=Find-BackslashQuoteStrings $dir
+        if($found.Count-ne1-or$found[0]-cne'bad.ps1:1'){throw ('scan control: '+($found -join ','))}
+      } finally { Remove-Item -LiteralPath $dir -Recurse -Force }
+      'PASS'
+    `);
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(result.stdout).toContain('PASS');
+  }, 60_000);
 
   it('never builds a double-quoted PowerShell argument that ends in a backslash before its closing quote', () => {
     const source = readFileSync('scripts/installed-structural-page-tools.ps1', 'utf8');

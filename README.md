@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Release scripts: the `WEBDRIVER_ERROR_DIAG` sanitizer now redacts forward-slash and mixed-slash Windows paths, UNC paths and paths containing spaces to the end of the token, with negative controls and a planted-offender control for the backslash-quote scan (SM6; test/script only).
 - Debug builds only: `SMACROBAT_TEST_DATA_DIR=<absolute folder>` puts recovery records, the update-attempt note and the WebView2 profile under that folder instead of the user profile; compiled out of release (SM5).
 - Docs: OCR packaging evidence in `docs/features.md` and `docs/ocr-feasibility.md` now cites only what `docs/releases.md` states (SM4; docs only).
 - Docs: OCR wording in `docs/features.md` and `docs/ocr-feasibility.md` now says 0.3.1 includes the engine; recognition on the published installer remains unverified (SM4; docs only).
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - OCR hardening: Tesseract now starts in a private per-job temp directory (removed afterwards), not the install folder; OCR timing tests made deterministic; unused OCR licence build env vars dropped (SM4; no version change).
 - Post-release P3s: 0.2.0 described as lacking a publisher signature, not "unsigned"; in-app record leak scan also blocks `github_pat_` tokens (SM6).
 - Docs: 0.3.1 release evidence (rehearsal, release, Step 1/2, publish, in-app update run 40625100964) in `docs/releases.md`; README and features name 0.3.1 as the published release (SM6).
-- In-app update record schema 4: API metadata reads recorded as authenticated, public latest.json as unauthenticated; setup exit claimed only if a setup process was seen; JWT-shaped tokens blocked from the record (SM6).
