@@ -190,7 +190,12 @@ fn budget_filter(id: ObjectId, object: &mut Object) -> Option<(ObjectId, Object)
 }
 
 /// Loads a document source within the open-time work limits.
-pub fn load(bytes: &[u8]) -> Result<Document, LoadFailure> {
+pub fn load(bytes: &[u8]) -> Result<Document, LoadFailure> { load_limited(bytes, true) }
+
+/// lopdf's own resolution within the same limits, for the read-only checks of a source `xref_resolve` refused.
+pub(crate) fn load_unreconciled(bytes: &[u8]) -> Result<Document, LoadFailure> { load_limited(bytes, false) }
+
+fn load_limited(bytes: &[u8], reconcile: bool) -> Result<Document, LoadFailure> {
     if count_object_headers(bytes, MAX_LOAD_OBJECTS) > MAX_LOAD_OBJECTS { return Err(LoadFailure::Limit(objects_message())); }
     let _gate = GATE.lock().unwrap_or_else(PoisonError::into_inner);
     OBJECTS.store(0, Ordering::Relaxed);
@@ -202,7 +207,7 @@ pub fn load(bytes: &[u8]) -> Result<Document, LoadFailure> {
     if reason != TRIP_NONE { return Err(LoadFailure::Limit(trip_message(reason))); }
     let mut document = loaded.map_err(|error| LoadFailure::Parse(error.to_string()))?;
     if document.objects.len() > MAX_LOAD_OBJECTS { return Err(LoadFailure::Limit(objects_message())); }
-    crate::xref_resolve::reconcile(&mut document, bytes).map_err(LoadFailure::Parse)?;
+    if reconcile { crate::xref_resolve::reconcile(&mut document, bytes).map_err(LoadFailure::Parse)?; }
     Ok(document)
 }
 

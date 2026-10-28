@@ -69,7 +69,7 @@ fn same_section_hybrid_member_is_refused_when_used_and_dropped_otherwise() {
     assert_eq!(load(&bytes).unwrap_err(), AMBIGUOUS);
     let document = load(&same_section_hybrid(false)).unwrap();
     assert!(value(&document, 10).is_none());
-    assert!(matches!(document.reference_table.get(10), Some(XrefEntry::Compressed { container: 6, .. })));
+    assert!(document.reference_table.get(10).is_none(), "a dropped number leaves the table too");
 }
 
 /// Word's layout: the full table first (members free), then an empty update section whose trailer has `/Prev` and `/XRefStm`.
@@ -126,9 +126,9 @@ fn a_number_freed_by_a_newer_revision_is_dropped_or_refused_when_used() {
     assert_eq!(load(&freed_by_update(true)).unwrap_err(), AMBIGUOUS);
 }
 
-fn stream_supplies_ten(row: Option<Row>) -> Vec<u8> {
+fn stream_supplies_ten(row: Option<Row>, reachable: bool) -> Vec<u8> {
     let mut pdf = Pdf::new();
-    let (o1, o2) = (pdf.obj(1, catalog(true)), pdf.obj(2, PAGES));
+    let (o1, o2) = (pdf.obj(1, catalog(reachable)), pdf.obj(2, PAGES));
     let a = pdf.objstm(5, &[(10, "<</V(from a stream)>>")]);
     let mut rows = vec![(1, Row::N(o1)), (2, Row::N(o2)), (5, Row::N(a))];
     if let Some(row) = row { rows.push((10, row)); }
@@ -139,23 +139,134 @@ fn stream_supplies_ten(row: Option<Row>) -> Vec<u8> {
 #[test]
 fn an_object_stream_cannot_supply_a_free_or_missing_number() {
     for row in [Some(Row::F), None] {
-        let bytes = stream_supplies_ten(row);
+        let bytes = stream_supplies_ten(row, true);
         assert!(value(&raw(&bytes), 10).is_some(), "lopdf adds every member that has no compressed entry");
         assert!(value(&load(&bytes).unwrap(), 10).is_none());
     }
 }
 
 #[test]
-fn an_object_stream_supplying_an_offset_zero_entry_is_refused() {
-    let bytes = stream_supplies_ten(Some(Row::Zero));
+fn an_object_stream_supplying_an_offset_zero_entry_is_refused_when_used() {
+    let bytes = stream_supplies_ten(Some(Row::Zero), true);
     assert!(value(&raw(&bytes), 10).is_some());
     assert_eq!(load(&bytes).unwrap_err(), AMBIGUOUS);
+    let document = load(&stream_supplies_ten(Some(Row::Zero), false)).unwrap();
+    assert!(value(&document, 10).is_none());
+    assert!(document.reference_table.get(10).is_none());
+}
+
+fn reason(bytes: &[u8]) -> Result<(), &'static str> {
+    let mut document = crate::pdf_load::load_unreconciled(bytes).unwrap();
+    reconcile_with_reason(&mut document, bytes)
+}
+
+#[test]
+fn an_offset_holding_another_object_number_is_refused_when_used() {
+    for reachable in [true, false] {
+        let mut pdf = Pdf::new();
+        let (o1, o2) = (pdf.obj(1, catalog(reachable)), pdf.obj(2, PAGES));
+        let o11 = pdf.obj(11, "<</V(eleven)>>");
+        let start = pdf.table(&[(1, Row::N(o1)), (2, Row::N(o2)), (10, Row::N(o11))], "<</Size 12/Root 1 0 R>>");
+        let bytes = pdf.finish(start);
+        if reachable { assert_eq!(reason(&bytes), Err("an entry's offset holds a different object number")); continue; }
+        let document = load(&bytes).unwrap();
+        assert!(value(&document, 10).is_none() && value(&document, 11).is_none());
+    }
+}
+
+/// Shaped like the refused real file: Word wrote its objects into object streams that only its `/XRefStm` lists
+/// (the table frees the containers too), and another tool then appended an update, so lopdf never reads that
+/// stream and loads none of the containers, the page tree included.
+fn word_then_update(break_stream: bool) -> Vec<u8> {
+    let mut pdf = Pdf::new();
+    let o1 = pdf.obj(1, CATALOG);
+    let s6 = pdf.objstm(6, &[(2, "<</Type/Pages/Kids[3 0 R]/Count 1>>"), (3, "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>")]);
+    let main = pdf.table(&[(1, Row::N(o1)), (2, Row::F), (3, Row::F), (6, Row::F)], "<</Size 7/Root 1 0 R>>");
+    pdf.put(b"startxref\n0\n%%EOF\n");
+    let extra = if break_stream { "/Filter/FlateDecode" } else { "" };
+    let xs = pdf.xref_stream(7, &[(2, 2, 6, 0), (3, 2, 6, 1), (6, 1, s6 as u32, 0)], extra);
+    let word = pdf.table(&[], &format!("<</Size 7/Root 1 0 R/Prev {main}/XRefStm {xs}>>"));
+    pdf.put(b"startxref\n0\n%%EOF\n");
+    let o1 = pdf.obj(1, "<</Type/Catalog/Pages 2 0 R/Lang(en)>>");
+    let start = pdf.table(&[(1, Row::N(o1))], &format!("<</Size 7/Root 1 0 R/Prev {word}>>"));
+    pdf.finish(start)
+}
+
+#[test]
+fn a_word_file_with_a_later_update_is_refused_but_stays_readable() {
+    let bytes = word_then_update(false);
+    let before = raw(&bytes);
+    assert!(!before.objects.values().any(|object| matches!(object, Object::Stream(stream) if stream.dict.has_type(b"ObjStm"))), "lopdf loads none of the containers");
+    assert_eq!(reason(&bytes), Err("a used member lopdf did not take from its named container"));
+    assert_eq!(load(&bytes).unwrap_err(), AMBIGUOUS);
+    // A broken /XRefStm: the walk fails, and lopdf's load (no object streams in it) is still refused from the raw bytes.
+    assert_eq!(reason(&word_then_update(true)), Err("chain cannot be walked in a file with object streams"));
+
+    let session = crate::editor::EditSession::new(bytes.clone(), 1);
+    assert_eq!(session.text_extraction_permission(), Ok(()), "search, selection and OCR read PDFium's text");
+    assert_eq!(session.comments_reason(), Some(AMBIGUOUS));
+    let labels = crate::page_labels::PageLabelCache::default().read(1, &bytes, 1);
+    assert_eq!(crate::page_labels::project(&labels, 1, 0, &session.plan).reason.as_deref(), Some(AMBIGUOUS));
+}
+
+#[test]
+fn a_rebuilt_table_is_kept_only_without_object_streams() {
+    for with_stream in [false, true] {
+        let mut pdf = Pdf::new();
+        let (o1, o2) = (pdf.obj(1, CATALOG), pdf.obj(2, PAGES));
+        let mut rows = vec![(1, Row::N(o1)), (2, Row::N(o2))];
+        if with_stream { rows.push((5, Row::N(pdf.objstm(5, &[(10, "<</V(A)>>")])))); }
+        pdf.table(&rows, "<</Size 11/Root 1 0 R>>");
+        let bytes = pdf.finish(999_999);
+        assert_eq!(crate::pdf_load::load_unreconciled(&bytes).unwrap().xref_start, 0, "lopdf rebuilt the table");
+        assert_eq!(reason(&bytes).is_err(), with_stream);
+    }
+}
+
+#[test]
+fn repeated_and_oversized_cross_reference_streams_are_charged_once_and_capped() {
+    // 1,000 sections all point their /XRefStm at one 42 KB stream (42 MB if each were charged): it is parsed once, so the walk stays in budget.
+    let mut pdf = Pdf::new();
+    let (o1, o2) = (pdf.obj(1, CATALOG), pdf.obj(2, PAGES));
+    let rows: Vec<(u32, u8, u32, u16)> = (100..100 + 6_000).map(|number| (number, 0, 0, 0)).collect();
+    let xs = pdf.xref_stream(7, &rows, "");
+    let mut prev = pdf.table(&[(1, Row::N(o1)), (2, Row::N(o2))], "<</Size 3/Root 1 0 R>>");
+    for _ in 0..1_000 { prev = pdf.table(&[], &format!("<</Size 3/Root 1 0 R/Prev {prev}/XRefStm {xs}>>")); }
+    let bytes = pdf.finish(prev);
+    let started = Instant::now();
+    assert!(conforming_entries(&bytes, prev).is_ok());
+    assert!(started.elapsed().as_secs() < 20);
+
+    // A stream whose encoded length alone passes the total is refused before it is copied or decoded.
+    let mut pdf = Pdf::new();
+    let (o1, o2) = (pdf.obj(1, CATALOG), pdf.obj(2, PAGES));
+    let at = pdf.put(format!("7 0 obj\n<</Type/XRef/Size 3/W[1 4 2]/Length {}>>\nstream\n", MAX_XREF_STREAM_BYTES + 7).as_bytes());
+    pdf.buf.resize(pdf.buf.len() + MAX_XREF_STREAM_BYTES + 7, 0);
+    pdf.put(b"\nendstream\nendobj\n");
+    let start = pdf.table(&[(1, Row::N(o1)), (2, Row::N(o2))], &format!("<</Size 3/Root 1 0 R/XRefStm {at}>>"));
+    let bytes = pdf.finish(start);
+    assert_eq!(conforming_entries(&bytes, start).unwrap_err(), "cross-reference streams exceed the decode budget");
+}
+
+#[test]
+fn trailers_are_parsed_in_a_bounded_window_and_nearby_offsets_parse_once() {
+    let mut text = b"<</Size 3/Note(".to_vec();
+    text.resize(text.len() + 2 * MAX_DICTIONARY_BYTES, b'a');
+    assert_eq!(dictionary(&text, 0).unwrap_err(), "unterminated string");
+    // A /Prev two bytes before its own section is corrected to that same section, which is not parsed again.
+    let mut pdf = Pdf::new();
+    let (o1, o2) = (pdf.obj(1, CATALOG), pdf.obj(2, PAGES));
+    let at = pdf.buf.len();
+    pdf.table(&[(1, Row::N(o1)), (2, Row::N(o2))], &format!("<</Size 3/Root 1 0 R/Prev {:010}>>", at - 2));
+    let bytes = pdf.finish(at);
+    assert_eq!(correct(&bytes, at - 2), at);
+    assert_eq!(conforming_entries(&bytes, at).unwrap().len(), 3);
 }
 
 #[test]
 fn a_direct_entry_lopdf_never_read_is_refused() {
     let mut pdf = Pdf::new();
-    let (o1, o2, o11) = (pdf.obj(1, CATALOG), pdf.obj(2, PAGES), pdf.obj(11, "<</V(direct)>>"));
+    let (o1, o2, o11) = (pdf.obj(1, "<</Type/Catalog/Pages 2 0 R/Uses 11 0 R>>"), pdf.obj(2, PAGES), pdf.obj(11, "<</V(direct)>>"));
     let a = pdf.objstm(5, &[(10, "<</V(A)>>")]);
     let xs = pdf.xref_stream(7, &[(10, 2, 5, 0), (11, 1, o11 as u32, 0)], "");
     let first = pdf.table(&[(1, Row::N(o1)), (2, Row::N(o2)), (5, Row::N(a))], &format!("<</Size 12/Root 1 0 R/XRefStm {xs}>>"));
@@ -164,6 +275,7 @@ fn a_direct_entry_lopdf_never_read_is_refused() {
     let start = pdf.table(&[(2, Row::N(o2))], &format!("<</Size 12/Root 1 0 R/Prev {first}>>"));
     let bytes = pdf.finish(start);
     assert!(value(&raw(&bytes), 11).is_none());
+    assert_eq!(reason(&bytes), Err("a direct entry lopdf did not read from the same place"));
     assert_eq!(load(&bytes).unwrap_err(), AMBIGUOUS);
 }
 
@@ -383,7 +495,7 @@ fn xref_probe_real_files() {
             let options = LoadOptions { max_decompressed_size: Some(MAX_LOAD_STREAM_DECODE_BYTES), ..Default::default() };
             let Ok(before) = Document::load_mem_with_options(&bytes, options) else { continue };
             loaded += 1;
-            let streams = before.objects.values().any(is_object_stream);
+            let streams = before.objects.values().any(|object| matches!(object, Object::Stream(stream) if stream.dict.has_type(b"ObjStm")));
             if streams { with_streams += 1; }
             if bytes.windows(8).any(|window| window == b"/XRefStm") { hybrid += 1; }
             let header = bytes.windows(5).position(|window| window == b"%PDF-").unwrap_or(0);

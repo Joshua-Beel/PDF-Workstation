@@ -16,15 +16,18 @@
 //! layout, also inside an older revision), and it keeps an object a newer revision freed. It does agree with
 //! the standard that an object-stream member with a free or absent entry is null.
 //!
-//! `reconcile` re-walks the chain within fixed bounds, then:
+//! `reconcile` re-walks the chain within fixed bounds (sections, rows, cross-reference stream input plus output,
+//! dictionary bytes; offsets deduplicated after lopdf's ±64-byte correction), then:
 //! - removes an object-stream member whose number is free or absent (the standard and PDFium agree: null);
-//! - removes any other object the standard and lopdf disagree about when nothing reachable from the trailer
-//!   uses it (a saved copy prunes it anyway);
-//! - refuses the load where the readers disagree about a reachable object: a number freed by a newer
-//!   revision, a member lopdf took from another container or without the hybrid entry, an in-use entry at
-//!   offset 0 that an object stream fills, a direct entry lopdf did not read from the same place, or a chain
-//!   that cannot be walked in a file with object streams. A file without object streams whose chain cannot
-//!   be walked keeps lopdf's load.
+//! - for every other disagreement (a number freed by a newer revision, a member lopdf did not take from its named
+//!   container, an in-use entry at offset 0 that an object stream fills, a direct entry lopdf read from elsewhere,
+//!   an offset that holds a different object number) removes the objects when nothing reachable from the trailer
+//!   uses them (a saved copy prunes them anyway), and otherwise refuses the load;
+//! - refuses a file whose raw bytes show object streams (`/ObjStm` or `/XRefStm`) when its chain cannot be walked
+//!   or lopdf had to rebuild its table by scanning; without them every reader's scan finds the same direct objects,
+//!   so lopdf's load is kept.
+//! A refusal reaches the open path as `xref_resolve::AMBIGUOUS`: viewing, search, selection and OCR keep working
+//! (see `editor.rs`), while every lopdf-backed feature (edits, saved copies, comments, forms, page labels) shows it.
 //! The resulting `reference_table` is the standard one (in-use entries only, as lopdf keeps it).
 
 use crate::open_limits::{MAX_LOAD_OBJECTS, MAX_LOAD_STREAM_DECODE_BYTES};
@@ -33,9 +36,14 @@ use std::collections::{BTreeMap, HashSet};
 
 const MAX_SECTIONS: usize = 1024;
 const MAX_ROWS: usize = 4 * MAX_LOAD_OBJECTS;
-const MAX_XREF_DECODE_TOTAL: usize = MAX_LOAD_STREAM_DECODE_BYTES;
+const MAX_XREF_STREAM_BYTES: usize = MAX_LOAD_STREAM_DECODE_BYTES;
 const MAX_DEPTH: usize = 32;
 const RECOVERY_WINDOW: usize = 64;
+/// Trailer and cross-reference stream dictionaries are parsed within this many bytes (an unterminated string or
+/// array cannot run to the end of the file).
+const MAX_DICTIONARY_BYTES: usize = 64 * 1024;
+/// An object header (`N G obj`) is looked for within this many bytes of its entry's offset.
+const HEADER_WINDOW: usize = 64;
 
 pub(crate) const AMBIGUOUS: &str = "PDF readers resolve this file's cross-reference data differently (its revisions, object streams or cross-reference streams disagree), so it cannot be edited or saved safely. Viewing is unaffected.";
 
@@ -49,13 +57,32 @@ pub(crate) enum Entry {
 type Section = BTreeMap<u32, Entry>;
 type Walk<T> = Result<T, &'static str>;
 
-struct Budget { rows: usize, decoded: usize }
+/// Work charged across one walk: rows, and the encoded plus decoded bytes of every cross-reference stream.
+struct Budget { rows: usize, stream_bytes: usize }
 
 impl Budget {
     fn rows(&mut self, count: usize) -> Walk<()> {
         self.rows = self.rows.checked_add(count).filter(|rows| *rows <= MAX_ROWS).ok_or("too many cross-reference rows")?;
         Ok(())
     }
+    fn stream_bytes(&mut self, count: usize) -> Walk<()> {
+        self.stream_bytes = self.stream_bytes.checked_add(count).filter(|bytes| *bytes <= MAX_XREF_STREAM_BYTES).ok_or("cross-reference streams exceed the decode budget")?;
+        Ok(())
+    }
+    fn stream_allowance(&self) -> usize { MAX_XREF_STREAM_BYTES - self.stream_bytes }
+}
+
+fn dictionary(buf: &[u8], pos: usize) -> Walk<(Dictionary, usize)> {
+    let window = &buf[..buf.len().min(pos.saturating_add(MAX_DICTIONARY_BYTES))];
+    match object(window, pos, 0)? { (Object::Dictionary(dict), end) => Ok((dict, end)), _ => Err("expected a dictionary") }
+}
+
+/// The object number and generation written at `offset`, looked for only within `HEADER_WINDOW` bytes.
+fn header_at(buf: &[u8], offset: usize) -> Option<(u64, u64)> {
+    let window = buf.get(..buf.len().min(offset.saturating_add(HEADER_WINDOW)))?;
+    let (number, pos) = uint(window, skip_ws(window, offset)).ok()?;
+    let (generation, pos) = uint(window, skip_ws(window, pos)).ok()?;
+    keyword(window, skip_ws(window, pos), b"obj").then_some((number, generation))
 }
 
 fn is_whitespace(byte: u8) -> bool { matches!(byte, b'\0' | b'\t' | b'\n' | b'\x0c' | b'\r' | b' ') }
@@ -208,25 +235,26 @@ fn table(buf: &[u8], pos: usize, budget: &mut Budget) -> Walk<(Section, Dictiona
             section.insert(number, if kind == b'n' { Entry::Normal { offset, generation } } else { Entry::Free });
         }
     }
-    match object(buf, pos + 7, 0)? { (Object::Dictionary(trailer), _) => Ok((section, trailer)), _ => Err("trailer is not a dictionary") }
+    Ok((section, dictionary(buf, pos + 7)?.0))
 }
 
 fn field(bytes: &[u8]) -> u64 { bytes.iter().fold(0u64, |value, byte| (value << 8) | u64::from(*byte)) }
 
 fn xref_stream(buf: &[u8], pos: usize, budget: &mut Budget) -> Walk<(Section, Dictionary)> {
     let pos = obj_header(buf, pos)?;
-    let (Object::Dictionary(dict), pos) = object(buf, pos, 0)? else { return Err("xref stream has no dictionary") };
+    let (dict, pos) = dictionary(buf, pos)?;
     if dict.get(b"Type").and_then(Object::as_name).ok() != Some(b"XRef") { return Err("not a cross-reference stream"); }
     let pos = skip_ws(buf, pos);
     if !keyword(buf, pos, b"stream") { return Err("expected stream"); }
     let rest = &buf[pos + 6..];
     let start = pos + 6 + if rest.starts_with(b"\r\n") { 2 } else if rest.starts_with(b"\n") || rest.starts_with(b"\r") { 1 } else { 0 };
     let length = match dict.get(b"Length") { Ok(Object::Integer(length)) => usize::try_from(*length).map_err(|_| "bad length")?, _ => return Err("xref stream length is not a direct integer") };
-    let data = buf.get(start..start.checked_add(length).ok_or("bad length")?).ok_or("xref stream past the end")?.to_vec();
-    let allowance = MAX_XREF_DECODE_TOTAL.saturating_sub(budget.decoded);
+    let data = buf.get(start..start.checked_add(length).ok_or("bad length")?).ok_or("xref stream past the end")?;
+    budget.stream_bytes(length)?;
+    let allowance = budget.stream_allowance();
     if allowance == 0 { return Err("cross-reference streams exceed the decode budget"); }
-    let decoded = Stream::new(dict.clone(), data).get_plain_content_with_limit(allowance).map_err(|_| "xref stream cannot be decoded")?;
-    budget.decoded += decoded.len();
+    let decoded = Stream::new(dict.clone(), data.to_vec()).get_plain_content_with_limit(allowance).map_err(|_| "xref stream cannot be decoded")?;
+    budget.stream_bytes(decoded.len())?;
     let widths = match dict.get(b"W") { Ok(Object::Array(values)) if values.len() == 3 => values.iter().map(|value| value.as_i64().ok().and_then(|width| usize::try_from(width).ok()).filter(|width| *width <= 8)).collect::<Option<Vec<usize>>>().ok_or("bad /W")?, _ => return Err("bad /W") };
     let width = widths.iter().sum::<usize>();
     if width == 0 { return Err("bad /W"); }
@@ -267,30 +295,53 @@ fn offset(value: i64, buf: &[u8]) -> Walk<usize> { usize::try_from(value).ok().f
 
 /// The cross-reference entries a conforming reader uses, newest section first. `buf` starts at `%PDF-`.
 pub(crate) fn conforming_entries(buf: &[u8], start: usize) -> Walk<Section> {
-    let mut entries = Section::new(); let mut seen = HashSet::new(); let mut budget = Budget { rows: 0, decoded: 0 };
+    let mut entries = Section::new(); let mut budget = Budget { rows: 0, stream_bytes: 0 };
+    // Keyed on the corrected offset each section is parsed at, so nearby pointers cannot re-parse one section; a
+    // `/XRefStm` already merged adds nothing new (its entries are already in place, newer first), so it is skipped.
+    let (mut seen, mut seen_streams) = (HashSet::new(), HashSet::new());
     let mut next = Some(start);
     while let Some(at) = next {
+        let at = correct(buf, at);
         if !seen.insert(at) { break; }
         if seen.len() > MAX_SECTIONS { return Err("too many cross-reference sections"); }
         let (mut current, trailer) = section(buf, at, &mut budget)?;
-        if let Some(stream_at) = int(&trailer, b"XRefStm").filter(|_| buf.get(correct(buf, at)..).is_some_and(|rest| rest.starts_with(b"xref"))) {
-            let (hybrid, _) = xref_stream(buf, correct(buf, offset(stream_at, buf)?), &mut budget)?;
-            for (number, entry) in hybrid {
-                let slot = current.entry(number).or_insert(Entry::Free);
-                if matches!(slot, Entry::Free | Entry::Normal { offset: 0, .. }) { *slot = entry; }
+        let hybrid_at = int(&trailer, b"XRefStm").filter(|_| buf.get(at..).is_some_and(|rest| rest.starts_with(b"xref")));
+        if let Some(stream_at) = hybrid_at {
+            let stream_at = correct(buf, offset(stream_at, buf)?);
+            if seen_streams.insert(stream_at) {
+                if seen_streams.len() > MAX_SECTIONS { return Err("too many cross-reference sections"); }
+                let (hybrid, _) = xref_stream(buf, stream_at, &mut budget)?;
+                for (number, entry) in hybrid {
+                    let slot = current.entry(number).or_insert(Entry::Free);
+                    if matches!(slot, Entry::Free | Entry::Normal { offset: 0, .. }) { *slot = entry; }
+                }
             }
         }
         for (number, entry) in current { entries.entry(number).or_insert(entry); }
-        next = match trailer.get(b"Prev") { Ok(Object::Integer(prev)) => Some(offset(*prev, buf)?), _ => None };
+        next = prev(&trailer, buf)?;
     }
     Ok(entries)
 }
 
-fn is_object_stream(object: &Object) -> bool { matches!(object, Object::Stream(stream) if stream.dict.has_type(b"ObjStm")) }
+fn prev(trailer: &Dictionary, buf: &[u8]) -> Walk<Option<usize>> {
+    match trailer.get(b"Prev") { Ok(Object::Integer(prev)) => Ok(Some(offset(*prev, buf)?)), _ => Ok(None) }
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool { haystack.windows(needle.len()).any(|window| window == needle) }
 
 fn remove_number(document: &mut Document, number: u32) {
     let ids: Vec<_> = document.objects.range((number, 0)..=(number, u16::MAX)).map(|(id, _)| *id).collect();
     for id in ids { document.objects.remove(&id); }
+}
+
+/// The text-extraction permission of a source whose load `reconcile` refused, so search, selection and OCR (which
+/// read PDFium's text) keep working. It is read from lopdf's unreconciled load only for an unencrypted file: the
+/// newest trailer, which every reader starts from, then has no `/Encrypt`, so no disputed object can carry it.
+pub(crate) fn refused_source_permission(source: &[u8]) -> Result<(), String> {
+    let unverified = || format!("The PDF extraction permission could not be verified. {AMBIGUOUS}");
+    let document = crate::pdf_load::load_unreconciled(source).map_err(|_| unverified())?;
+    if document.trailer.has(b"Encrypt") { return Err(unverified()); }
+    Ok(())
 }
 
 /// Makes a loaded document resolve objects as a conforming reader does, or refuses it (see the module notes).
@@ -300,27 +351,49 @@ pub(crate) fn reconcile(document: &mut Document, source: &[u8]) -> Result<(), St
 
 /// `reconcile`, with the rule that refused the load (for the tests and the real-file probe).
 pub(crate) fn reconcile_with_reason(document: &mut Document, source: &[u8]) -> Result<(), &'static str> {
-    // lopdf rebuilt its table by scanning for objects: there is no chain to walk, and readers repair it each their own way.
-    if document.xref_start == 0 { return Ok(()); }
     let header = source.windows(5).position(|window| window == b"%PDF-").unwrap_or(0);
     let buf = &source[header..];
-    let has_object_streams = document.objects.values().any(is_object_stream);
+    // Judged from the raw bytes: lopdf may have loaded none of the object streams it was meant to.
+    let may_compress = contains(buf, b"/ObjStm") || contains(buf, b"/XRefStm");
+    // lopdf rebuilt its table by scanning for object headers. Without object streams every reader's scan finds the
+    // same direct objects; with them, which copy of a member wins is each reader's own guess.
+    if document.xref_start == 0 { return if may_compress { Err("rebuilt table in a file with object streams") } else { Ok(()) }; }
     let entries = match conforming_entries(buf, document.xref_start) {
         Ok(entries) => entries,
-        Err(_) if !has_object_streams => return Ok(()),
+        Err(_) if !may_compress => return Ok(()),
         Err(_) => return Err("chain cannot be walked in a file with object streams"),
     };
     let live: HashSet<u32> = crate::pdf_load::reachable(document).into_iter().map(|(number, _)| number).collect();
-    let mut drop = Vec::new();
+    let has = |document: &Document, number: u32| document.objects.range((number, 0)..=(number, u16::MAX)).next().is_some();
+    // Each disagreement is refused when a reachable number is involved; otherwise the numbers are dropped (a saved
+    // copy prunes unreachable objects anyway) and left out of the resulting table.
+    let mut drop = HashSet::new();
     for (&number, entry) in &entries {
         let known = document.reference_table.entries.get(&number);
         match *entry {
             Entry::Free => {}
-            Entry::Normal { offset: 0, .. } => if document.objects.range((number, 0)..=(number, u16::MAX)).next().is_some() { return Err("an object stream fills an offset-0 entry"); },
-            Entry::Normal { offset, generation } => if !matches!(known, Some(XrefEntry::Normal { offset: o, generation: g }) if u64::from(*o) == offset && u64::from(*g) == generation) { return Err("a direct entry lopdf did not read from the same place"); },
+            Entry::Normal { offset: 0, .. } => if has(document, number) {
+                if live.contains(&number) { return Err("an object stream fills an offset-0 entry"); }
+                drop.insert(number);
+            },
+            Entry::Normal { offset, generation } => {
+                if !matches!(known, Some(XrefEntry::Normal { offset: o, generation: g }) if u64::from(*o) == offset && u64::from(*g) == generation) {
+                    if live.contains(&number) { return Err("a direct entry lopdf did not read from the same place"); }
+                    drop.insert(number);
+                    continue;
+                }
+                // lopdf keys a direct object by the header it finds at the offset, not by the entry's number.
+                let found = usize::try_from(offset).ok().and_then(|offset| header_at(buf, offset));
+                if found != Some((u64::from(number), generation)) {
+                    let other = found.and_then(|(found, _)| u32::try_from(found).ok());
+                    if live.contains(&number) || other.is_some_and(|other| live.contains(&other)) { return Err("an entry's offset holds a different object number"); }
+                    drop.insert(number);
+                    if let Some(other) = other { drop.insert(other); }
+                }
+            }
             Entry::Compressed { container, .. } => if !matches!(known, Some(XrefEntry::Compressed { container: c, .. }) if u64::from(*c) == container) {
                 if live.contains(&number) { return Err("a used member lopdf did not take from its named container"); }
-                drop.push(number);
+                drop.insert(number);
             },
         }
     }
@@ -328,12 +401,13 @@ pub(crate) fn reconcile_with_reason(document: &mut Document, source: &[u8]) -> R
         if !matches!(entries.get(&number), None | Some(Entry::Free)) { continue; }
         let revived = matches!(document.reference_table.entries.get(&number), Some(XrefEntry::Normal { offset, .. }) if *offset != 0) || matches!(document.reference_table.entries.get(&number), Some(XrefEntry::Compressed { .. }));
         if revived && live.contains(&number) { return Err("a used object a newer revision freed"); }
-        drop.push(number);
+        drop.insert(number);
     }
-    for number in drop { remove_number(document, number); }
+    for &number in &drop { remove_number(document, number); }
     let mut table = BTreeMap::new();
     for (number, entry) in entries {
         let converted = match entry {
+            _ if drop.contains(&number) => continue,
             Entry::Free => continue,
             Entry::Normal { offset, generation } => XrefEntry::Normal { offset: u32::try_from(offset).map_err(|_| "entry out of range")?, generation: u16::try_from(generation).map_err(|_| "entry out of range")? },
             Entry::Compressed { container, index } => XrefEntry::Compressed { container: u32::try_from(container).map_err(|_| "entry out of range")?, index: u16::try_from(index).map_err(|_| "entry out of range")? },

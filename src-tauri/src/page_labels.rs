@@ -125,6 +125,7 @@ fn read_source(source: &[u8], source_pages: usize) -> SourcePageLabels {
     }
     let document = match crate::pdf_load::load(source) {
         Ok(document) => document,
+        Err(crate::pdf_load::LoadFailure::Parse(reason)) if reason == crate::xref_resolve::AMBIGUOUS => return SourcePageLabels::unavailable(reason),
         Err(_) => return SourcePageLabels::unavailable("The PDF page-label structure could not be read."),
     };
     if document.is_encrypted() || document.encryption_state.is_some() {
