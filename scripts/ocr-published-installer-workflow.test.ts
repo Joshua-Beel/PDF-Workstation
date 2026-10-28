@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 
+const readText = (path: string) => readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
 const workflowPath = '.github/workflows/ocr-published-installer-verification.yml';
 const verifierPath = 'scripts/verify-signed-ocr-upgrade.ps1';
 const approvedActionUses = [
@@ -80,7 +81,7 @@ const publishedInputs = {
 
 describe('manual published installer OCR verification workflow', () => {
   it('keeps a manual master-only hosted contract with the token scoped to the download step', () => {
-    const workflow = readFileSync(workflowPath, 'utf8');
+    const workflow = readText(workflowPath);
     expect(workflow).toContain('workflow_dispatch:');
     expect(workflow).not.toMatch(/^\s*(push|pull_request|schedule|release):/m);
     expect(workflow).toContain('runs-on: windows-2022');
@@ -112,7 +113,7 @@ describe('manual published installer OCR verification workflow', () => {
   }, 15_000);
 
   it('executes the exact path initialization block under PowerShell 7', () => {
-    const block = workflowRunBlock(readFileSync(workflowPath, 'utf8'), 'Initialize fresh runner paths');
+    const block = workflowRunBlock(readText(workflowPath), 'Initialize fresh runner paths');
     const root = resolve(`target/ocr-published-init-${randomUUID()}`);
     const runnerTemp = resolve(root, 'runner-temp');
     const githubEnv = resolve(root, 'github-env');
@@ -135,7 +136,7 @@ describe('manual published installer OCR verification workflow', () => {
   }, 40_000);
 
   it('downloads only an exact published stable release asset and rejects metadata drift', () => {
-    const block = workflowRunBlock(readFileSync(workflowPath, 'utf8'), 'Download the exact published release installer');
+    const block = workflowRunBlock(readText(workflowPath), 'Download the exact published release installer');
     const root = resolve(`target/ocr-published-download-${randomUUID()}`);
     mkdirSync(root, { recursive: true });
     const payload = resolve(root, 'payload.bin');
@@ -198,10 +199,10 @@ describe('manual published installer OCR verification workflow', () => {
       foreach ($name in @('PublishedInstaller','PublishedTag','PublishedReleaseId','PublishedInstallerAssetId')) { if ($sets['Upgrade'] -ccontains $name) { throw ('Upgrade set gained ' + $name) } }
     `);
     expect(result.status, result.stderr || result.stdout).toBe(0);
-    const upgrade = readFileSync('.github/workflows/ocr-installer-upgrade.yml', 'utf8');
+    const upgrade = readText('.github/workflows/ocr-installer-upgrade.yml');
     expect(upgrade).toContain('-BaselineInstaller');
     expect(upgrade).not.toContain('-PublishedInstaller');
-    const verifier = readFileSync(verifierPath, 'utf8');
+    const verifier = readText(verifierPath);
     const dispatch = verifier.indexOf("if ($PSCmdlet.ParameterSetName -ceq 'Published')");
     expect(dispatch).toBeGreaterThan(verifier.indexOf('Assert-HostedRunnerFacts -Facts $runnerFacts'));
     expect(dispatch).toBeLessThan(verifier.indexOf('$signedInputs = Get-SignedCheckInputs'));

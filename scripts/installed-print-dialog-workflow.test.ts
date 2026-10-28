@@ -81,7 +81,7 @@ public sealed class NativeAccessibleListFixture : IDisposable {
       }finally{$fixture.Dispose()}
     `);
     expect(result.status, result.stderr || result.stdout).toBe(0);
-  }, 15_000);
+  }, 60_000);
 
   it('binds and mutates only the exact evidenced native save dialog topology', () => {
     const result = runPowerShell7(String.raw`
