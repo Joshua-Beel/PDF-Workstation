@@ -22,7 +22,7 @@ use crate::forms::{ChoiceInfo, ChoiceOption, FormField, RadioInfo, RadioOption};
 use crate::pdf_engine::{EngineBookmark, PageSize, PageTarget, RenderMode};
 use crate::text_geometry::{InspectedGeometry, PageTextGeometry, TextBounds, TextCharacter, MAX_CHARACTERS};
 
-pub(crate) const PROTOCOL_VERSION: u16 = 1;
+pub(crate) const PROTOCOL_VERSION: u16 = 2;
 /// Written once by the helper before its first frame.
 pub(crate) const SYNC: [u8; 8] = *b"SM5PDFH1";
 pub(crate) const HEADER_LEN: usize = 8;
@@ -539,17 +539,20 @@ fn truncate(message: &str, max: usize) -> &str {
     &message[..end]
 }
 
-/// Load reply: helper document handle, page count, and whether the document has no security handler.
+/// Load reply: helper document handle, page count, whether the document has no security handler, and
+/// PDFium's copy/extract permission (version 2).
 pub(crate) struct Loaded {
     pub(crate) handle: u32,
     pub(crate) page_count: usize,
     pub(crate) unprotected: bool,
+    pub(crate) text_extraction_allowed: bool,
 }
 
 pub(crate) fn put_loaded(writer: &mut FrameWriter, loaded: &Loaded) {
     writer.u32(loaded.handle);
     writer.u64(loaded.page_count as u64);
     writer.bool(loaded.unprotected);
+    writer.bool(loaded.text_extraction_allowed);
 }
 
 pub(crate) fn get_loaded(reader: &mut WireReader<'_>) -> Result<Loaded, Malformed> {
@@ -558,7 +561,7 @@ pub(crate) fn get_loaded(reader: &mut WireReader<'_>) -> Result<Loaded, Malforme
     if page_count > i32::MAX as usize {
         return Err(Malformed::new("page count out of range"));
     }
-    Ok(Loaded { handle, page_count, unprotected: reader.bool()? })
+    Ok(Loaded { handle, page_count, unprotected: reader.bool()?, text_extraction_allowed: reader.bool()? })
 }
 
 pub(crate) fn put_page_sizes(writer: &mut FrameWriter, sizes: &[PageSize]) {

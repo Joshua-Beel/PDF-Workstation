@@ -757,7 +757,7 @@ fn remote_engine_matches_in_process_engine_on_the_fixtures() {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         let bytes = std::fs::read(&path).unwrap();
         let (left, right) = (local.load_from_vec(bytes.clone(), None).unwrap(), remote.load_from_slice(&bytes, None).unwrap());
-        same(format!("{name} pages"), format!("{} {}", left.page_count(), left.is_unprotected()), format!("{} {}", right.page_count(), right.is_unprotected()));
+        same(format!("{name} pages"), format!("{} {} {}", left.page_count(), left.is_unprotected(), left.text_extraction_allowed()), format!("{} {} {}", right.page_count(), right.is_unprotected(), right.text_extraction_allowed()));
         let sizes = |document: &dyn Fn() -> Result<Vec<crate::pdf_engine::PageSize>, String>| format!("{:?}", document().map(|sizes| sizes.iter().map(|size| (size.width.to_bits(), size.height.to_bits())).collect::<Vec<_>>()));
         same(format!("{name} page sizes"), sizes(&|| left.page_sizes()), sizes(&|| right.page_sizes()));
         same(format!("{name} labels"), format!("{:?}", left.engine_page_labels()), format!("{:?}", right.engine_page_labels()));

@@ -218,6 +218,9 @@ impl EngineDocument for SelectedDocument<'_> {
     fn is_unprotected(&self) -> bool {
         dispatch!(self, document => document.is_unprotected())
     }
+    fn text_extraction_allowed(&self) -> bool {
+        dispatch!(self, document => document.text_extraction_allowed())
+    }
     fn planned_page_size(&self, spec: &crate::editor::PageSpec) -> Result<(f32, f32), String> {
         dispatch!(self, document => document.planned_page_size(spec))
     }

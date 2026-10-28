@@ -138,6 +138,7 @@ impl RemotePdfEngine {
             password: password.map(str::to_owned),
             page_count: loaded.page_count,
             unprotected: loaded.unprotected,
+            text_extraction_allowed: loaded.text_extraction_allowed,
             state: RefCell::new(DocState { handle: Some((generation, loaded.handle)), deaths: 0, suspect: false }),
         })
     }
@@ -171,6 +172,7 @@ pub(crate) struct RemoteDocument<'a> {
     password: Option<String>,
     page_count: usize,
     unprotected: bool,
+    text_extraction_allowed: bool,
     state: RefCell<DocState>,
 }
 
@@ -243,7 +245,7 @@ impl RemoteDocument<'_> {
         match self.engine.load_handle(&self.source, self.password.as_deref()) {
             Ok((generation, loaded)) => {
                 let mut state = self.state.borrow_mut();
-                if loaded.page_count != self.page_count || loaded.unprotected != self.unprotected {
+                if loaded.page_count != self.page_count || loaded.unprotected != self.unprotected || loaded.text_extraction_allowed != self.text_extraction_allowed {
                     state.suspect = true;
                     state.deaths = MAX_DEATHS;
                     return Err(CallError::Unavailable(RELOAD_CHANGED_MESSAGE));
@@ -391,6 +393,10 @@ impl EngineDocument for RemoteDocument<'_> {
 
     fn is_unprotected(&self) -> bool {
         self.unprotected
+    }
+
+    fn text_extraction_allowed(&self) -> bool {
+        self.text_extraction_allowed
     }
 
     fn planned_page_size(&self, spec: &PageSpec) -> Result<(f32, f32), String> {
