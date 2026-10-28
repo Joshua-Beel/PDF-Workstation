@@ -5277,7 +5277,7 @@ mod tests {
         } else {
             command.env_remove(crate::pdf_helper::HELPER_SETTING_VARIABLE);
         }
-        let output = command.output().unwrap();
+        let output = crate::child_job::test_output(&mut command).unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         assert!(output.status.success(), "{} child failed:\n{stdout}\n{}", if helper { "helper" } else { "in-process" }, String::from_utf8_lossy(&output.stderr));
         stdout

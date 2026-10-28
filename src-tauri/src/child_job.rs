@@ -62,6 +62,37 @@ pub(crate) const EXIT_RESOURCE_LIMIT: u32 = 0xc000_009a;
 /// Windows Error Reporting and can write a dump to the system drive).
 pub(crate) const EXIT_ALLOCATION_FAILURE: u32 = 0xe000_0a11;
 
+/// Held by `spawn_suspended` from the creation of the child's pipes until their child-side ends are closed
+/// again. Those ends must be inheritable for the handle list, and a process started meanwhile by another
+/// thread with ordinary inheritance (`std::process::Command`) would copy them and keep the pipe open until
+/// that process ends. Anything in this program that starts a process the other way takes the same lock.
+static SPAWN_LOCK: Mutex<()> = Mutex::new(());
+
+fn spawn_lock() ->std::sync::MutexGuard<'static, ()> {
+    SPAWN_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Test processes started with `std::process::Command` (which inherits every inheritable handle) are started
+/// through these, so they cannot copy another thread's half-built child pipes. The lock covers only the
+/// start, not the wait.
+#[cfg(test)]
+pub(crate) fn test_spawn(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    let _guard = spawn_lock();
+    command.spawn()
+}
+
+#[cfg(test)]
+pub(crate) fn test_output(command: &mut std::process::Command) -> std::io::Result<std::process::Output> {
+    use std::process::Stdio;
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    test_spawn(command)?.wait_with_output()
+}
+
+#[cfg(test)]
+pub(crate) fn test_status(command: &mut std::process::Command) -> std::io::Result<std::process::ExitStatus> {
+    test_spawn(command)?.wait()
+}
+
 /// How long `run_bounded` waits, once the child has ended, for its pipe threads to finish. A pipe end held by
 /// some other process (for example one started by another thread while the child's pipe ends were briefly
 /// inheritable) keeps the pipe open after the child is gone; the blocked read or write is then cancelled and
@@ -347,6 +378,7 @@ pub(crate) fn spawn_suspended<E: From<ChildSystemError>>(
     prepare: impl FnOnce() -> Result<ChildCommand, E>,
     before_create: impl FnOnce() -> Result<(), E>,
 ) -> Result<SuspendedChild, E> {
+    let _spawning = spawn_lock();
     let (job, notifications) = create_job(label, limits)?;
     let (child_stdin, parent_stdin) = create_pipe(label, true)?;
     let (parent_stdout, child_stdout) = create_pipe(label, false)?;
@@ -1321,9 +1353,8 @@ mod tests {
 
     #[test]
     fn the_child_dies_when_its_owner_exits_without_cleanup() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", ENTRY, "--nocapture", "--quiet", "--test-threads=1", &format!("{MODE_PREFIX}host")])
-            .output()
+        let output = test_output(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", ENTRY, "--nocapture", "--quiet", "--test-threads=1", &format!("{MODE_PREFIX}host")]))
             .unwrap();
         assert!(output.status.success(), "{output:?}");
         let stdout = String::from_utf8_lossy(&output.stdout);

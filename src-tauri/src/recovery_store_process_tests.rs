@@ -192,7 +192,7 @@ fn child(
             command.env(name, value);
         }
     }
-    command.spawn().expect("spawn owned store-process child")
+    crate::child_job::test_spawn(&mut command).expect("spawn owned store-process child")
 }
 
 fn wait_child(mut child: Child, label: &str) {
