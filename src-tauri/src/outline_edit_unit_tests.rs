@@ -354,3 +354,75 @@ fn a_document_without_bookmarks_gains_a_valid_outline() {
     assert_eq!(verify(&document), [("Chapter".to_owned(), 0, true), ("Section".to_owned(), 1, false)]);
     let pages = read(&document).unwrap().iter().map(|entry| entry.source_page).collect::<Vec<_>>(); assert_eq!(pages, [Some(2), Some(3)]);
 }
+
+fn page_tree_bytes(document: &Document) -> Vec<(ObjectId, Vec<u8>)> {
+    let mut ids: Vec<ObjectId> = vec![document.trailer.get(b"Root").unwrap().as_reference().unwrap()];
+    ids.extend(document.get_pages().values().copied());
+    ids.push(document.catalog().unwrap().get(b"Pages").unwrap().as_reference().unwrap());
+    ids.sort(); ids.dedup();
+    ids.into_iter().map(|id| (id, format!("{:?}", document.get_object(id).unwrap()).into_bytes())).collect()
+}
+
+#[test]
+fn hostile_outlines_aimed_at_the_page_tree_are_refused_and_leave_it_untouched() {
+    let hostile = |aim: &dyn Fn(&Document) -> ObjectId, via_root: bool, expect: &str| {
+        let mut document = sample(); with_outline(&mut document, &tree());
+        let target = aim(&document);
+        let root = document.catalog().unwrap().get(b"Outlines").unwrap().as_reference().unwrap();
+        if via_root { document.get_dictionary_mut(root).unwrap().set("First", Object::Reference(target)); } else { let a = find(&document, "A"); document.get_dictionary_mut(a).unwrap().set("First", Object::Reference(target)); }
+        let before = page_tree_bytes(&document);
+        let mut edits = OutlineEdits::default(); edits.load(read(&document));
+        let view = edits.view(&plan(6));
+        assert!(!view.editable, "{expect}");
+        assert!(view.reason.unwrap().contains(expect));
+        assert!(edits.apply(edits.version, BookmarkOp::Add { page: 0, title: "x".into(), after: None }, &plan(6)).is_err());
+        assert!(edits.pending().is_none());
+        assert_eq!(page_tree_bytes(&document), before);
+    };
+    hostile(&|d| d.catalog().unwrap().get(b"Pages").unwrap().as_reference().unwrap(), true, "page tree or catalog");
+    hostile(&|d| d.get_pages().values().next().copied().unwrap(), true, "page tree or catalog");
+    hostile(&|d| d.trailer.get(b"Root").unwrap().as_reference().unwrap(), true, "page tree or catalog");
+    hostile(&|d| d.catalog().unwrap().get(b"Pages").unwrap().as_reference().unwrap(), false, "page tree or catalog");
+    hostile(&|d| d.get_pages().values().nth(1).copied().unwrap(), false, "page tree or catalog");
+    let mut document = sample();
+    let pages = document.catalog().unwrap().get(b"Pages").unwrap().as_reference().unwrap();
+    document.catalog_mut().unwrap().set("Outlines", Object::Reference(pages));
+    assert!(read(&document).unwrap_err().contains("page tree or catalog"));
+}
+
+#[test]
+fn outline_items_with_a_wrong_parent_or_type_are_refused() {
+    let refused = |mutate: &dyn Fn(&mut Document), expect: &str| {
+        let mut document = sample(); with_outline(&mut document, &tree()); mutate(&mut document);
+        let error = read(&document).unwrap_err(); assert!(error.contains(expect), "{error}");
+    };
+    refused(&|d| { let (a, c) = (find(d, "A"), find(d, "C")); d.get_dictionary_mut(c).unwrap().set("Parent", Object::Reference(a)); }, "parent link");
+    refused(&|d| { let (a1, root) = (find(d, "A1"), d.catalog().unwrap().get(b"Outlines").unwrap().as_reference().unwrap()); d.get_dictionary_mut(a1).unwrap().set("Parent", Object::Reference(root)); }, "parent link");
+    refused(&|d| { let c = find(d, "C"); d.get_dictionary_mut(c).unwrap().set("Parent", Object::Integer(1)); }, "parent link");
+    refused(&|d| { let c = find(d, "C"); d.get_dictionary_mut(c).unwrap().set("Type", Object::Name(b"Page".to_vec())); }, "unexpected type");
+    refused(&|d| { let root = d.catalog().unwrap().get(b"Outlines").unwrap().as_reference().unwrap(); d.get_dictionary_mut(root).unwrap().set("Type", Object::Name(b"Pages".to_vec())); }, "unexpected type");
+    let mut ok = sample(); with_outline(&mut ok, &tree());
+    let c = find(&ok, "C"); ok.get_dictionary_mut(c).unwrap().set("Type", Object::Name(b"Outline".to_vec()));
+    assert_eq!(read(&ok).unwrap().len(), 7);
+}
+
+#[test]
+fn titles_with_bidi_or_zero_width_characters_are_refused() {
+    for bad in ["a\u{202E}b", "a\u{2066}b", "a\u{2069}b", "a\u{200B}b", "a\u{200F}b", "\u{FEFF}a", "a\u{202A}"] {
+        assert!(clean_title(bad).unwrap_err().contains("invisible"), "{bad:?}");
+    }
+    assert_eq!(clean_title("  Caf\u{e9} \u{4e2d}\u{6587} ").unwrap(), "Caf\u{e9} \u{4e2d}\u{6587}");
+}
+
+#[test]
+fn new_bookmarks_use_an_xyz_destination_that_keeps_the_zoom() {
+    let mut document = sample();
+    let mut edits = OutlineEdits::default(); edits.load(read(&document));
+    op(&mut edits, BookmarkOp::Add { page: 2, title: "New".into(), after: None }).unwrap();
+    write(&mut document, edits.pending().unwrap(), &document_pages).unwrap();
+    let dest = document.get_dictionary(find(&document, "New")).unwrap().get(b"Dest").unwrap().as_array().unwrap().clone();
+    assert_eq!(dest.len(), 5);
+    assert_eq!(dest[0].as_reference().unwrap(), document_pages(2).unwrap());
+    assert_eq!(dest[1].as_name().unwrap(), b"XYZ");
+    assert!(dest[2..].iter().all(|object| matches!(object, Object::Null)));
+}

@@ -114,6 +114,7 @@ fn clean_title(title: &str) -> Result<String, String> {
     if title.is_empty() { return Err("Enter a bookmark title.".into()); }
     if title.chars().count() > MAX_TITLE_CHARS { return Err(format!("A bookmark title can have at most {MAX_TITLE_CHARS} characters.")); }
     if title.chars().any(char::is_control) { return Err("A bookmark title cannot contain control characters.".into()); }
+    if title.chars().any(|c| matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200B}'..='\u{200F}' | '\u{FEFF}')) { return Err("A bookmark title cannot contain invisible or text-direction control characters.".into()); }
     Ok(title.to_owned())
 }
 
@@ -136,27 +137,53 @@ fn destination_page(document: &Document, dict: &lopdf::Dictionary, pages: &HashM
     array_page(action.get(b"D").ok()?)
 }
 
+/// The catalog and every page-tree node and page: objects the outline must never alias.
+fn protected_ids(document: &Document) -> HashSet<ObjectId> {
+    let mut ids = HashSet::new();
+    if let Ok(Object::Reference(root)) = document.trailer.get(b"Root") { ids.insert(*root); }
+    ids.extend(document.get_pages().values().copied());
+    let mut queue: Vec<ObjectId> = match document.catalog().ok().and_then(|catalog| catalog.get(b"Pages").ok()) { Some(Object::Reference(id)) => vec![*id], _ => Vec::new() };
+    let mut visited = HashSet::new();
+    while let Some(id) = queue.pop() {
+        if visited.len() > 200_000 || !visited.insert(id) { continue; }
+        ids.insert(id);
+        if let Ok(kids) = document.get_dictionary(id).and_then(|dict| dict.get(b"Kids")).and_then(|kids| kids.as_array()) {
+            for kid in kids { if let Object::Reference(kid) = kid { queue.push(*kid); } }
+        }
+    }
+    ids
+}
+
 /// Reads the whole outline with a bounded, cycle-checked walk. A malformed outline (cycle, shared item,
 /// wrong object types, more than 1,000 entries, more than 32 levels) is refused rather than guessed at.
 /// A wrong `/Count` is not an error: counts are regenerated when a copy is written.
 pub fn read(document: &Document) -> Result<Vec<Entry>, String> {
     let catalog = document.catalog().map_err(|error| error.to_string())?;
-    let root = match catalog.get(b"Outlines") {
+    let (root, root_id) = match catalog.get(b"Outlines") {
         Err(_) | Ok(Object::Null) => return Ok(Vec::new()),
-        Ok(Object::Reference(id)) => document.get_dictionary(*id).map_err(|_| "The bookmark list is not a dictionary.".to_owned())?,
-        Ok(Object::Dictionary(dict)) => dict,
+        Ok(Object::Reference(id)) => (document.get_dictionary(*id).map_err(|_| "The bookmark list is not a dictionary.".to_owned())?, Some(*id)),
+        Ok(Object::Dictionary(dict)) => (dict, None),
         Ok(_) => return Err("The bookmarks use an unsupported structure.".into()),
     };
+    let protected = protected_ids(document);
+    if root_id.is_some_and(|id| protected.contains(&id)) { return Err("The bookmark list points at the page tree or catalog, so the bookmarks cannot be edited safely.".into()); }
+    if let Ok(kind) = root.get(b"Type") { if kind.as_name().ok() != Some(b"Outlines".as_slice()) { return Err("The bookmark list has an unexpected type, so the bookmarks cannot be edited safely.".into()); } }
     let pages: HashMap<ObjectId, usize> = document.get_pages().values().enumerate().map(|(index, id)| (*id, index)).collect();
     let mut entries: Vec<Entry> = Vec::new();
     let mut seen = HashSet::new();
     let mut bytes = 0usize;
     let mut stack: Vec<Option<ObjectId>> = vec![reference(root.get(b"First").ok())?];
+    let mut parents: Vec<Option<ObjectId>> = vec![root_id];
     while let Some(top) = stack.last().copied() {
-        let Some(id) = top else { stack.pop(); continue };
+        let Some(id) = top else { stack.pop(); parents.pop(); continue };
         if entries.len() >= MAX_ENTRIES { return Err(format!("This document has more than {MAX_ENTRIES} bookmarks, which is more than can be edited.")); }
         if !seen.insert(id) { return Err("The bookmarks contain a cycle or a shared item, so they cannot be edited safely.".into()); }
+        if protected.contains(&id) { return Err("A bookmark points at the page tree or catalog, so the bookmarks cannot be edited safely.".into()); }
         let dict = document.get_dictionary(id).map_err(|_| "A bookmark is not a dictionary.".to_owned())?;
+        if let Ok(kind) = dict.get(b"Type") { if kind.as_name().ok() != Some(b"Outline".as_slice()) { return Err("A bookmark has an unexpected type, so the bookmarks cannot be edited safely.".into()); } }
+        if let Some(expected) = parents[stack.len() - 1] {
+            match dict.get(b"Parent") { Ok(Object::Reference(parent)) if *parent == expected => {} Err(_) => {} _ => return Err("A bookmark's parent link does not match the outline tree, so the bookmarks cannot be edited safely.".into()) }
+        }
         let depth = stack.len() - 1;
         if depth >= MAX_DEPTH { return Err(format!("The bookmarks are nested more than {MAX_DEPTH} levels deep, so they cannot be edited.")); }
         let last = stack.len() - 1;
@@ -167,7 +194,7 @@ pub fn read(document: &Document) -> Result<Vec<Entry>, String> {
         if bytes > MAX_TOTAL_TITLE_BYTES { return Err("Bookmarks contain too much text.".into()); }
         let count = dict.get(b"Count").ok().and_then(|value| document.dereference(value).ok()).and_then(|(_, value)| value.as_i64().ok()).unwrap_or(0);
         entries.push(Entry { uid: entries.len() as u32, origin: Some(id), title, renamed: false, depth, open: count > 0, source_page: destination_page(document, dict, &pages) });
-        if first.is_some() { stack.push(first); }
+        if first.is_some() { stack.push(first); parents.push(Some(id)); }
     }
     Ok(entries)
 }
@@ -264,6 +291,11 @@ impl OutlineEdits {
     pub fn load(&mut self, result: Result<Vec<Entry>, String>) {
         if let Ok(entries) = &result { self.current = entries.clone(); self.next_uid = entries.len() as u32; }
         self.baseline = Some(result);
+    }
+    /// Drops every pending bookmark edit and returns to the source outline.
+    pub fn discard(&mut self) {
+        if let Some(Ok(baseline)) = &self.baseline { self.current = baseline.clone(); }
+        self.undo.clear(); self.redo.clear(); self.version += 1;
     }
     pub fn changed(&self) -> bool { matches!(&self.baseline, Some(Ok(baseline)) if *baseline != self.current) }
     /// The entries to write into a copy, when they differ from the source outline.

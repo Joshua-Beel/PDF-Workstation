@@ -79,6 +79,10 @@ fn edited_bookmarks_save_into_a_new_copy_that_lopdf_and_pdfium_read_identically(
     assert_eq!(lopdf_rows(&copy), expected);
     let titles: Vec<String> = copy.objects.values().filter_map(|object| object.as_dict().ok()?.get(b"Title").ok().and_then(|t| lopdf::decode_text_string(t).ok())).collect();
     assert!(!titles.iter().any(|title| ["A1", "A2", "A2x"].contains(&title.as_str())), "deleted and renamed-away items are not carried into the copy: {titles:?}");
+    let open_in_view: Vec<bool> = moved.view.entries.iter().enumerate().filter(|(index, entry)| moved.view.entries.get(index + 1).is_some_and(|next| next.depth > entry.depth)).map(|(_, entry)| entry.open).collect();
+    let open_written: Vec<bool> = written.iter().enumerate().filter(|(index, entry)| written.get(index + 1).is_some_and(|next| next.1 > entry.1)).map(|(_, entry)| entry.2).collect();
+    assert_eq!(open_written, open_in_view, "open and closed state survives the write (PDFium's list does not expose it, so it is read back from the copy)");
+    assert_eq!(open_written, [false, true, true], "B stays closed; A and the added bookmark with a child stay open");
     let reopened = reopen(&service, copy_path);
     assert!(!reopened.dirty);
     assert_eq!(pdfium_rows(&service, &reopened), expected, "PDFium reads the written tree the same way");
@@ -216,4 +220,42 @@ fn session_export_applies_pending_bookmarks_and_extraction_keeps_only_bookmarks_
     assert_eq!(lopdf_rows(&extracted), vec![row("Second", 0, 0)], "the bookmark on a page that was not extracted is left out");
     let untouched = EditSession::new(bytes, 6);
     assert!(lopdf::Document::load_mem(&untouched.export(None).unwrap()).unwrap().catalog().unwrap().get(b"Outlines").is_err());
+}
+
+#[test]
+fn closing_or_discarding_after_a_bookmark_only_edit_works_and_drops_the_edit() {
+    let service = service(); let folder = tempfile::tempdir().unwrap();
+    let (info, _, _) = outlined(folder.path(), "discard.pdf", &service);
+    let start = view(&service, &info);
+    let changed = edit(&service, &info, start.view.version, BookmarkOp::Delete { uid: uid(&start, "C") }).unwrap();
+    assert!(changed.document.dirty);
+    assert!(direct(&service, |reply| Request::DiscardRecovery(info.id, info.revision + 1, reply)).err().unwrap().contains("Discard again"));
+    direct(&service, |reply| Request::DiscardRecovery(info.id, info.revision, reply)).expect("a bookmark-only edit can be discarded");
+    let after = view(&service, &info);
+    assert!(!after.view.changed && !after.document.dirty);
+    assert_eq!(rows(&after), rows(&start), "the discarded edit is gone");
+    assert!(direct(&service, |reply| Request::DiscardRecovery(info.id, info.revision, reply)).err().unwrap().contains("Only unsaved edits"), "a clean document still has nothing to discard");
+    let again = edit(&service, &info, after.view.version, BookmarkOp::Delete { uid: uid(&after, "C") }).unwrap();
+    assert!(again.document.dirty);
+    direct(&service, |reply| Request::Close(info.id, reply)).expect("close after a bookmark-only edit");
+}
+
+#[test]
+fn split_writes_added_bookmarks_into_the_part_that_holds_their_page() {
+    let service = service(); let folder = tempfile::tempdir().unwrap();
+    let mut document = sample();
+    let (info, _, _) = open(&service, &mut document, folder.path(), "split.pdf");
+    let start = view(&service, &info);
+    let one = edit(&service, &info, start.view.version, BookmarkOp::Add { page: 0, title: "One".into(), after: None }).unwrap();
+    let two = edit(&service, &info, one.view.version, BookmarkOp::Add { page: 4, title: "Two".into(), after: None }).unwrap();
+    let added = edit(&service, &info, two.view.version, BookmarkOp::Add { page: 5, title: "Three".into(), after: None }).unwrap();
+    let output = direct(&service, |reply| Request::Split(info.id, info.revision, 3, folder.path().join("parts"), reply)).unwrap();
+    assert_eq!(output.files.len(), 2);
+    let first = lopdf_rows(&lopdf::Document::load(&output.files[0].path).unwrap());
+    let second = lopdf::Document::load(&output.files[1].path).unwrap();
+    verify(&second);
+    let titles = |rows: &[Row]| rows.iter().map(|row| row.0.clone()).collect::<Vec<_>>();
+    assert_eq!(titles(&first), ["One"]);
+    assert_eq!(titles(&lopdf_rows(&second)), ["Two", "Three"]);
+    assert!(added.view.changed);
 }

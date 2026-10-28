@@ -833,7 +833,7 @@ impl PdfService {
                     Request::DiscardRecovery(id, revision, reply) => {
                         if reply.is_closed() { continue; }
                         let result = (|| {
-                            let (session, original) = sessions.get(&id).ok_or("Document is closed")?;
+                            let (session, original) = sessions.get_mut(&id).ok_or("Document is closed")?;
                             if let Some(lock) = recovery_locked.get(&id).cloned() {
                                 if revision != lock.requested_revision { return Err(format!("Recovery discard is stale ({revision} != {}).", lock.requested_revision)); }
                                 let root = recovery_root.as_deref().ok_or("Recovery is unavailable.")?;
@@ -850,7 +850,7 @@ impl PdfService {
                                 return Ok(());
                             }
                             if session.revision != revision { return Err("Document changed. Discard again.".into()); }
-                            if !session.dirty() { return Err("Only unsaved edits can be discarded.".into()); }
+                            if !session.dirty() { if session.unsaved() { session.outline.discard(); return Ok(()); } return Err("Only unsaved edits can be discarded.".into()); }
                             let root = recovery_root.as_deref().ok_or("Recovery is unavailable.")?;
                             let source = recovery_source_identity(&session.source)?;
                             if recovery_heads.iter().any(|(owner, (identity, _))| *owner != id && *identity == source) { return Err("Another open tab owns recovery for this PDF.".into()); }

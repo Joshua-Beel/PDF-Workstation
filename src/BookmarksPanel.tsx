@@ -33,6 +33,8 @@ export default function BookmarksPanel({ document, page = 0, go, close, onDocume
   const [busy, setBusy] = useState(false);
   const working = useRef(false);
   const mounted = useRef(true);
+  const panel = useRef<HTMLElement>(null);
+  const wantFocus = useRef<string | null>(null);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
 
   const begin = useCallback(async () => {
@@ -68,6 +70,12 @@ export default function BookmarksPanel({ document, page = 0, go, close, onDocume
     finally { working.current = false; if (mounted.current) setBusy(false); }
   };
 
+  useEffect(() => {
+    if (busy || !wantFocus.current) return;
+    const label = wantFocus.current; wantFocus.current = null;
+    panel.current?.querySelector<HTMLElement>(`[aria-label="${label}"]`)?.focus();
+  });
+  const closeForm = (label: string) => { wantFocus.current = label; setForm(null); };
   const finish = () => { setEdit(null); setForm(null); setSelected(null); setStatus(''); setReload(value => value + 1); };
   const entries = edit?.view.entries ?? [];
   const index = selected === null ? -1 : entries.findIndex(entry => entry.uid === selected);
@@ -93,13 +101,13 @@ export default function BookmarksPanel({ document, page = 0, go, close, onDocume
     } else if (current) {
       void run({ kind: 'rename', uid: current.uid, title }, () => setStatus(`Renamed bookmark to “${title}”.`));
     }
-    setForm(null);
+    closeForm(form.kind === 'add' ? 'Add bookmark at current page' : 'Rename bookmark');
   };
   const remove = () => {
     if (!current) return;
     const count = end - index;
     void run({ kind: 'delete', uid: current.uid }, () => {
-      setSelected(null);
+      setSelected(null); wantFocus.current = 'Add bookmark at current page';
       setStatus(count > 1 ? `Deleted “${current.title}” and ${count - 1} nested ${count === 2 ? 'bookmark' : 'bookmarks'}. Undo is available.` : `Deleted “${current.title}”. Undo is available.`);
     });
   };
@@ -108,7 +116,7 @@ export default function BookmarksPanel({ document, page = 0, go, close, onDocume
   const toolbarButton = (label: string, text: string, disabled: boolean, onClick: () => void, pressed?: boolean) =>
     <button type="button" aria-label={label} title={label} disabled={disabled || busy} aria-pressed={pressed} onClick={onClick}>{text}</button>;
 
-  return <aside className={s.panel} aria-label="Document bookmarks">
+  return <aside ref={panel} className={s.panel} aria-label="Document bookmarks">
     <div className={s.heading}><h2>Bookmarks</h2><button aria-label="Close bookmarks" onClick={close}>×</button></div>
     {error && <p role="alert">{error}</p>}
     {edit ? <>
@@ -125,11 +133,11 @@ export default function BookmarksPanel({ document, page = 0, go, close, onDocume
         {toolbarButton('Undo bookmark change', 'Undo', !edit.view.can_undo, () => void run({ kind: 'undo' }, () => setStatus('Undid the last bookmark change.')))}
         {toolbarButton('Redo bookmark change', 'Redo', !edit.view.can_redo, () => void run({ kind: 'redo' }, () => setStatus('Redid the bookmark change.')))}
       </div>
-      {form && <form aria-label={form.kind === 'add' ? 'New bookmark' : 'Rename bookmark'} onSubmit={submit} onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); setForm(null); } }}>
+      {form && <form aria-label={form.kind === 'add' ? 'New bookmark' : 'Rename bookmark'} onSubmit={submit} onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); closeForm(form.kind === 'add' ? 'Add bookmark at current page' : 'Rename bookmark'); } }}>
         <label>{form.kind === 'add' ? `New bookmark title (page ${page + 1})` : 'Bookmark title'}
           <input autoFocus type="text" maxLength={512} value={form.title} onChange={event => setForm({ ...form, title: event.target.value })} />
         </label>
-        <div className={s.actions}><button type="submit" disabled={busy}>{form.kind === 'add' ? 'Add bookmark' : 'Rename'}</button><button type="button" onClick={() => setForm(null)}>Cancel</button></div>
+        <div className={s.actions}><button type="submit" disabled={busy}>{form.kind === 'add' ? 'Add bookmark' : 'Rename'}</button><button type="button" onClick={() => closeForm(form.kind === 'add' ? 'Add bookmark at current page' : 'Rename bookmark')}>Cancel</button></div>
       </form>}
       {status && <p role="status">{status}</p>}
       {!entries.length && <p>This document has no bookmarks. Use Add to bookmark the current page.</p>}
