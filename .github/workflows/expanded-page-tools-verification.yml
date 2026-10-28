@@ -67,7 +67,7 @@ jobs:
           $writer = [IO.StreamWriter]::new($env:GITHUB_ENV,$true,[Text.UTF8Encoding]::new($false))
           try { foreach ($value in $values) { $writer.WriteLine([string]$value) } } finally { $writer.Dispose() }
 
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -89,7 +89,7 @@ jobs:
           git merge-base --is-ancestor $env:SOURCE_REVISION HEAD
           if ($LASTEXITCODE -ne 0) { throw 'The signed source revision is not on the dispatched master history.' }
 
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ inputs.source_revision }}
           fetch-depth: 0
@@ -124,7 +124,7 @@ jobs:
           ./scripts/assert-signed-artifact-metadata.ps1 -TargetSourceRevision $env:SOURCE_REVISION -ArtifactRunId $env:ARTIFACT_RUN_ID -ArtifactId $env:ARTIFACT_ID -ArtifactName $env:ARTIFACT_NAME -ArtifactBytes $env:ARTIFACT_BYTES -ArtifactDigest $env:ARTIFACT_DIGEST
 
       - name: Download exact signed application artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
           artifact-ids: ${{ inputs.artifact_id }}
           github-token: ${{ github.token }}
@@ -150,7 +150,7 @@ jobs:
 
       - name: Upload only the sanitized expanded page-tools record
         if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: signed-expanded-page-tools-verification-${{ github.sha }}
           path: ${{ env.EXPANDED_OUTPUT_ROOT }}/expanded-page-tools-verification.json

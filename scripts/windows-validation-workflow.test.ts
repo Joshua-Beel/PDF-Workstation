@@ -20,17 +20,17 @@ describe('Windows validation workflow', () => {
     expect(workflow.match(/git diff --quiet --/g)).toHaveLength(2);
     expect(workflow.match(/git diff --cached --quiet --/g)).toHaveLength(2);
     expect(workflow).toContain('if: ${{ always() }}');
-    expect(workflow).toContain('actions/checkout@11d5960a326750d5838078e36cf38b85af677262');
-    expect(workflow).toContain('actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020');
+    expect(workflow).toContain('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1');
+    expect(workflow).toContain('actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1');
     expect(workflow).toContain('dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d');
     expect(workflow).toContain("node-version: '22'");
   });
 
   it('runs the exact release preparation and complete signing-free gate in order', () => {
     const ordered = [
-      'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
+      'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
       'Verify exact clean dispatched source',
-      'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
+      'actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1',
       'dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d',
       'Verify hosted cross-drive topology',
       'run: npm ci',

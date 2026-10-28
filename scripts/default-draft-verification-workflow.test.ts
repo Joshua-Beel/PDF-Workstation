@@ -36,9 +36,9 @@ describe('default draft verification workflow', () => {
     }
     const uses = [...workflow.matchAll(/^\s*-?\s*uses:\s*([^\s#]+)\s*$/gm)].map(match => match[1]);
     expect(uses).toEqual([
-      'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
-      'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
-      'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
+      'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+      'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+      'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9',
     ]);
     for (const use of uses) expect(use).toMatch(/@[0-9a-f]{40}$/);
     expect(workflow.match(/persist-credentials: false/g)).toHaveLength(2);

@@ -68,7 +68,7 @@ jobs:
           $writer = [IO.StreamWriter]::new($env:GITHUB_ENV, $true, [Text.UTF8Encoding]::new($false))
           try { foreach ($value in $values) { $writer.WriteLine([string]$value) } } finally { $writer.Dispose() }
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -128,7 +128,7 @@ jobs:
           ./scripts/assert-signed-artifact-metadata.ps1 -TargetSourceRevision $env:SOURCE_REVISION -ArtifactRunId $env:ARTIFACT_RUN_ID -ArtifactId $env:ARTIFACT_ID -ArtifactName $env:ARTIFACT_NAME -ArtifactBytes $env:ARTIFACT_BYTES -ArtifactDigest $env:ARTIFACT_DIGEST
 
       - name: Download exact signed artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           artifact-ids: ${{ inputs.artifact_id }}
           github-token: ${{ github.token }}
@@ -153,7 +153,7 @@ jobs:
             -RecordBytes $env:RECORD_BYTES -RecordSha256 $env:RECORD_SHA256
 
       - name: Upload only sanitized persistence verification
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: signed-persistence-verification-${{ github.sha }}
           path: ${{ env.PERSISTENCE_OUTPUT_ROOT }}/persistence-verification.json

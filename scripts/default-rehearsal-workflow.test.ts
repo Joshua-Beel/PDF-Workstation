@@ -48,7 +48,7 @@ describe('pre-tag default rehearsal workflow', () => {
     for (const name of ['check', 'target_version', 'target_source_revision', 'artifact_run_id', 'artifact_id', 'artifact_name', 'artifact_bytes', 'artifact_digest', 'installer_name', 'installer_bytes', 'installer_sha256', 'expected_publisher']) expect(workflow).toMatch(new RegExp(`^      ${name}:`, 'm'));
     expect(workflow).not.toMatch(/target_tag|target_release_id|draft_proof_|signature_asset_id|manifest_asset_id/);
     const uses = [...workflow.matchAll(/^\s*-?\s*uses:\s*([^\s#]+)\s*$/gm)].map(x => x[1]);
-    expect(uses).toEqual(['actions/checkout@11d5960a326750d5838078e36cf38b85af677262', 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262', 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093', 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02']);
+    expect(uses).toEqual(['actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', 'actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131', 'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9']);
     expect(workflow.match(/persist-credentials: false/g)).toHaveLength(2);
     expect(workflow).toContain('artifact-ids: ${{ inputs.artifact_id }}'); expect(workflow).toContain('run-id: ${{ inputs.artifact_run_id }}'); expect(workflow).toContain('merge-multiple: true');
     for (const line of workflow.split('\n').filter(l => l.includes('${{ inputs.'))) expect(line, line).toMatch(/^\s+(-\s+)?[A-Za-z_-]+:\s|^\s+env: \{/);

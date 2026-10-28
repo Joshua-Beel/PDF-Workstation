@@ -20,12 +20,12 @@ jobs:
     outputs:
       version: ${{ steps.validate.outputs.version }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: '22'
           cache: npm
@@ -93,7 +93,7 @@ jobs:
       - name: Build the pinned unsigned OCR setup
         shell: pwsh
         run: ./scripts/setup-ocr.ps1 -OutputRoot $env:OCR_SETUP_ROOT -Jobs 4
-      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
         with:
           dotnet-version: '8.0.x'
       - name: Install Azure Artifact Signing CLI
@@ -157,7 +157,7 @@ jobs:
           ./scripts/assert-updater-signing-key.ps1 -SignaturePath (Join-Path $bundle "$installerName.sig") -SourceRoot (Get-Location).Path
           node scripts/verify-updater-signature.mjs (Join-Path $bundle $installerName) (Join-Path $bundle "$installerName.sig") scripts/updater-signing-key.json
           if ($LASTEXITCODE -ne 0) { throw 'The updater signature does not verify against the key that installed apps trust.' }
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: windows-installer
           path: |
@@ -165,7 +165,7 @@ jobs:
             src-tauri/target/release/bundle/nsis/PDF Workstation_${{ env.RELEASE_VERSION }}_x64-setup.exe.sig
             src-tauri/target/release/bundle/nsis/latest.json
           if-no-files-found: error
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: release-notes
           path: docs/release-notes.md
@@ -176,11 +176,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
           name: windows-installer
           path: release-assets
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
           name: release-notes
           path: release-notes

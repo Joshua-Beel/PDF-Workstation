@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Workflows: every `actions/*` step moved off Node 20 to Node 24 releases (checkout 7.0.1, upload-artifact 7.0.2, download-artifact 7.0.0, setup-node 7.1.0, setup-dotnet 6.0.0, cache 6.1.0), SHA-pinned; a test now allows only these pins (SM6).
 - Release scripts: the PDFium preparation and Step 1 draft verifier no longer assign PowerShell's automatic `$matches`; an AST test now covers both (SM6; scripts and test only).
 - Security: hostile-nesting test fixed (debug parse of 100 levels needs ~1.95 MiB on lopdf's rayon threads); it now runs on a private pool, a quarter of the 2 MiB production stack in release (SM7; test only).
 - Security: save-copy reference scrub confirmed bounded; lopdf 0.45 refuses objects nested over 100 levels, now pinned by a hostile-nesting regression test on a 512 KiB stack (SM7; test only).
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - In-app update check: a WebDriver session stop in the main flow now fails if the driver or any owned process did not exit; error-path cleanup stays best effort (SM6; review P3).
 - Docs: `docs/releases.md` in-app update section names the current receipt schema (v3) for the false publisher-UI claims (SM6; review P3).
 - In-app update check: the receipt also records the shell-window probe taken at the end of the relaunch wait (`updater.shellWindowAtRelaunch`) (SM6; review P3).
-- In-app update check: the two GitHub API release-metadata reads use the job's read-only token (API host only, no redirects, removed from the environment first); public downloads stay unauthenticated (SM6).

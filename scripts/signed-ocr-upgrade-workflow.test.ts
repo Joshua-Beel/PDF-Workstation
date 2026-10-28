@@ -7,7 +7,7 @@ import { resolve } from 'node:path';
 const approvedActionUses = [
   'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
   'actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131',
-  'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
+  'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9',
 ];
 
 function assertApprovedImmutableActionUses(workflow: string) {

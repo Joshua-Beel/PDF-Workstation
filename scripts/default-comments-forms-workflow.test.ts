@@ -37,9 +37,9 @@ describe('default comments and forms workflow', () => {
     expect(workflow.match(/contents:\s*write/g)).toHaveLength(1);
     expect(workflow.indexOf('contents: write')).toBeGreaterThan(workflow.indexOf('verify-installed-comments-forms:'));
     expect(workflow).not.toMatch(/actions:\s*write|id-token:\s*write|pull_request|push:|schedule:|PAT|GH_TOKEN/);
-    expect(workflow).toContain('actions/checkout@11d5960a326750d5838078e36cf38b85af677262');
-    expect(workflow).toContain('actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093');
-    expect(workflow).toContain('actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02');
+    expect(workflow).toContain('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1');
+    expect(workflow).toContain('actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131');
+    expect(workflow).toContain('actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9');
     expect(workflow).toContain('./scripts/verify-default-comments-forms.ps1');
     expect(workflow).toContain('default-comments-forms-verification.json');
     expect(workflow.match(/git diff --cached --quiet --/g)).toHaveLength(2);
