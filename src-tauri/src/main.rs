@@ -5,6 +5,7 @@ mod pdf_helper;
 mod open_path;
 mod open_limits;
 mod pdf_load;
+mod xref_resolve;
 mod editor;
 mod printing;
 mod print_commands;
