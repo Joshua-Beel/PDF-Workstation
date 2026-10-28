@@ -267,6 +267,22 @@ public sealed class InAppRecordingHandler : HttpMessageHandler {
     expect(launch).toContain('TotalTimeoutMilliseconds = 60000');
   });
 
+  it('runs 7-Zip and the standalone installers with only the minimal environment', () => {
+    const script = readFileSync(scriptPath, 'utf8');
+    expect(script).toContain("-TimeoutMilliseconds 90000 -Environment (Get-MinimalWindowsProcessEnvironment)");
+    expect(script).toContain("Invoke-BoundedProcess -Path $Path -Arguments @('/S') -TimeoutMilliseconds $script:UpdatePins.InstallerDeadlineMilliseconds -Environment (Get-MinimalWindowsProcessEnvironment)");
+    expect(script.match(/Invoke-BoundedProcess -Path /g)).toHaveLength(2);
+    const source = verifierHarness(['Invoke-BoundedProcess'], String.raw`
+      $cmd=Join-Path $env:SystemRoot 'System32\cmd.exe'
+      [Environment]::SetEnvironmentVariable('IN_APP_ENV_SENTINEL','present','Process')
+      Invoke-BoundedProcess -Path $cmd -Arguments @('/d','/c','if defined IN_APP_ENV_SENTINEL (exit 3) else (exit 0)') -TimeoutMilliseconds 20000 -Environment (Get-MinimalWindowsProcessEnvironment)
+      $message='';try{Invoke-BoundedProcess -Path $cmd -Arguments @('/d','/c','if defined IN_APP_ENV_SENTINEL (exit 3) else (exit 0)') -TimeoutMilliseconds 20000}catch{$message=$_.Exception.Message}
+      if($message-cne'Bounded process failed with exit code 3.'){throw 'The control run did not inherit the sentinel, so the minimal-environment check proves nothing.'}
+    `, '. ./scripts/installed-app-launch.ps1');
+    const result = spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', source], { encoding: 'utf8', timeout: 30_000 });
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
   it('waits a bounded time for updater setup processes to exit before the post-update session', () => {
     const script = readFileSync(scriptPath, 'utf8');
     const wait = script.indexOf('    Wait-UpdaterSetupExit -StartedAfter $retryStarted');

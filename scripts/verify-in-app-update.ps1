@@ -268,10 +268,14 @@ function Assert-ExactAsset {
 }
 
 function Invoke-BoundedProcess {
-    param([string]$Path,[string[]]$Arguments = @(),[int]$TimeoutMilliseconds = 180000,[switch]$ReturnProcess)
+    param([string]$Path,[string[]]$Arguments = @(),[int]$TimeoutMilliseconds = 180000,[switch]$ReturnProcess,[Collections.IDictionary]$Environment)
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $Path; $start.UseShellExecute = $false; $start.CreateNoWindow = $true
     $start.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+    if ($null -ne $Environment) {
+        $start.Environment.Clear()
+        foreach ($name in @($Environment.Keys)) { $start.Environment[[string]$name] = [string]$Environment[$name] }
+    }
     foreach ($argument in $Arguments) { $null = $start.ArgumentList.Add($argument) }
     $process = [Diagnostics.Process]::new(); $process.StartInfo = $start
     if (-not $process.Start()) { throw 'Bounded process did not start.' }
@@ -288,7 +292,7 @@ function Expand-TargetInstaller {
     [IO.Directory]::CreateDirectory($Destination) | Out-Null
     Assert-NoReparseAncestors -Path $Destination
     $sevenZip = (Get-Command 7z.exe -CommandType Application -ErrorAction Stop).Source
-    Invoke-BoundedProcess -Path $sevenZip -Arguments @('x','-y','-bd','-bb0',"-o$Destination",$Installer) -TimeoutMilliseconds 90000
+    Invoke-BoundedProcess -Path $sevenZip -Arguments @('x','-y','-bd','-bb0',"-o$Destination",$Installer) -TimeoutMilliseconds 90000 -Environment (Get-MinimalWindowsProcessEnvironment)
     $root = [IO.Path]::GetFullPath($Destination).TrimEnd('\') + '\'
     $files = @(Get-ChildItem -LiteralPath $Destination -Recurse -File -Force)
     if ($files.Count -lt 3 -or $files.Count -gt 512) { throw 'Extracted installer inventory is outside its bound.' }
@@ -531,7 +535,7 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]'),ps=d?[
 
 function Invoke-SilentInstaller {
     param([string]$Path)
-    Invoke-BoundedProcess -Path $Path -Arguments @('/S') -TimeoutMilliseconds $script:UpdatePins.InstallerDeadlineMilliseconds
+    Invoke-BoundedProcess -Path $Path -Arguments @('/S') -TimeoutMilliseconds $script:UpdatePins.InstallerDeadlineMilliseconds -Environment (Get-MinimalWindowsProcessEnvironment)
 }
 
 function Assert-HostedPublisherUiEvidence {
