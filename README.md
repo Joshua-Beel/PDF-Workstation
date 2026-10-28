@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Debug builds only: `SMACROBAT_TEST_DATA_DIR=<absolute folder>` puts recovery records, the update-attempt note and the WebView2 profile under that folder instead of the user profile; compiled out of release (SM5).
 - OCR working-directory test accepts the hosted runner's short 8.3 temp path by comparing canonical parents exactly (SM0; test only).
 - Dependency notices inventory refreshed for the new test-only `rayon` dev-dependency; notice text unchanged (SM0).
 - OCR hardening follow-up: the stale OCR work-directory sweep runs once per process, and a test now proves it deletes a matching directory older than 24 h while sparing fresh and foreign-named ones (SM4; no version change).
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - In-app update record schema 4: API metadata reads recorded as authenticated, public latest.json as unauthenticated; setup exit claimed only if a setup process was seen; JWT-shaped tokens blocked from the record (SM6).
 - In-app update check: accepts GitHub's longer token format (`.`, `-`), anchored so a trailing newline is rejected (SM0; script and test only).
 - In-app update check: tauri-driver start moved inside the session try, so a start failure is cleaned up and reported as itself (SM6; review P3).
-- In-app update check: 7-Zip and the standalone silent installers run with the shared minimal environment, as tauri-driver already does (SM6; review P3).

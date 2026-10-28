@@ -37,6 +37,7 @@ mod searchable_ocr;
 mod searchable_pdf;
 #[cfg(windows)]
 mod searchable_ocr_job;
+mod data_dirs;
 mod update_attempt;
 mod update_commands;
 #[cfg(windows)]
@@ -69,7 +70,7 @@ use tauri::{Manager, State};
 static ALLOCATOR: child_job::ModeSwitchAllocator = child_job::ModeSwitchAllocator;
 
 fn update_attempt_root(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    app.path().app_data_dir().map_err(|error| format!("The update recovery folder is unavailable: {error}"))
+    data_dirs::app_data_dir(app).map_err(|error| format!("The update recovery folder is unavailable: {error}"))
 }
 
 #[tauri::command]
@@ -358,9 +359,17 @@ fn main() {
     if pdf_helper::helper_mode_requested(std::env::args_os()) {
         pdf_helper::run_helper_mode();
     }
-    tauri::Builder::default().plugin(tauri_plugin_updater::Builder::new().build()).manage(update_commands::PendingUpdate::default()).setup(|app| {
+    #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+    let mut context = tauri::generate_context!();
+    #[cfg(debug_assertions)]
+    let test_dirs = data_dirs::test_override().unwrap_or_else(|error| { eprintln!("{error}"); std::process::exit(2) });
+    #[cfg(debug_assertions)]
+    if test_dirs.is_some() { data_dirs::defer_configured_windows(&mut context); }
+    tauri::Builder::default().plugin(tauri_plugin_updater::Builder::new().build()).manage(update_commands::PendingUpdate::default()).setup(move |app| {
+        #[cfg(debug_assertions)]
+        if let Some(dirs) = &test_dirs { data_dirs::create_windows(app, dirs)?; }
         let library = app.path().resource_dir()?.join("resources/pdfium/bin/pdfium.dll");
-        let recovery_root = app.path().app_data_dir()?.join("recovery");
+        let recovery_root = data_dirs::app_data_dir(app.handle())?.join("recovery");
         std::fs::create_dir_all(&recovery_root)?;
         let service = PdfService::start_with_recovery(library, recovery_root);
         #[cfg(windows)]
@@ -393,5 +402,5 @@ fn main() {
         app.manage(recovery_commands::RecoveryCommands::default());
         Ok(())
     }).invoke_handler(tauri::generate_handler![recovery_commands::checkpoint_recovery, recovery_commands::restore_recovery, recovery_commands::keep_recovered_edits, recovery_commands::open_original, recovery_commands::discard_recovery, read_update_attempt, write_update_attempt, clear_update_attempt, update_commands::check_for_update, update_commands::download_update, update_commands::install_update, update_commands::release_update, document_form_fields, fill_form_copy, open_document, reopen_document, open_example, render_page, export_page_image, retry_pdf_engine, close_document, edit_pages, crop_page, crop_pages, reset_crops, create_pdf_from_image, choose_image_pdf_sources, create_pdf_from_images, cancel_image_pdf_sources, inspect_image_replacement_target, replace_pdf_image_copy, cancel_image_replacement, inspect_text_replacement_target, replace_pdf_text_copy, cancel_text_replacement, create_comment, update_comment, delete_comment, document_comments, document_annotations, create_highlight, create_text_highlight, update_highlight, delete_highlight, save_copy, redact_document, split_document, combine_documents, insert_pages_copy, replace_pages_copy, page_text, page_text_geometry, document_bookmarks, document_page_labels, document_properties, dependency_notices, unlock_document, cancel_password_request, ocr_capability, recognize_page_ocr, create_searchable_ocr_copy, cancel_page_ocr, print_commands::print_document, print_commands::cancel_print])
-      .run(tauri::generate_context!()).expect("Desktop application failed");
+      .run(context).expect("Desktop application failed");
 }

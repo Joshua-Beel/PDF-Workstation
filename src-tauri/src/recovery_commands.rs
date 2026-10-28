@@ -61,7 +61,7 @@ fn recovery_root(app_data: &Path) -> Result<PathBuf, String> {
 
 #[tauri::command]
 pub(crate) async fn checkpoint_recovery(app: tauri::AppHandle, service: State<'_, crate::service::PdfService>, id: u64, revision: u64, current_page: u32) -> Result<RecoveryCheckpointReceipt, MutationCommandError> {
-    let app_data = app.path().app_data_dir().map_err(|_| MutationCommandError::from("The recovery folder is unavailable.".to_owned()))?;
+    let app_data = crate::data_dirs::app_data_dir(&app).map_err(|_| MutationCommandError::from("The recovery folder is unavailable.".to_owned()))?;
     let root = recovery_root(&app_data).map_err(MutationCommandError::from)?;
     service.checkpoint_recovery(root, id, revision, current_page).await.map_err(MutationCommandError::from)?;
     Ok(RecoveryCheckpointReceipt { document_id: id, revision, current_page })
@@ -70,7 +70,7 @@ pub(crate) async fn checkpoint_recovery(app: tauri::AppHandle, service: State<'_
 #[tauri::command]
 pub(crate) async fn restore_recovery(app: tauri::AppHandle, service: State<'_, crate::service::PdfService>, commands: State<'_, RecoveryCommands>) -> Result<Option<RecoveryRestoreResult>, String> {
     let _attempt = commands.begin_restore()?;
-    let root = recovery_root(&app.path().app_data_dir().map_err(|_| "The recovery folder is unavailable.")?)?;
+    let root = recovery_root(&crate::data_dirs::app_data_dir(&app).map_err(|_| "The recovery folder is unavailable.")?)?;
     let window = app.get_webview_window("main").ok_or("Application window is unavailable")?;
     let path = tauri::async_runtime::spawn_blocking(move || rfd::FileDialog::new().set_parent(&window).set_title("Restore unsaved PDF edits").add_filter("PDF documents", &["pdf"]).pick_file()).await.map_err(|error| error.to_string())?;
     let Some(path) = path else { return Ok(None); };
