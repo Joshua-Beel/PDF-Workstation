@@ -210,11 +210,14 @@ fn refuse_aliased_items(document: &Document, items: &HashSet<ObjectId>, root_id:
     let catalog = document.trailer.get(b"Root").ok().and_then(|root| root.as_reference().ok());
     let mut visited: HashSet<ObjectId> = HashSet::new();
     let mut pending: Vec<&Object> = document.trailer.iter().map(|(_, value)| value).collect();
+    for id in items {
+        if let Some(Object::Dictionary(dict)) = document.objects.get(id) { pending.extend(dict.iter().filter(|(key, _)| !LINKS.contains(&key.as_slice())).map(|(_, value)| value)); }
+    }
     while let Some(object) = pending.pop() {
         match object {
             Object::Reference(id) => {
-                if items.contains(id) { return Err(refusal()); }
-                if Some(*id) == root_id || !visited.insert(*id) { continue; }
+                if items.contains(id) || Some(*id) == root_id { return Err(refusal()); }
+                if !visited.insert(*id) { continue; }
                 let Some(target) = document.objects.get(id) else { continue };
                 match target {
                     Object::Dictionary(dict) if Some(*id) == catalog => pending.extend(dict.iter().filter(|(key, _)| key.as_slice() != b"Outlines").map(|(_, value)| value)),
@@ -225,11 +228,6 @@ fn refuse_aliased_items(document: &Document, items: &HashSet<ObjectId>, root_id:
             Object::Dictionary(dict) => pending.extend(dict.iter().map(|(_, value)| value)),
             Object::Stream(stream) => pending.extend(stream.dict.iter().map(|(_, value)| value)),
             _ => {}
-        }
-    }
-    for id in items {
-        if let Some(Object::Dictionary(dict)) = document.objects.get(id) {
-            if dict.iter().any(|(key, value)| !LINKS.contains(&key.as_slice()) && matches!(value, Object::Reference(target) if items.contains(target))) { return Err(refusal()); }
         }
     }
     Ok(())

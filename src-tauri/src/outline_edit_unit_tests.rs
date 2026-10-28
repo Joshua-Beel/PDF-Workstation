@@ -461,3 +461,44 @@ fn a_direct_outline_root_does_not_trip_the_alias_check() {
     document.catalog_mut().unwrap().set("Outlines", Object::Dictionary(root));
     assert_eq!(read(&document).unwrap().len(), 7);
 }
+
+#[test]
+fn an_outline_root_or_item_reachable_through_other_keys_is_refused() {
+    let refused = |mutate: &dyn Fn(&mut Document, ObjectId, ObjectId)| {
+        let mut document = sample(); with_outline(&mut document, &tree());
+        let root = document.catalog().unwrap().get(b"Outlines").unwrap().as_reference().unwrap();
+        let item = find(&document, "C");
+        mutate(&mut document, root, item);
+        assert!(read(&document).unwrap_err().contains("used by something else"));
+    };
+    refused(&|d, root, _| { d.catalog_mut().unwrap().set("AcroForm", Object::Reference(root)); });
+    refused(&|d, root, _| { d.trailer.set("Info", Object::Reference(root)); });
+    refused(&|d, _, item| {
+        let action = d.new_object_id();
+        d.objects.insert(action, Object::Dictionary(dictionary! { "S" => "JavaScript", "Next" => Object::Reference(item) }));
+        let a = find(d, "A"); d.get_dictionary_mut(a).unwrap().set("A", Object::Reference(action));
+    });
+    refused(&|d, _, item| { let a = find(d, "A"); d.get_dictionary_mut(a).unwrap().set("SE", Object::Reference(item)); });
+}
+
+#[test]
+fn link_annotations_and_named_destinations_pointing_at_pages_do_not_block_editing() {
+    let mut document = sample(); with_outline(&mut document, &tree());
+    let page = document.get_pages().values().next().copied().unwrap();
+    let annotation = document.new_object_id();
+    document.objects.insert(annotation, Object::Dictionary(dictionary! { "Type" => "Annot", "Subtype" => "Link", "Rect" => vec![0.into(), 0.into(), 10.into(), 10.into()], "Dest" => vec![Object::Reference(page), Object::Name(b"Fit".to_vec())] }));
+    document.get_dictionary_mut(page).unwrap().set("Annots", vec![Object::Reference(annotation)]);
+    let names = document.new_object_id();
+    document.objects.insert(names, Object::Dictionary(dictionary! { "Names" => vec![Object::string_literal("named"), Object::Array(vec![Object::Reference(page), Object::Name(b"Fit".to_vec())])] }));
+    let dests = document.new_object_id();
+    document.objects.insert(dests, Object::Dictionary(dictionary! { "Dests" => names }));
+    document.catalog_mut().unwrap().set("Names", Object::Reference(dests));
+    let mut edits = OutlineEdits::default(); edits.load(read(&document));
+    assert!(edits.view(&plan(6)).editable);
+    let c = uid(&edits, "C");
+    op(&mut edits, BookmarkOp::Rename { uid: c, title: "Closing".into() }).unwrap();
+    op(&mut edits, BookmarkOp::Add { page: 0, title: "Front".into(), after: None }).unwrap();
+    write(&mut document, edits.pending().unwrap(), &document_pages).unwrap();
+    verify(&document);
+    assert_eq!(read(&document).unwrap().len(), 8);
+}
