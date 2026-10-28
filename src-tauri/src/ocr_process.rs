@@ -319,26 +319,33 @@ impl OcrProcessRunner {
     fn recognize_inner_admitted(
         &self,
         input: &[u8],
-        options: RunOptions<'_>,
+        mut options: RunOptions<'_>,
         output_profile: OcrOutputProfile,
         operation: &OcrOperation,
     ) -> Result<OcrProcessOutput, OcrProcessError> {
         let cancellation = &operation.cancellation;
         cancellation.ensure_runnable()?;
         validate_p6(input)?;
-        let prepared = preprocess_p6(input, options.preprocess, &|| cancellation.is_cancelled()).map_err(|error| {
-            if cancellation.is_cancelled() { OcrProcessError::Cancelled } else { OcrProcessError::System(error) }
-        })?;
+        let started = std::time::Instant::now();
+        // Clean-up is an improvement, not a requirement: if it cannot run (for
+        // example memory is short), the page is recognised as rendered.
+        let (recognition, skew) = match preprocess_p6(input, options.preprocess, &|| cancellation.is_cancelled()) {
+            Ok(prepared) => (std::borrow::Cow::Owned(prepared.p6), prepared.skew),
+            Err(_) if cancellation.is_cancelled() => return Err(OcrProcessError::Cancelled),
+            Err(_) => (std::borrow::Cow::Borrowed(input), Skew::NONE),
+        };
         cancellation.ensure_runnable()?;
+        options.timeout = options.timeout.checked_sub(started.elapsed()).filter(|left| !left.is_zero())
+            .ok_or(OcrProcessError::TimedOut)?;
         let mut output = run_child(
             &self.engine_path,
             &self.tessdata_dir,
-            &prepared.p6,
+            &recognition,
             cancellation,
             options,
             output_profile,
         )?;
-        output.skew = prepared.skew;
+        output.skew = skew;
         Ok(output)
     }
 }

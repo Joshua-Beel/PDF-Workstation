@@ -81,9 +81,10 @@ impl SearchableOcrCoordinator {
             finish_try!(cancellation.ensure_runnable());
             finish_try!(self.service.validate_ocr_result(request, operation.worker_hold()).await
                 .map_err(OcrProcessError::Document));
-            let mut parsed = finish_try!(parse_tesseract_tsv(output.text.as_bytes(), raster.width, raster.height)
+            let (recognized_width, recognized_height) = output.skew.recognition_size(raster.width, raster.height);
+            let mut parsed = finish_try!(parse_tesseract_tsv(output.text.as_bytes(), recognized_width, recognized_height)
                 .map_err(OcrProcessError::InvalidInput));
-            map_words_to_page(&mut parsed, output.skew);
+            map_words_to_page(&mut parsed, output.skew, raster.width, raster.height);
             let displayed = finish_try!(map_words_to_display(&parsed, f64::from(raster.page_width), f64::from(raster.page_height))
                 .map_err(OcrProcessError::InvalidInput));
             let rgb = finish_try!(p6_rgb(&raster.p6, raster.width, raster.height)

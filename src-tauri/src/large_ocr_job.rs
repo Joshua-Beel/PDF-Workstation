@@ -584,8 +584,12 @@ fn process_page(page: u32, source: &dyn PageSource, recognizer: &dyn PageRecogni
         if cancellation.is_cancelled() { return WorkResult::Cancelled; }
         match recognizer.recognize_tsv(&raster.p6, cancellation) {
             Ok((tsv, skew)) => {
-                let mapped = parse_tesseract_tsv(tsv.as_bytes(), raster.width, raster.height)
-                    .and_then(|mut parsed| { map_words_to_page(&mut parsed, skew); map_words_to_display(&parsed, f64::from(raster.page_width), f64::from(raster.page_height)) });
+                let (recognized_width, recognized_height) = skew.recognition_size(raster.width, raster.height);
+                let mapped = parse_tesseract_tsv(tsv.as_bytes(), recognized_width, recognized_height)
+                    .and_then(|mut parsed| {
+                        map_words_to_page(&mut parsed, skew, raster.width, raster.height);
+                        map_words_to_display(&parsed, f64::from(raster.page_width), f64::from(raster.page_height))
+                    });
                 match mapped {
                     Ok(display) => {
                         words = Some(display.into_iter().map(|word| SearchableWord { x: word.x, y: word.y, width: word.width, height: word.height, text: word.text }).collect::<Vec<_>>());

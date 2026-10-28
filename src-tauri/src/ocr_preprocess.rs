@@ -25,30 +25,71 @@ impl PreprocessOptions {
     pub(crate) const NONE: Self = Self { flatten_background: false, deskew: false };
 }
 
-/// The rotation applied to the recognition image. A point `q` in the
-/// recognition image came from `R(radians) * (q - centre) + centre` in the
-/// rendered page, so recognised boxes map back to page pixels exactly.
+/// Below this estimated paper level a region is a photo, a dark border or a
+/// negative, and stretching it to white would only amplify noise.
+const DARK_LEVEL_FLOOR: f32 = 64.0;
+
+/// The rotation applied to the recognition image. The rotated page is drawn
+/// on a canvas large enough to hold all of it, so no corner is cut off. A
+/// point `q` on that canvas came from `R(radians) * (q - canvas centre) +
+/// page centre` in the rendered page, so recognised boxes map back exactly.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Skew {
     radians: f64,
-    centre_x: f64,
-    centre_y: f64,
+    sin: f64,
+    cos: f64,
+    page_centre: (f64, f64),
+    canvas_centre: (f64, f64),
+    canvas: Option<(u32, u32)>,
 }
 
 impl Skew {
-    pub(crate) const NONE: Self = Self { radians: 0.0, centre_x: 0.0, centre_y: 0.0 };
+    pub(crate) const NONE: Self = Self {
+        radians: 0.0, sin: 0.0, cos: 1.0, page_centre: (0.0, 0.0), canvas_centre: (0.0, 0.0), canvas: None,
+    };
 
-    fn for_image(degrees: f64, width: usize, height: usize) -> Self {
-        Self { radians: degrees.to_radians(), centre_x: width as f64 / 2.0, centre_y: height as f64 / 2.0 }
+    /// `None` when the padded canvas would not fit the engine's input limits.
+    fn for_page(degrees: f64, width: usize, height: usize) -> Option<Self> {
+        let radians = degrees.to_radians();
+        let (sin, cos) = radians.sin_cos();
+        let (w, h) = (width as f64, height as f64);
+        let canvas_width = (w * cos + h * sin.abs()).ceil() as u64;
+        let canvas_height = (w * sin.abs() + h * cos).ceil() as u64;
+        let header = format!("P6\n{canvas_width} {canvas_height}\n255\n").len() as u64;
+        let edge = crate::ocr_process::OCR_MAX_EDGE as u64;
+        if canvas_width > edge || canvas_height > edge
+            || header + canvas_width * canvas_height * 3 > crate::ocr_process::OCR_INPUT_LIMIT as u64
+        {
+            return None;
+        }
+        Some(Self {
+            radians, sin, cos,
+            page_centre: (w / 2.0, h / 2.0),
+            canvas_centre: (canvas_width as f64 / 2.0, canvas_height as f64 / 2.0),
+            canvas: Some((canvas_width as u32, canvas_height as u32)),
+        })
     }
 
-    pub(crate) fn is_identity(&self) -> bool { self.radians == 0.0 }
+    /// A rotation about the centre of an unpadded canvas, for drawing tilted
+    /// test pages.
+    #[cfg(test)]
+    fn same_canvas(degrees: f64, width: usize, height: usize) -> Self {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        let centre = (width as f64 / 2.0, height as f64 / 2.0);
+        Self { radians: degrees.to_radians(), sin, cos, page_centre: centre, canvas_centre: centre, canvas: Some((width as u32, height as u32)) }
+    }
+
+    pub(crate) fn is_identity(&self) -> bool { self.canvas.is_none() }
     pub(crate) fn degrees(&self) -> f64 { self.radians.to_degrees() }
 
+    /// The size of the image the engine saw, for parsing its TSV.
+    pub(crate) fn recognition_size(&self, raster_width: u32, raster_height: u32) -> (u32, u32) {
+        self.canvas.unwrap_or((raster_width, raster_height))
+    }
+
     pub(crate) fn to_page(&self, x: f64, y: f64) -> (f64, f64) {
-        let (sin, cos) = self.radians.sin_cos();
-        let (dx, dy) = (x - self.centre_x, y - self.centre_y);
-        (cos * dx - sin * dy + self.centre_x, sin * dx + cos * dy + self.centre_y)
+        let (dx, dy) = (x - self.canvas_centre.0, y - self.canvas_centre.1);
+        (self.cos * dx - self.sin * dy + self.page_centre.0, self.sin * dx + self.cos * dy + self.page_centre.1)
     }
 
     /// The page-pixel bounding box of a recognition-image rectangle, clamped
@@ -83,7 +124,8 @@ fn check(is_cancelled: &dyn Fn() -> bool, row: usize) -> Result<(), String> {
 }
 
 /// Grayscale, background flattening and (when the page is skewed by 1 to 5
-/// degrees) deskew. Returns a P6 of the same size and the rotation it applied.
+/// degrees) deskew onto a padded canvas. Returns the recognition P6 and the
+/// rotation it applied; without a rotation the P6 has the page's size.
 pub(crate) fn preprocess_p6(p6: &[u8], options: PreprocessOptions, is_cancelled: &dyn Fn() -> bool) -> Result<Prepared, String> {
     let (width, height, rgb) = split_p6(p6)?;
     let mut gray = to_gray(width, height, rgb, is_cancelled)?;
@@ -92,19 +134,24 @@ pub(crate) fn preprocess_p6(p6: &[u8], options: PreprocessOptions, is_cancelled:
     if options.deskew {
         let degrees = estimate_skew_degrees(&gray, is_cancelled)?;
         if degrees.abs() >= MIN_DESKEW_DEGREES {
-            skew = Skew::for_image(degrees, width, height);
-            gray = rotate(&gray, skew, is_cancelled)?;
+            if let Some(rotation) = Skew::for_page(degrees, width, height) {
+                skew = rotation;
+                gray = rotate(&gray, skew, is_cancelled)?;
+            }
         }
     }
     Ok(Prepared { p6: to_p6(&gray)?, skew })
 }
 
-/// Moves recognised words from the deskewed recognition image back onto the
-/// rendered page. A word keeps its own bounding box; its line band becomes the
-/// part of its line under the word, so a tilted line's words stay on it.
-pub(crate) fn map_words_to_page(page: &mut ParsedTsvPage, skew: Skew) {
+/// Moves words recognised on the deskewed canvas (parsed at
+/// `skew.recognition_size`) back onto the rendered page of `width` x `height`
+/// pixels. A word keeps its own bounding box; its line band becomes the part
+/// of its line under the word, so a tilted line's words stay on it. Boxes are
+/// clamped to the page.
+pub(crate) fn map_words_to_page(page: &mut ParsedTsvPage, skew: Skew, width: u32, height: u32) {
     if skew.is_identity() { return; }
-    let (width, height) = (page.raster_width, page.raster_height);
+    page.raster_width = width;
+    page.raster_height = height;
     for word in &mut page.words {
         let right = word.left + word.width;
         let (l, t, r, b) = skew.box_to_page(word.left, word.top, right, word.top + word.height, width, height);
@@ -213,7 +260,8 @@ fn flatten_background(gray: &mut Gray, is_cancelled: &dyn Fn() -> bool) -> Resul
             let (x0, tx) = (fx as usize, fx.fract());
             let top = level_at(x0, y0) * (1.0 - tx) + level_at(x0 + 1, y0) * tx;
             let bottom = level_at(x0, y0 + 1) * (1.0 - tx) + level_at(x0 + 1, y0 + 1) * tx;
-            let level = (top * (1.0 - ty) + bottom * ty).max(1.0);
+            let level = top * (1.0 - ty) + bottom * ty;
+            if level < DARK_LEVEL_FLOOR { continue; }
             let value = &mut gray.pixels[y * gray.width + x];
             *value = (f32::from(*value) * 255.0 / level).round().min(255.0) as u8;
         }
@@ -286,19 +334,23 @@ fn estimate_skew_degrees(gray: &Gray, is_cancelled: &dyn Fn() -> bool) -> Result
     let coarse = search(-MAX_DESKEW_DEGREES, MAX_DESKEW_DEGREES, 0.25)?;
     if coarse.abs() >= MAX_DESKEW_DEGREES { return Ok(0.0); }
     let fine = search(coarse - 0.25, coarse + 0.25, 0.05)?;
-    Ok(fine.clamp(-MAX_DESKEW_DEGREES, MAX_DESKEW_DEGREES))
+    // A fine angle that runs into the limit is as unreliable as a coarse one.
+    if fine.abs() > MAX_DESKEW_DEGREES - 0.125 { return Ok(0.0); }
+    Ok(fine)
 }
 
-/// Bilinear resample through `skew`; areas from outside the page are white.
+/// Bilinear resample through `skew` onto its canvas; areas from outside the
+/// page are white.
 fn rotate(gray: &Gray, skew: Skew, is_cancelled: &dyn Fn() -> bool) -> Result<Gray, String> {
     let (width, height) = (gray.width, gray.height);
-    let mut out = alloc(width * height, 255)?;
+    let (canvas_width, canvas_height) = skew.canvas.map_or((width, height), |(w, h)| (w as usize, h as usize));
+    let mut out = alloc(canvas_width * canvas_height, 255)?;
     let sample = |x: isize, y: isize| -> f64 {
         if x < 0 || y < 0 || x as usize >= width || y as usize >= height { 255.0 } else { f64::from(gray.pixels[y as usize * width + x as usize]) }
     };
-    for y in 0..height {
+    for y in 0..canvas_height {
         check(is_cancelled, y)?;
-        for x in 0..width {
+        for x in 0..canvas_width {
             let (sx, sy) = skew.to_page(x as f64 + 0.5, y as f64 + 0.5);
             let (sx, sy) = (sx - 0.5, sy - 0.5);
             let (fx, fy) = (sx.floor(), sy.floor());
@@ -306,10 +358,10 @@ fn rotate(gray: &Gray, skew: Skew, is_cancelled: &dyn Fn() -> bool) -> Result<Gr
             let (x0, y0) = (fx as isize, fy as isize);
             let top = sample(x0, y0) * (1.0 - tx) + sample(x0 + 1, y0) * tx;
             let bottom = sample(x0, y0 + 1) * (1.0 - tx) + sample(x0 + 1, y0 + 1) * tx;
-            out[y * width + x] = (top * (1.0 - ty) + bottom * ty).round().clamp(0.0, 255.0) as u8;
+            out[y * canvas_width + x] = (top * (1.0 - ty) + bottom * ty).round().clamp(0.0, 255.0) as u8;
         }
     }
-    Ok(Gray { width, height, pixels: out })
+    Ok(Gray { width: canvas_width, height: canvas_height, pixels: out })
 }
 
 #[cfg(test)]
@@ -332,7 +384,7 @@ mod tests {
 
     /// Text-like rows of dashes, rotated by `degrees` about the centre.
     fn skewed_lines(width: usize, height: usize, degrees: f64) -> Vec<u8> {
-        let skew = Skew::for_image(-degrees, width, height);
+        let skew = Skew::same_canvas(-degrees, width, height);
         p6(width, height, |x, y| {
             let (sx, sy) = skew.to_page(x as f64 + 0.5, y as f64 + 0.5);
             let inside = sx > 60.0 && sx < width as f64 - 60.0 && sy > 60.0 && sy < height as f64 - 60.0;
@@ -357,18 +409,77 @@ mod tests {
     }
 
     #[test]
-    fn deskewed_rows_are_level_and_the_page_size_is_unchanged() {
+    fn deskewed_rows_are_level_on_a_canvas_that_holds_the_whole_page() {
         let input = skewed_lines(900, 1200, 3.0);
         let prepared = preprocess_p6(&input, PreprocessOptions::PRODUCTION, &never).unwrap();
         assert!((prepared.skew.degrees() - 3.0).abs() <= 0.1, "{}", prepared.skew.degrees());
         let (width, height, pixels) = gray_of(&prepared.p6);
-        assert_eq!((width, height), (900, 1200));
-        let row_ink = |pixels: &[u8]| -> f64 {
+        assert_eq!((width as u32, height as u32), prepared.skew.recognition_size(900, 1200));
+        assert!(width > 900 && height > 1200);
+        let row_ink = |pixels: &[u8], width: usize| -> f64 {
             let rows = pixels.chunks_exact(width).map(|row| row.iter().filter(|v| **v < 128).count() as f64).collect::<Vec<_>>();
             rows.iter().map(|v| v * v).sum::<f64>()
         };
         let (_, _, before) = gray_of(&input);
-        assert!(row_ink(&pixels) > 1.5 * row_ink(&before), "row profile should sharpen after deskew");
+        assert!(row_ink(&pixels, width) > 1.5 * row_ink(&before, 900), "row profile should sharpen after deskew");
+    }
+
+    /// Stamps and page numbers sit in the corners; rotating onto a page-sized
+    /// canvas used to cut them off.
+    #[test]
+    fn deskew_keeps_marks_in_every_corner() {
+        let (width, height) = (900, 1200);
+        let tilt = Skew::same_canvas(-3.0, width, height);
+        let input = p6(width, height, |x, y| {
+            let corner = (x < 24 || x >= width - 24) && (y < 24 || y >= height - 24);
+            let (sx, sy) = tilt.to_page(x as f64 + 0.5, y as f64 + 0.5);
+            let text = sx > 60.0 && sx < width as f64 - 60.0 && sy > 60.0 && sy < height as f64 - 60.0
+                && (sy as usize % 36) < 12 && (sx as usize % 22) < 16;
+            if corner || text { 20 } else { 235 }
+        });
+        let prepared = preprocess_p6(&input, PreprocessOptions::PRODUCTION, &never).unwrap();
+        assert!((prepared.skew.degrees() - 3.0).abs() <= 0.1, "{}", prepared.skew.degrees());
+        let (canvas_width, canvas_height, pixels) = gray_of(&prepared.p6);
+        for (cx, cy) in [(12.0, 12.0), (width as f64 - 12.0, 12.0), (12.0, height as f64 - 12.0), (width as f64 - 12.0, height as f64 - 12.0)] {
+            // Find the canvas pixel that samples this page point.
+            let found = (0..canvas_height).flat_map(|y| (0..canvas_width).map(move |x| (x, y))).find(|(x, y)| {
+                let (px, py) = prepared.skew.to_page(*x as f64 + 0.5, *y as f64 + 0.5);
+                (px - cx).abs() < 0.75 && (py - cy).abs() < 0.75
+            });
+            let (x, y) = found.unwrap_or_else(|| panic!("corner ({cx}, {cy}) has no place on the canvas"));
+            assert!(pixels[y * canvas_width + x] < 128, "corner ({cx}, {cy}) mark lost");
+        }
+    }
+
+    /// A photo or black scan border must not be stretched into speckle.
+    #[test]
+    fn flattening_leaves_dark_regions_dark() {
+        let input = p6(600, 400, |x, y| {
+            if x < 300 { (15 + (x * 7 + y * 13) % 20) as u8 } else if (100..110).contains(&y) && x % 20 < 12 { 40 } else { 220 }
+        });
+        let prepared = preprocess_p6(&input, PreprocessOptions { flatten_background: true, deskew: false }, &never).unwrap();
+        let (width, _, pixels) = gray_of(&prepared.p6);
+        let dark = (0..400).flat_map(|y| (0..200).map(move |x| (x, y))).map(|(x, y)| u32::from(pixels[y * width + x])).collect::<Vec<_>>();
+        let mean = dark.iter().sum::<u32>() / dark.len() as u32;
+        let max = *dark.iter().max().unwrap();
+        assert!(mean < 40 && max < 60, "dark region mean {mean} max {max}");
+        assert!(pixels[300 * width + 500] >= 245, "paper still flattened");
+    }
+
+    #[test]
+    fn degenerate_pages_preprocess_without_failing() {
+        for (width, height) in [(1, 1), (1, 700), (700, 1), (2, 2)] {
+            for fill in [0_u8, 255] {
+                let input = p6(width, height, |_, _| fill);
+                let prepared = preprocess_p6(&input, PreprocessOptions::PRODUCTION, &never).unwrap();
+                assert!(prepared.skew.is_identity(), "{width}x{height} {fill}");
+                assert_eq!(gray_of(&prepared.p6).0, width);
+            }
+        }
+        let black = preprocess_p6(&p6(400, 300, |_, _| 0), PreprocessOptions::PRODUCTION, &never).unwrap();
+        assert!(gray_of(&black.p6).2.iter().all(|value| *value == 0), "an all-black page stays black");
+        let white = preprocess_p6(&p6(400, 300, |_, _| 255), PreprocessOptions::PRODUCTION, &never).unwrap();
+        assert!(gray_of(&white.p6).2.iter().all(|value| *value == 255));
     }
 
     #[test]
@@ -413,7 +524,7 @@ mod tests {
     fn recognised_geometry_maps_back_onto_the_page() {
         let (width, height) = (1000_usize, 1300_usize);
         let block = (620.0, 300.0, 820.0, 330.0);
-        let tilt = Skew::for_image(-2.5, width, height);
+        let tilt = Skew::same_canvas(-2.5, width, height);
         let input = p6(width, height, |x, y| {
             let (sx, sy) = tilt.to_page(x as f64 + 0.5, y as f64 + 0.5);
             let clear = (250.0..380.0).contains(&sy);
@@ -421,15 +532,6 @@ mod tests {
             let target = sx >= block.0 && sx < block.2 && sy >= block.1 && sy < block.3;
             if target || text_row { 0 } else { 255 }
         });
-        let bounds = |pixels: &[u8], window: (usize, usize, usize, usize)| {
-            let mut found = (usize::MAX, usize::MAX, 0, 0);
-            for y in window.1..window.3 {
-                for x in window.0..window.2 {
-                    if pixels[y * width + x] < 128 { found = (found.0.min(x), found.1.min(y), found.2.max(x + 1), found.3.max(y + 1)); }
-                }
-            }
-            found
-        };
         let mut drawn = (usize::MAX, usize::MAX, 0, 0);
         for y in 0..height {
             for x in 0..width {
@@ -441,8 +543,19 @@ mod tests {
         }
         let prepared = preprocess_p6(&input, PreprocessOptions::PRODUCTION, &never).unwrap();
         assert!((prepared.skew.degrees() - 2.5).abs() <= 0.1, "{}", prepared.skew.degrees());
-        let (_, _, recognition) = gray_of(&prepared.p6);
-        let level = bounds(&recognition, (560, 260, 900, 370));
+        let (canvas_width, canvas_height, recognition) = gray_of(&prepared.p6);
+        assert!(canvas_width > width && canvas_height > height, "rotated onto a padded canvas");
+        let (pad_x, pad_y) = ((canvas_width - width) / 2, (canvas_height - height) / 2);
+        let bounds = |pixels: &[u8], window: (usize, usize, usize, usize)| {
+            let mut found = (usize::MAX, usize::MAX, 0, 0);
+            for y in window.1..window.3 {
+                for x in window.0..window.2 {
+                    if pixels[y * canvas_width + x] < 128 { found = (found.0.min(x), found.1.min(y), found.2.max(x + 1), found.3.max(y + 1)); }
+                }
+            }
+            found
+        };
+        let level = bounds(&recognition, (560 + pad_x, 260 + pad_y, 900 + pad_x, 370 + pad_y));
         let (level_width, level_height) = (level.2 - level.0, level.3 - level.1);
         assert!((196..=204).contains(&level_width) && (28..=32).contains(&level_height), "level box {level:?}");
         let mapped = prepared.skew.box_to_page(level.0 as u32, level.1 as u32, level.2 as u32, level.3 as u32, width as u32, height as u32);
@@ -453,16 +566,19 @@ mod tests {
 
     #[test]
     fn mapped_words_stay_inside_the_raster_and_their_line_band() {
-        let tsv = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n\
-1\t1\t0\t0\t0\t0\t0\t0\t1000\t1300\t-1\t\n\
+        let tsv_for = |(width, height): (u32, u32)| format!("level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n\
+1\t1\t0\t0\t0\t0\t0\t0\t{width}\t{height}\t-1\t\n\
 2\t1\t1\t0\t0\t0\t0\t100\t1000\t40\t-1\t\n\
 3\t1\t1\t1\t0\t0\t0\t100\t1000\t40\t-1\t\n\
 4\t1\t1\t1\t1\t0\t0\t100\t1000\t40\t-1\t\n\
 5\t1\t1\t1\t1\t1\t0\t110\t120\t25\t95\tLeft\n\
-5\t1\t1\t1\t1\t2\t880\t105\t120\t30\t95\tRight\n";
-        let mut parsed = parse_tesseract_tsv(tsv.as_bytes(), 1000, 1300).unwrap();
-        let skew = Skew::for_image(3.0, 1000, 1300);
-        map_words_to_page(&mut parsed, skew);
+5\t1\t1\t1\t1\t2\t880\t105\t120\t30\t95\tRight\n");
+        let skew = Skew::for_page(3.0, 1000, 1300).unwrap();
+        let canvas = skew.recognition_size(1000, 1300);
+        assert!(canvas.0 > 1000 && canvas.1 > 1300);
+        let mut parsed = parse_tesseract_tsv(tsv_for(canvas).as_bytes(), canvas.0, canvas.1).unwrap();
+        map_words_to_page(&mut parsed, skew, 1000, 1300);
+        assert_eq!((parsed.raster_width, parsed.raster_height), (1000, 1300));
         let (left, right) = (&parsed.words[0], &parsed.words[1]);
         // Positive rotation moves the right end of a line down on the page.
         assert!(right.top > left.top + 30, "{left:?} {right:?}");
@@ -472,12 +588,14 @@ mod tests {
             assert!(word.line_height <= 40 + 10, "band stays close to the line height: {word:?}");
         }
         assert!(map_words_to_display(&parsed, 480.0, 624.0).is_ok());
-        let before = parse_tesseract_tsv(tsv.as_bytes(), 1000, 1300).unwrap();
+        let before = parse_tesseract_tsv(tsv_for((1000, 1300)).as_bytes(), 1000, 1300).unwrap();
         let mut unchanged = before.clone();
-        map_words_to_page(&mut unchanged, Skew::NONE);
+        map_words_to_page(&mut unchanged, Skew::NONE, 1000, 1300);
         assert_eq!(unchanged, before);
-        let mut corner = parse_tesseract_tsv(tsv.as_bytes(), 1000, 1300).unwrap();
-        map_words_to_page(&mut corner, Skew::for_image(-5.0, 1000, 1300));
+        let steep = Skew::for_page(-4.8, 1000, 1300).unwrap();
+        let steep_canvas = steep.recognition_size(1000, 1300);
+        let mut corner = parse_tesseract_tsv(tsv_for(steep_canvas).as_bytes(), steep_canvas.0, steep_canvas.1).unwrap();
+        map_words_to_page(&mut corner, steep, 1000, 1300);
         assert!(corner.words.iter().all(|w| w.left + w.width <= 1000 && w.top + w.height <= 1300 && w.width > 0 && w.height > 0));
     }
 
@@ -513,7 +631,7 @@ mod tests {
         let smoke = std::fs::read(crate::ocr_test_support::local_setup().unwrap().smoke_pnm()).unwrap();
         let (sw, sh, rgb) = split_p6(&smoke).unwrap();
         let (width, height) = (sw + 200, sh + 460);
-        let tilt = Skew::for_image(-degrees, width, height);
+        let tilt = Skew::same_canvas(-degrees, width, height);
         let mut mask = vec![false; width * height];
         let page = p6(width, height, |x, y| {
             let (sx, sy) = tilt.to_page(x as f64 + 0.5, y as f64 + 0.5);
@@ -544,9 +662,10 @@ mod tests {
         // The searchable path: words recognised in the level image map back
         // onto the tilted ink of the page as rendered.
         let tsv = runner.recognize_p6_with_preprocess(&page, PreprocessOptions::PRODUCTION, true).unwrap();
-        let mut parsed = parse_tesseract_tsv(tsv.text.as_bytes(), width as u32, height as u32).unwrap();
+        let (canvas_width, canvas_height) = tsv.skew.recognition_size(width as u32, height as u32);
+        let mut parsed = parse_tesseract_tsv(tsv.text.as_bytes(), canvas_width, canvas_height).unwrap();
         let unmapped = parsed.clone();
-        map_words_to_page(&mut parsed, tsv.skew);
+        map_words_to_page(&mut parsed, tsv.skew, width as u32, height as u32);
         let ink_total = mask.iter().filter(|ink| **ink).count() as f64;
         let covered = |page: &ParsedTsvPage| {
             let inside = mask.iter().enumerate().filter(|(index, ink)| {
@@ -594,8 +713,9 @@ mod tests {
             let text = runner.recognize_p6_with_preprocess(&p6, options, false).unwrap();
             let text_ms = started.elapsed().as_millis();
             let tsv = runner.recognize_p6_with_preprocess(&p6, options, true).unwrap();
-            let layer = parse_tesseract_tsv(tsv.text.as_bytes(), width as u32, height as u32).and_then(|mut parsed| {
-                map_words_to_page(&mut parsed, tsv.skew);
+            let (canvas_width, canvas_height) = tsv.skew.recognition_size(width as u32, height as u32);
+            let layer = parse_tesseract_tsv(tsv.text.as_bytes(), canvas_width, canvas_height).and_then(|mut parsed| {
+                map_words_to_page(&mut parsed, tsv.skew, width as u32, height as u32);
                 map_words_to_display(&parsed, width as f64 * 0.48, height as f64 * 0.48).map(|words| words.len())
             });
             let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
