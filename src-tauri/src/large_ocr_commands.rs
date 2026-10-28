@@ -118,8 +118,9 @@ const STALE_FOLDER_AGE: std::time::Duration = std::time::Duration::from_secs(24 
 
 fn is_job_folder_name(name: &str) -> bool { name.len() == 24 && name.bytes().all(|byte| byte.is_ascii_hexdigit()) }
 
-/// Startup cleanup: job folders whose description no longer reads (and that
-/// are older than a day) are removed; a temporary copy left next to a
+/// Startup cleanup: job folders older than a day whose description is missing
+/// or invalid are removed (never one that is only locked or unreadable right
+/// now, or written by a newer app); a temporary copy left next to a
 /// destination by an interrupted cross-volume publish is removed.
 fn sweep(root: &Path) {
     let Ok(entries) = std::fs::read_dir(root) else { return };
@@ -128,12 +129,14 @@ fn sweep(root: &Path) {
         let named = entry.file_name().to_str().is_some_and(is_job_folder_name);
         let Ok(metadata) = std::fs::symlink_metadata(&path) else { continue };
         if !named || !metadata.is_dir() || metadata.file_type().is_symlink() { continue; }
-        match crate::searchable_pdf_stream::read_manifest(&path) {
-            Ok(manifest) => crate::searchable_pdf_stream::remove_stale_publish_temp(&path, &manifest),
-            Err(_) => {
+        use crate::searchable_pdf_stream::ManifestState;
+        match crate::searchable_pdf_stream::inspect_manifest(&path) {
+            ManifestState::Valid(manifest) => crate::searchable_pdf_stream::remove_stale_publish_temp(&path, &manifest),
+            ManifestState::Missing | ManifestState::Corrupt => {
                 let old = metadata.modified().ok().and_then(|modified| modified.elapsed().ok()).is_some_and(|age| age > STALE_FOLDER_AGE);
                 if old { let _ = std::fs::remove_dir_all(&path); }
             }
+            ManifestState::Newer | ManifestState::Unreadable => {}
         }
     }
 }
@@ -211,15 +214,8 @@ impl LargeOcrJobs {
     pub(crate) fn relocate(&self, destination: PathBuf, document: Option<(u64, u64, OcrJobSource)>) -> Result<LargeOcrStatus, String> {
         if self.running() { return Err("OCR is already running.".into()); }
         let (directory, manifest) = self.interrupted_job().ok_or("There is no saved OCR progress to resume.")?;
-        self.validate_destination(&destination)?;
-        let all_done = crate::searchable_pdf_stream::saved_pages(&directory) == manifest.page_count;
-        let (document_id, revision, source) = match document {
-            Some((document_id, revision, source)) if all_done || (manifest.source_identity == source.identity && manifest.page_count == source.page_count) => (document_id, revision, source),
-            _ if all_done => (0, 0, OcrJobSource { page_count: manifest.page_count, page_sizes: Vec::new(), identity: manifest.source_identity.clone(), suggested_name: String::new(), source_name: manifest.source_name.clone() }),
-            Some(_) => return Err("The document has changed since OCR started, so the saved progress can't be used.".into()),
-            None => return Err("Open the document this OCR job was started from, then choose Save elsewhere again.".into()),
-        };
-        let manifest = crate::searchable_pdf_stream::set_destination(&directory, &destination.to_string_lossy()).map_err(|error| error.to_string())?;
+        let app_data = self.inner.root.parent().unwrap_or(&self.inner.root);
+        let (manifest, document_id, revision, source) = prepare_relocation(app_data, &directory, &manifest, &destination, document)?;
         self.launch(directory, JobStart::Resume, &manifest, document_id, revision, source)
     }
 
@@ -263,7 +259,8 @@ impl LargeOcrJobs {
     fn launch(&self, directory: PathBuf, start: JobStart, manifest: &JobManifest, document_id: u64, revision: u64, source: OcrJobSource) -> Result<LargeOcrStatus, String> {
         let control = JobControl::default();
         let operation = Arc::new(OcrOperation::try_begin(control.cancellation()).map_err(|error| match error {
-            OcrProcessError::Busy => "OCR is already running.".to_owned(),
+            OcrProcessError::Busy if self.running() => "OCR is already running.".to_owned(),
+            OcrProcessError::Busy => "OCR is still busy: a page OCR or a previous page render is still finishing. Try again in a moment.".to_owned(),
             other => other.to_string(),
         })?);
         let runner = crate::ocr_commands::configured_runner(&self.inner.resource_dir).ok().flatten().ok_or(UNAVAILABLE)?;
@@ -305,6 +302,25 @@ impl LargeOcrJobs {
         }
         Ok(self.status())
     }
+}
+
+/// Checks a Save elsewhere request and points the job at the new destination.
+/// The open document is used only if it is the job's source; when every page
+/// is done and it is not, a source with no pages stands in, so a resume that
+/// has to redo a page pauses instead of rendering another document. A
+/// temporary copy left next to the old destination is removed first.
+fn prepare_relocation(app_data: &Path, directory: &Path, manifest: &JobManifest, destination: &Path, document: Option<(u64, u64, OcrJobSource)>) -> Result<(JobManifest, u64, u64, OcrJobSource), String> {
+    validate_destination(destination, app_data)?;
+    let all_done = crate::searchable_pdf_stream::saved_pages(directory) == manifest.page_count;
+    let (document_id, revision, source) = match document {
+        Some((document_id, revision, source)) if manifest.source_identity == source.identity && manifest.page_count == source.page_count => (document_id, revision, source),
+        _ if all_done => (0, 0, OcrJobSource { page_count: manifest.page_count, page_sizes: Vec::new(), identity: manifest.source_identity.clone(), suggested_name: String::new(), source_name: manifest.source_name.clone() }),
+        Some(_) => return Err("The document has changed since OCR started, so the saved progress can't be used.".into()),
+        None => return Err("Open the document this OCR job was started from, then choose Save elsewhere again.".into()),
+    };
+    crate::searchable_pdf_stream::remove_stale_publish_temp(directory, manifest);
+    let manifest = crate::searchable_pdf_stream::set_destination(directory, &destination.to_string_lossy()).map_err(|error| error.to_string())?;
+    Ok((manifest, document_id, revision, source))
 }
 
 fn discard(directory: &Path) {
@@ -420,22 +436,67 @@ mod tests {
     }
 
     #[test]
-    fn startup_sweep_removes_only_old_unreadable_job_folders() {
+    fn startup_sweep_removes_only_old_missing_or_invalid_job_folders() {
+        use std::os::windows::fs::OpenOptionsExt;
         let folder = tempfile::tempdir().unwrap();
         let root = folder.path().join("ocr-jobs");
         let fresh = root.join("b".repeat(24));
-        let old = root.join("c".repeat(24));
+        let missing = root.join("c".repeat(24));
+        let corrupt = root.join("d".repeat(24));
+        let newer = root.join("e".repeat(24));
+        let locked = root.join("f".repeat(24));
         let foreign = root.join("keep-me");
-        for path in [&fresh, &old, &foreign] { std::fs::create_dir_all(path).unwrap(); }
+        for path in [&fresh, &missing, &corrupt, &newer, &locked, &foreign] { std::fs::create_dir_all(path).unwrap(); }
+        std::fs::write(corrupt.join(crate::searchable_pdf_stream::MANIFEST_FILE), b"{not json").unwrap();
+        std::fs::write(newer.join(crate::searchable_pdf_stream::MANIFEST_FILE), br#"{"format": 2, "somethingNew": true}"#).unwrap();
+        std::fs::write(locked.join(crate::searchable_pdf_stream::MANIFEST_FILE), b"{}").unwrap();
         let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 60 * 60);
-        let age = |path: &Path| {
-            use std::os::windows::fs::OpenOptionsExt;
-            std::fs::OpenOptions::new().write(true).custom_flags(0x0200_0000).open(path).unwrap().set_modified(day_ago).unwrap();
-        };
-        age(&old);
-        age(&foreign);
+        let age = |path: &Path| { std::fs::OpenOptions::new().write(true).custom_flags(0x0200_0000).open(path).unwrap().set_modified(day_ago).unwrap(); };
+        for path in [&missing, &corrupt, &newer, &locked, &foreign] { age(path); }
+        let hold = std::fs::OpenOptions::new().read(true).share_mode(0).open(locked.join(crate::searchable_pdf_stream::MANIFEST_FILE)).unwrap();
         sweep(&root);
-        assert!(fresh.exists() && foreign.exists() && !old.exists());
+        drop(hold);
+        assert!(fresh.exists(), "younger than a day");
+        assert!(!missing.exists() && !corrupt.exists(), "missing or invalid descriptions are removed");
+        assert!(newer.exists(), "a newer app's job is kept");
+        assert!(locked.exists(), "a description that cannot be read right now is kept");
+        assert!(foreign.exists(), "only job-named folders are touched");
+    }
+
+    #[test]
+    fn relocation_uses_only_the_matching_document_and_clears_the_old_temp_copy() {
+        use crate::searchable_pdf_stream::{PartialWriter, PUBLISH_TEMP_MARKER};
+        let folder = tempfile::tempdir().unwrap();
+        let app_data = folder.path().join("appdata");
+        let old_folder = folder.path().join("old");
+        std::fs::create_dir_all(&old_folder).unwrap();
+        let directory = app_data.join("ocr-jobs").join("a".repeat(24));
+        std::fs::create_dir_all(directory.parent().unwrap()).unwrap();
+        let mut manifest = crate::searchable_pdf_stream::tests::manifest(2, &old_folder.join("copy.pdf"));
+        manifest.source_identity = "11".repeat(64);
+        let mut writer = PartialWriter::create(&directory, manifest.clone()).unwrap();
+        writer.append(&crate::searchable_pdf_stream::tests::synthetic_page(0)).unwrap();
+        writer.checkpoint().unwrap();
+        drop(writer);
+        let source = |identity: &str| OcrJobSource { page_count: 2, page_sizes: vec![(612.0, 792.0); 2], identity: identity.into(), suggested_name: String::new(), source_name: "s.pdf".into() };
+        let new_destination = folder.path().join("new.pdf");
+        assert!(prepare_relocation(&app_data, &directory, &manifest, &new_destination, None).is_err(), "pages remain, so the source is needed");
+        assert!(prepare_relocation(&app_data, &directory, &manifest, &new_destination, Some((5, 1, source(&"22".repeat(64))))).is_err(), "another document is refused");
+        assert!(prepare_relocation(&app_data, &directory, &manifest, &app_data.join("x.pdf"), Some((5, 1, source(&manifest.source_identity)))).is_err());
+        let leftover = old_folder.join(".tmpOLD1");
+        std::fs::write(&leftover, b"partial copy").unwrap();
+        std::fs::write(directory.join(PUBLISH_TEMP_MARKER), leftover.to_string_lossy().as_bytes()).unwrap();
+        let (moved, document_id, _, _) = prepare_relocation(&app_data, &directory, &manifest, &new_destination, Some((5, 1, source(&manifest.source_identity)))).unwrap();
+        assert_eq!((document_id, moved.destination.as_str()), (5, new_destination.to_string_lossy().as_ref()));
+        assert!(!leftover.exists(), "the temporary copy next to the old destination is removed");
+
+        let mut writer = PartialWriter::resume(&directory).unwrap();
+        writer.append(&crate::searchable_pdf_stream::tests::synthetic_page(1)).unwrap();
+        writer.checkpoint().unwrap();
+        drop(writer);
+        let other = folder.path().join("other.pdf");
+        let (_, document_id, _, stand_in) = prepare_relocation(&app_data, &directory, &moved, &other, Some((7, 1, source(&"33".repeat(64))))).unwrap();
+        assert_eq!((document_id, stand_in.page_sizes.len()), (0, 0), "all pages done: another open document is never used");
     }
 
     /// End to end with the real engine and the in-process renderer. Needs

@@ -179,6 +179,11 @@ pub(crate) static LIVE_PAGES: std::sync::atomic::AtomicUsize = std::sync::atomic
 #[cfg(test)]
 pub(crate) static MAX_LIVE_PAGES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// When the last stop finished waiting for workers (before the checkpoint's
+/// disk flushes, whose time depends on the disk, not on this code).
+#[cfg(test)]
+pub(crate) static WORKERS_RELEASED_AT: Mutex<Option<Instant>> = Mutex::new(None);
+
 struct LivePage;
 impl LivePage {
     fn new() -> Self {
@@ -392,6 +397,8 @@ pub(crate) fn run_job(
             state = signal.wait_timeout(state, Duration::from_millis(20)).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
         }
     }
+    #[cfg(test)]
+    { *WORKERS_RELEASED_AT.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now()); }
     for handle in handles.into_iter().flatten() {
         if handle.is_finished() { let _ = handle.join(); }
     }
@@ -934,6 +941,7 @@ pub(crate) mod tests {
         let folder = tempfile::tempdir().unwrap();
         let mut source = FakeSource::new();
         source.hang_at = Some(6);
+        *WORKERS_RELEASED_AT.lock().unwrap() = None;
         let engine = Arc::new(FakeEngine::new());
         let control = JobControl::default();
         let paused_at = Arc::new(Mutex::new(None::<Instant>));
@@ -942,11 +950,13 @@ pub(crate) mod tests {
             move || { std::thread::sleep(Duration::from_millis(300)); *paused_at.lock().unwrap() = Some(Instant::now()); control.pause(); }
         });
         let outcome = run_job(settings(&folder.path().join("job"), 30, &folder.path().join("out.pdf"), 1, false), Arc::new(source), engine, control, silent());
-        let stopped = Instant::now();
         watcher.join().unwrap();
         assert!(matches!(outcome, JobOutcome::Paused { reason: PauseReason::User, next_page: 6, .. }), "{outcome:?}");
-        let waited = stopped.saturating_duration_since(paused_at.lock().unwrap().unwrap());
-        assert!(waited < STOP_WAIT + Duration::from_secs(1), "{waited:?}");
+        let released = WORKERS_RELEASED_AT.lock().unwrap().expect("the stop recorded when it released the workers");
+        let waited = released.saturating_duration_since(paused_at.lock().unwrap().unwrap());
+        // The coordinator notices the pause within its 100 ms wait, then waits
+        // at most STOP_WAIT for the stuck worker; 400 ms covers scheduling.
+        assert!(waited >= STOP_WAIT && waited < STOP_WAIT + Duration::from_millis(400), "{waited:?}");
     }
 
     #[test]

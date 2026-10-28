@@ -880,6 +880,9 @@ fn main() {
     fn fake_case(behavior: &str) -> FakeCase {
         let number = CASE_NUMBER.fetch_add(1, AtomicOrdering::Relaxed);
         let directory = repository_root().join("target/ocr-process-tests/cases").join(format!("{}-{}-{number}", behavior, std::process::id()));
+        // A leftover folder from an earlier run whose process had the same id
+        // would carry its child.pid; start every case from an empty folder.
+        let _ = std::fs::remove_dir_all(&directory);
         let tessdata = directory.join("tessdata");
         std::fs::create_dir_all(&tessdata).unwrap();
         let engine = directory.join("tesseract.exe");

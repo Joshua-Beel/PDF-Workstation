@@ -592,6 +592,38 @@ fn validate_manifest(manifest: &JobManifest) -> Result<(), StreamError> {
     Ok(())
 }
 
+/// What a job folder's description looks like, for the startup cleanup:
+/// only `Missing` and `Corrupt` folders may be deleted.
+#[derive(Debug)]
+pub(crate) enum ManifestState {
+    Valid(JobManifest),
+    /// No description file at all.
+    Missing,
+    /// The file reads but is not a valid description of this format.
+    Corrupt,
+    /// Written by a newer app (a higher format number); kept for that app.
+    Newer,
+    /// The file could not be read now (locked, scanned, permissions); kept.
+    Unreadable,
+}
+
+pub(crate) fn inspect_manifest(directory: &Path) -> ManifestState {
+    let file = match File::open(directory.join(MANIFEST_FILE)) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return ManifestState::Missing,
+        Err(_) => return ManifestState::Unreadable,
+    };
+    let mut bytes = Vec::new();
+    if file.take(MANIFEST_LIMIT + 1).read_to_end(&mut bytes).is_err() { return ManifestState::Unreadable; }
+    if bytes.len() as u64 > MANIFEST_LIMIT { return ManifestState::Corrupt; }
+    let format = serde_json::from_slice::<serde_json::Value>(&bytes).ok().and_then(|value| value.get("format").and_then(serde_json::Value::as_u64));
+    if format.is_some_and(|format| format > u64::from(MANIFEST_FORMAT)) { return ManifestState::Newer; }
+    match serde_json::from_slice::<JobManifest>(&bytes) {
+        Ok(manifest) if validate_manifest(&manifest).is_ok() => ManifestState::Valid(manifest),
+        _ => ManifestState::Corrupt,
+    }
+}
+
 pub(crate) fn read_manifest(directory: &Path) -> Result<JobManifest, StreamError> {
     let file = File::open(directory.join(MANIFEST_FILE)).map_err(|error| StreamError::Unusable(error.to_string()))?;
     let mut bytes = Vec::new();
