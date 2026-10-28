@@ -12,7 +12,7 @@ Download the Windows setup file from the [latest release](https://github.com/Jos
 
 For updates, use **Menu > Check for updates**. The app shows what's new and lets you choose when to install. Save any edited documents first; the app won't install an update while you have unsaved changes.
 
-Version 0.2.0 is the current published release, with a signed update package but no Windows publisher signature; a signed 0.2.6 draft is unpublished, and its hosted checks cover only the exercised flows on controlled packaged fixtures. Details: [release and signing status](docs/features.md#release-and-signing-status) and [Releases and signing](docs/releases.md).
+Version 0.3.1 is the current published release (2026-10-27): publisher-signed installer and app (Joshua Beel), a signed update package, and the OCR engine included. Hosted checks on GitHub runners installed it and exercised the listed flows on controlled fixtures, and published 0.2.0 updated itself to 0.3.1 in-app; arbitrary documents and other machines are not verified. Details: [release and signing status](docs/features.md#release-and-signing-status) and [Releases and signing](docs/releases.md).
 
 ## What works
 
@@ -32,7 +32,7 @@ Version 0.2.0 is the current published release, with a signed update package but
 - On-page text selection (source build): select supported embedded text directly on the page.
 - Search (source build): Ctrl+F across embedded text, with case matching, one excerpt per matching page (up to 500 pages) and on-page highlights where text geometry is supported.
 
-**[OCR](docs/features.md#ocr)** (source build; planned for the default installer from 0.3.1, not yet verified in an installed build)
+**[OCR](docs/features.md#ocr)** (in the 0.3.1 installer; installed use checked only on the packaged sample, in the pre-tag signed build)
 - Current-page OCR: recognize one page into a copyable dialog with a local English engine; accuracy and real-document use unverified.
 - Searchable OCR copy: save a new 150-DPI raster PDF with an invisible text layer; real-scan accuracy unverified.
 
@@ -70,7 +70,7 @@ Version 0.2.0 is the current published release, with a signed update package but
 
 ## What's still missing
 
-- Not ready yet: general image conversion, arbitrary text and image editing, OCR in a published release (planned for 0.3.1), signatures, form preparation, content-preserving or multi-page redaction, replies, author identity, and foreign-annotation interchange.
+- Not ready yet: general image conversion, arbitrary text and image editing, OCR checked on real documents, signatures, form preparation, content-preserving or multi-page redaction, replies, author identity, and foreign-annotation interchange.
 - Saving always writes a new copy; some page operations are blocked on signed, form, tagged, bookmarked or annotated files ([Organize Pages guide](docs/tools/organize-pages.md)).
 - Printing is unverified on physical paper and non-Microsoft drivers; more real-document testing is needed.
 - Per-tool limits: [Known limits](docs/features.md#known-limits). Priorities: [Known gaps](docs/gaps.md) and the [development roadmap](docs/development-roadmap.md).
@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Docs: 0.3.1 release evidence (rehearsal, release, Step 1/2, publish, in-app update run 40625100964) in `docs/releases.md`; README and features name 0.3.1 as the published release (SM6).
 - In-app update record schema 4: API metadata reads recorded as authenticated, public latest.json as unauthenticated; setup exit claimed only if a setup process was seen; JWT-shaped tokens blocked from the record (SM6).
 - In-app update check: accepts GitHub's longer token format (`.`, `-`), anchored so a trailing newline is rejected (SM0; script and test only).
 - In-app update check: tauri-driver start moved inside the session try, so a start failure is cleaned up and reported as itself (SM6; review P3).
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - In-app update check: WebDriver lifecycle now uses the shared hosted-proven launch helpers (30 s session create, native-driver wait, owned-process cleanup); firewall precheck added (SM6; scripts and tests).
 - In-app update check: stopped assigning the read-only `$HOME` (run 40618989631) and `$Matches`; suppressed stray `WaitForExit` output; AST test guards both (SM6; scripts and tests).
 - Save-copy prune follow-ups (SM2): dead page links are dropped when the `/Dest` or GoTo `/D` is an indirect array too; links that never had a destination stay; `/Annots` null cleanup tested.
-- In-app update check: the installed-facts check now expects Tauri's quoted InstallLocation and names any mismatched field (no paths). Run 40596111704 failed there (SM6; script and tests).
