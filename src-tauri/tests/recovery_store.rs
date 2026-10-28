@@ -2,6 +2,14 @@
 mod recovery_journal;
 #[path = "../src/recovery_store.rs"]
 mod recovery_store;
+
+// The spawn lock lives in the app binary; this test binary starts no OCR or helper child, so a plain spawn cannot race.
+#[allow(dead_code)]
+mod child_job {
+    pub(crate) fn test_spawn(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+        command.spawn()
+    }
+}
 use recovery_journal::*;
 use recovery_store::*;
 use std::{

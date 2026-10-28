@@ -41,6 +41,7 @@ describe('push and pull request CI workflow', () => {
       'run: npm test -- --pool=threads --maxWorkers=1 --no-file-parallelism',
       'run: npm run build',
       'run: cargo test --locked --manifest-path src-tauri/Cargo.toml --bins',
+      'run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-run',
       'Keep only compiled dependencies in the Cargo cache',
       'actions/cache/save@',
       'Recheck tracked source',
