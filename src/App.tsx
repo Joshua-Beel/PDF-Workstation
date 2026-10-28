@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Undo2, Redo2 } from 'lucide-react';
 import { ArrowDownToLine, ArrowUpRight, Bookmark, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, CircleHelp, Combine, File, FileCheck2, FileImage, FileOutput, FilePenLine, FilePlus2, Files, FolderOpen, Hand, Highlighter, Home, LayoutGrid, List, Maximize, Menu, MessageSquare, Minimize2, Minus, MoreHorizontal, MousePointer2, PanelLeftClose, Pencil, Plus, Printer, RotateCw, Save, ScanLine, Search, ShieldCheck, Signature, SlidersHorizontal, Star, Sun, Type, X, ZoomIn, ZoomOut, type LucideIcon } from 'lucide-react';
-import { closeDocument, cancelPasswordRequest, native, openDocument, reopenDocument, checkpointRecovery, restoreRecovery, keepRecoveredEdits, openOriginal, editPages, saveCopy, splitDocument, cropPages, resetCrops, combineDocuments, insertPagesCopy, replacePagesCopy, documentFormFields, fillFormCopy, documentAnnotations, documentPageLabels, createPdfFromImage, chooseImagePdfSources, createPdfFromImages, cancelImagePdfSources, inspectImageReplacementTarget, replacePdfImageCopy, cancelImageReplacement, inspectTextReplacementTarget, replacePdfTextCopy, cancelTextReplacement, exportPageImage, redactDocument, createComment, updateComment, deleteComment, createHighlight, createTextHighlight, updateHighlight, deleteHighlight, createSearchableOcrCopy, cancelPageOcr, ocrCapability as getOcrCapability, type Annotation, type CommentRect, type CropInsets, type CreatePdfOptions, type DocumentAnnotations, type DocumentFormFields, type FormPatch, type ImageReplacementTarget, type TextReplacementTarget, type OcrCapability, type OpenResult, type PageImageExport, type PageImageExportRequest, type RasterRedactionRect, type SplitOutput, type SavedCopy, type RecoveryOffer } from './bridge';
+import { closeDocument, cancelPasswordRequest, native, openDocument, reopenDocument, checkpointRecovery, restoreRecovery, keepRecoveredEdits, openOriginal, editPages, saveCopy, splitDocument, cropPages, resetCrops, combineDocuments, insertPagesCopy, replacePagesCopy, documentFormFields, fillFormCopy, documentAnnotations, documentPageLabels, createPdfFromImage, chooseImagePdfSources, createPdfFromImages, cancelImagePdfSources, inspectImageReplacementTarget, replacePdfImageCopy, cancelImageReplacement, inspectTextReplacementTarget, replacePdfTextCopy, cancelTextReplacement, exportPageImage, redactDocument, createComment, updateComment, deleteComment, createHighlight, createTextHighlight, updateHighlight, deleteHighlight, createSearchableOcrCopy, cancelPageOcr, startLargeOcr, ocrCapability as getOcrCapability, type Annotation, type CommentRect, type CropInsets, type CreatePdfOptions, type DocumentAnnotations, type DocumentFormFields, type FormPatch, type ImageReplacementTarget, type TextReplacementTarget, type OcrCapability, type OpenResult, type PageImageExport, type PageImageExportRequest, type RasterRedactionRect, type SplitOutput, type SavedCopy, type RecoveryOffer } from './bridge';
 import { discardRecovery } from './bridge';
 import { recoveryCommittedReopenRequired } from './recoveryErrors';
 import { clampPage, toolGroups, type DocumentInfo, type PageEdit } from './model';
@@ -17,6 +17,7 @@ import type { BookmarkDestination } from './bookmarkDestination';
 import PageText from './PageText';
 import PageOcrDialog, { type PageOcrTarget } from './PageOcrDialog';
 import SearchableOcrDialog from './SearchableOcrDialog';
+import LargeOcrPanel from './LargeOcrPanel';
 import { validateSearchableOcrCapability, type SearchableOcrTarget } from './searchableOcr';
 import PasswordDialog from './PasswordDialog';
 import PrintDialog from './PrintDialog';
@@ -83,6 +84,7 @@ export default function App() {
   const unavailableOcr = (reason: string): OcrCapability => ({ available: false, reason, language: null, searchablePdfAvailable: false, searchablePdfReason: reason, searchablePdfDpi: null, searchablePdfMaxPages: 32, searchablePdfMaxPixels: 33_554_432, searchablePdfMaxWords: 100_000, searchablePdfMaxTextBytes: 8_388_608, searchablePdfCharacters: null });
   const [ocr, setOcr] = useState<OcrCapability>(() => unavailableOcr(native ? 'Checking OCR availability…' : 'OCR is unavailable in the browser preview.'));
   const [searchableOcrTarget, setSearchableOcrTarget] = useState<SearchableOcrTarget | null>(null);
+  const [largeOcrRefresh, setLargeOcrRefresh] = useState(0);
   const [printOpen, setPrintOpen] = useState(false);
   const [propertiesOpen, setPropertiesOpen] = useState(false);
   const [noticesOpen, setNoticesOpen] = useState(false);
@@ -672,6 +674,12 @@ export default function App() {
     setMenu(false); setOrganizing(false); closeSearch(); setBookmarksOpen(false);
     setSearchableOcrTarget({ documentId: doc.id, revision: doc.revision });
   };
+  const launchLargeOcr = async () => {
+    if (!doc || busy || redactionDraft || pageOcrTarget || newCopyModalOpen || closingDocument.current !== null || searchableCapabilityError) return;
+    setMenu(false); setError('');
+    try { if (await startLargeOcr(doc.id, doc.revision)) setLargeOcrRefresh(value => value + 1); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+  };
   const createSearchableCopy = async (request: { requestId: string; documentId: number; revision: number }): Promise<SavedCopy | null> => {
     const source = documents.find(document => document.id === request.documentId);
     if (!source || source.revision !== request.revision || busy || closingDocument.current !== null) throw new Error('This document changed. Reopen searchable OCR and try again.');
@@ -763,6 +771,7 @@ export default function App() {
       <button disabled={!doc || busy || !!redactionDraft || !!searchableOcrTarget || multiImageOpen || !!imageReplacementTarget || !!textReplacementTarget} onClick={() => void launchTextReplacement()}>Replace strict text in a new copy…</button>
       <button disabled={!doc || busy || !!redactionDraft || newCopyModalOpen || !ocr.available} onClick={launchPageOcr} title={ocr.available ? 'Recognize text on the current page in English' : ocr.reason || 'OCR is unavailable in this build.'}>Recognize current page…</button>
       <button disabled={!doc || busy || !!redactionDraft || newCopyModalOpen || !!searchableCapabilityError || (doc?.pages.length ?? 0) > ocr.searchablePdfMaxPages} onClick={launchSearchableOcr} title={searchableCapabilityError || ((doc?.pages.length ?? 0) > ocr.searchablePdfMaxPages ? `Searchable OCR is limited to ${ocr.searchablePdfMaxPages} pages.` : 'Create a fixed-150-DPI searchable copy in this verified opt-in build.')}>Create searchable OCR copy…</button>
+      {(doc?.pages.length ?? 0) > ocr.searchablePdfMaxPages && <button disabled={!doc || busy || !!redactionDraft || newCopyModalOpen || !!searchableCapabilityError} onClick={() => void launchLargeOcr()} title={searchableCapabilityError || 'Create a searchable copy of a large document (up to 10,000 pages). OCR runs in the background; you can keep reading.'}>Create searchable OCR copy (large document)…</button>}
       <button disabled={!!redactionDraft || newCopyModalOpen} onClick={() => { setMenu(false); launchOrganizer(); }}>Organize pages</button>
       <button disabled={!doc || busy || !!redactionDraft || newCopyModalOpen} onClick={() => { if (!newCopyModalOpen) { setMenu(false); setPropertiesOpen(true); } }}>Document properties… <kbd>Ctrl+D</kbd></button><hr />
       <button onClick={() => { setDark(v => !v); setMenu(false); }}>Switch to {dark ? 'light' : 'dark'} theme</button>
@@ -775,6 +784,7 @@ export default function App() {
     {pageTextOpen && doc && <PageText key={`${doc.id}-${doc.revision}-${page}`} document={doc} page={page} close={() => setPageTextOpen(false)} />}
     {pageOcrTarget && <PageOcrDialog key={`${pageOcrTarget.id}-${pageOcrTarget.revision}-${pageOcrTarget.page}`} target={pageOcrTarget} setBusy={setBusy} close={() => setPageOcrTarget(null)} />}
     {searchableOcrTarget && <SearchableOcrDialog key={`${searchableOcrTarget.documentId}-${searchableOcrTarget.revision}`} capability={searchableCapability} target={searchableOcrTarget} createRequestId={() => crypto.randomUUID()} create={createSearchableCopy} cancel={cancelPageOcr} opened={copy => opened(copy.document, false)} close={() => setSearchableOcrTarget(null)} />}
+    {native && <LargeOcrPanel document={doc ? { id: doc.id, revision: doc.revision } : null} refresh={largeOcrRefresh} openCopy={path => void reopen(path)} />}
     {passwordRequest && <PasswordDialog key={passwordRequest.challenge.request_id} challenge={passwordRequest.challenge} onOpened={info => { passwordBlocking.current = false; opened(info, passwordRequest.organize); setPasswordRequest(null); }} onClose={() => { passwordBlocking.current = false; setPasswordRequest(null); }} onRefused={message => { passwordBlocking.current = false; setPasswordRequest(null); setError(message); }} />}
     {printOpen && doc && <PrintDialog document={doc} page={page} setBusy={setBusy} close={() => setPrintOpen(false)} />}
     {propertiesOpen && doc && <DocumentProperties key={`${doc.id}-${doc.revision}`} document={doc} close={() => setPropertiesOpen(false)} />}

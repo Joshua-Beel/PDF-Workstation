@@ -1,0 +1,354 @@
+//! App wiring for large-document OCR jobs: the in-process page source (the
+//! existing PDFium worker), the Tesseract recogniser, the one-job registry and
+//! the job folder in app data. SM5's isolated render helper can replace
+//! `InProcessSource` behind the same `PageSource` trait.
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use serde::Serialize;
+
+use crate::large_ocr_job::{
+    automatic_workers, run_job, unfinished_jobs, JobControl, JobOutcome, JobProgress, JobSettings, JobStart, JobState,
+    PageError, PageRecognizer, PageReport, PageSource, PauseReason, RenderedPage,
+};
+use crate::ocr::{OcrJobRaster, OcrJobSource, OcrPageRequest};
+use crate::ocr_process::{OcrCancellation, OcrOperation, OcrProcessError, OcrProcessRunner};
+use crate::searchable_pdf_stream::{hex, sha256, JobManifest, PageIssue, MANIFEST_FORMAT};
+use crate::service::PdfService;
+
+const UNAVAILABLE: &str = "OCR is not available in this build.";
+
+struct InProcessSource {
+    service: PdfService,
+    document_id: u64,
+    revision: u64,
+    sizes: Vec<(f32, f32)>,
+    operation: Arc<OcrOperation>,
+    render_slot: Mutex<()>,
+}
+
+impl PageSource for InProcessSource {
+    fn page_size(&self, page: u32) -> Result<(f32, f32), PageError> {
+        self.sizes.get(page as usize).copied().ok_or_else(|| PageError::Job(PauseReason::Document("OCR page is out of range".into())))
+    }
+
+    fn render(&self, page: u32, cancellation: &OcrCancellation) -> Result<RenderedPage, PageError> {
+        let _one_render_at_a_time = self.render_slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cancellation.is_cancelled() { return Err(PageError::Cancelled); }
+        let page = u16::try_from(page).map_err(|_| PageError::Job(PauseReason::Document("OCR page is out of range".into())))?;
+        let request = OcrPageRequest { document_id: self.document_id, revision: self.revision, page };
+        match self.service.ocr_job_raster_blocking(request, cancellation.clone(), self.operation.worker_hold()) {
+            Ok(OcrJobRaster::Raster(raster, reduced_resolution)) => Ok(RenderedPage {
+                width: raster.width, height: raster.height, page_width: raster.page_width, page_height: raster.page_height,
+                p6: raster.p6, reduced_resolution,
+            }),
+            Ok(OcrJobRaster::PageFailed(message)) => Err(PageError::Page(PageIssue::RenderFailed, message)),
+            Err(_) if cancellation.is_cancelled() => Err(PageError::Cancelled),
+            Err(message) => Err(PageError::Job(PauseReason::Document(message))),
+        }
+    }
+}
+
+struct TesseractRecognizer {
+    runner: OcrProcessRunner,
+    operation: Arc<OcrOperation>,
+}
+
+impl PageRecognizer for TesseractRecognizer {
+    fn recognize_tsv(&self, p6: &[u8], _cancellation: &OcrCancellation) -> Result<String, PageError> {
+        match self.runner.recognize_p6_tsv_background(p6, &self.operation) {
+            Ok(output) => Ok(output.text),
+            Err(OcrProcessError::Cancelled) => Err(PageError::Cancelled),
+            Err(OcrProcessError::TimedOut) => Err(PageError::Page(PageIssue::TimedOut, "timed out".into())),
+            Err(OcrProcessError::InvalidInput(message)) => Err(PageError::Page(PageIssue::EngineOutputRefused, message)),
+            Err(OcrProcessError::Busy) => Err(PageError::Job(PauseReason::EngineFailing("OCR is already running.".into()))),
+            Err(OcrProcessError::InvalidAsset(message) | OcrProcessError::AssetIntegrity(message)) => Err(PageError::Job(PauseReason::EngineFailing(message))),
+            Err(OcrProcessError::Document(message)) => Err(PageError::Job(PauseReason::Document(message))),
+            Err(error) => Err(PageError::Page(PageIssue::EngineStopped, error.to_string())),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LargeOcrJobStatus {
+    pub(crate) job: String,
+    pub(crate) source_name: String,
+    pub(crate) destination: String,
+    pub(crate) running: bool,
+    pub(crate) progress: JobProgress,
+    pub(crate) pause_reason: Option<PauseReason>,
+    pub(crate) report: Vec<PageReport>,
+    /// Paused by an earlier app session (not by this one).
+    pub(crate) interrupted: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LargeOcrStatus {
+    pub(crate) available: bool,
+    pub(crate) reason: Option<String>,
+    pub(crate) max_pages: u32,
+    pub(crate) job: Option<LargeOcrJobStatus>,
+}
+
+struct ActiveJob {
+    directory: PathBuf,
+    control: JobControl,
+    status: Arc<Mutex<LargeOcrJobStatus>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct LargeOcrJobs {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    root: PathBuf,
+    resource_dir: PathBuf,
+    service: PdfService,
+    available: bool,
+    active: Mutex<Option<ActiveJob>>,
+}
+
+impl LargeOcrJobs {
+    pub(crate) fn new(service: PdfService, resource_dir: PathBuf, root: PathBuf) -> Self {
+        let available = matches!(crate::ocr_commands::configured_runner(&resource_dir), Ok(Some(_)));
+        Self { inner: Arc::new(Inner { root, resource_dir, service, available, active: Mutex::new(None) }) }
+    }
+
+    pub(crate) fn service(&self) -> PdfService { self.inner.service.clone() }
+
+    pub(crate) fn status(&self) -> LargeOcrStatus {
+        let job = {
+            let active = self.inner.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            active.as_ref().map(|job| job.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone())
+        };
+        let job = job.or_else(|| self.interrupted_job().map(|(directory, manifest)| interrupted_status(&directory, &manifest)));
+        LargeOcrStatus {
+            available: self.inner.available, reason: (!self.inner.available).then(|| UNAVAILABLE.into()),
+            max_pages: crate::searchable_pdf_stream::MAX_STREAM_PAGES, job,
+        }
+    }
+
+    fn interrupted_job(&self) -> Option<(PathBuf, JobManifest)> {
+        unfinished_jobs(&self.inner.root).into_iter().next()
+    }
+
+    fn running(&self) -> bool {
+        let active = self.inner.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        active.as_ref().is_some_and(|job| job.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).running)
+    }
+
+    /// Starts a new job for the open document. Blocking: call off the UI thread.
+    pub(crate) fn start(&self, document_id: u64, revision: u64, source: OcrJobSource, destination: PathBuf) -> Result<LargeOcrStatus, String> {
+        if !self.inner.available { return Err(UNAVAILABLE.into()); }
+        if self.running() { return Err("OCR is already running.".into()); }
+        if self.interrupted_job().is_some() { return Err("Another OCR job has saved progress. Resume or discard it first.".into()); }
+        if destination.exists() { return Err("That file already exists. Choose a new filename; Save a Copy never overwrites an existing file.".into()); }
+        std::fs::create_dir_all(&self.inner.root).map_err(|error| format!("Could not create the OCR work folder: {error}"))?;
+        let name = hex(&sha256(format!("{}|{}|{:?}", source.identity, destination.display(), std::time::SystemTime::now()).as_bytes())[..12]);
+        let manifest = JobManifest {
+            format: MANIFEST_FORMAT, page_count: source.page_count, source_identity: source.identity.clone(), source_name: source.source_name.clone(),
+            destination: destination.to_string_lossy().into_owned(), dpi: crate::ocr::OCR_DPI, language: "eng".into(),
+            engine_identity: option_env!("PDF_WORKSTATION_OCR_ENGINE_SHA256").unwrap_or("unknown").into(),
+        };
+        self.launch(self.inner.root.join(name), JobStart::New(manifest.clone()), &manifest, document_id, revision, source)
+    }
+
+    /// Resumes the saved job if the open document is the one it was started from.
+    pub(crate) fn resume(&self, document_id: u64, revision: u64, source: OcrJobSource) -> Result<LargeOcrStatus, String> {
+        if self.running() { return Err("OCR is already running.".into()); }
+        let (directory, manifest) = self.interrupted_job().ok_or("There is no saved OCR progress to resume.")?;
+        if manifest.source_identity != source.identity || manifest.page_count != source.page_count {
+            return Err("The document has changed since OCR started, so the saved progress can't be used.".into());
+        }
+        self.launch(directory, JobStart::Resume, &manifest, document_id, revision, source)
+    }
+
+    pub(crate) fn pause(&self) {
+        let active = self.inner.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(job) = active.as_ref() { job.control.pause(); }
+    }
+
+    /// Cancels a running job, or discards saved progress. The source is never touched.
+    pub(crate) fn cancel(&self) {
+        let mut active = self.inner.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(job) = active.as_ref() {
+            let running = job.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).running;
+            job.control.cancel();
+            if !running {
+                let _ = std::fs::remove_dir_all(&job.directory);
+                *active = None;
+            }
+            return;
+        }
+        drop(active);
+        if let Some((directory, _)) = self.interrupted_job() {
+            if directory.parent() == Some(self.inner.root.as_path()) { let _ = std::fs::remove_dir_all(directory); }
+        }
+    }
+
+    /// Clears a finished job's status from the panel.
+    pub(crate) fn dismiss(&self) {
+        let mut active = self.inner.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let finished = active.as_ref().is_some_and(|job| {
+            let status = job.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            matches!(status.progress.state, JobState::Published | JobState::Cancelled)
+        });
+        if finished { *active = None; }
+    }
+
+    fn launch(&self, directory: PathBuf, start: JobStart, manifest: &JobManifest, document_id: u64, revision: u64, source: OcrJobSource) -> Result<LargeOcrStatus, String> {
+        let control = JobControl::default();
+        let operation = Arc::new(OcrOperation::try_begin(control.cancellation()).map_err(|error| match error {
+            OcrProcessError::Busy => "OCR is already running.".to_owned(),
+            other => other.to_string(),
+        })?);
+        let runner = crate::ocr_commands::configured_runner(&self.inner.resource_dir).ok().flatten().ok_or(UNAVAILABLE)?;
+        let workers = automatic_workers();
+        let status = Arc::new(Mutex::new(LargeOcrJobStatus {
+            job: directory.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+            source_name: manifest.source_name.clone(), destination: manifest.destination.clone(), running: true,
+            progress: JobProgress { state: JobState::Preparing, pages_done: 0, page_count: manifest.page_count, workers, issues: 0, bytes_written: 0, projected_bytes: None, size_warning: false, seconds_left: None },
+            pause_reason: None, report: Vec::new(), interrupted: false,
+        }));
+        let page_source: Arc<dyn PageSource> = Arc::new(InProcessSource {
+            service: self.inner.service.clone(), document_id, revision, sizes: source.page_sizes, operation: operation.clone(), render_slot: Mutex::new(()),
+        });
+        let recognizer: Arc<dyn PageRecognizer> = Arc::new(TesseractRecognizer { runner, operation: operation.clone() });
+        let commit_token = control.cancellation().clone();
+        let settings = JobSettings {
+            directory: directory.clone(), start, workers,
+            commit: Box::new(move || commit_token.commit().map_err(|error| error.to_string())),
+        };
+        let sink_status = status.clone();
+        let progress: crate::large_ocr_job::ProgressSink = Arc::new(move |progress: &JobProgress| {
+            sink_status.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).progress = progress.clone();
+        });
+        let thread_status = status.clone();
+        let thread_control = control.clone();
+        {
+            let mut active = self.inner.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            *active = Some(ActiveJob { directory: directory.clone(), control: control.clone(), status: status.clone() });
+        }
+        let spawned = std::thread::Builder::new().name("ocr-job".into()).spawn(move || {
+            let outcome = run_job(settings, page_source, recognizer, thread_control, progress);
+            drop(operation);
+            let mut status = thread_status.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            status.running = false;
+            match outcome {
+                JobOutcome::Published { report, .. } => { status.progress.state = JobState::Published; status.report = report; }
+                JobOutcome::Paused { reason, next_page, report } => {
+                    status.progress.state = JobState::Paused;
+                    status.progress.pages_done = next_page;
+                    status.pause_reason = Some(reason);
+                    status.report = report;
+                }
+                JobOutcome::Cancelled => { status.progress.state = JobState::Cancelled; }
+            }
+        });
+        if let Err(error) = spawned {
+            *self.inner.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            return Err(format!("Could not start OCR: {error}"));
+        }
+        Ok(self.status())
+    }
+}
+
+fn interrupted_status(directory: &Path, manifest: &JobManifest) -> LargeOcrJobStatus {
+    let pages_done = crate::searchable_pdf_stream::saved_pages(directory);
+    LargeOcrJobStatus {
+        job: directory.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+        source_name: manifest.source_name.clone(), destination: manifest.destination.clone(), running: false,
+        progress: JobProgress { state: JobState::Paused, pages_done, page_count: manifest.page_count, workers: 0, issues: 0, bytes_written: 0, projected_bytes: None, size_warning: false, seconds_left: None },
+        pause_reason: Some(PauseReason::User), report: Vec::new(), interrupted: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::large_ocr_job::PageReport;
+    use lopdf::{dictionary, Document, Object, Stream};
+
+    /// A text PDF generated in code: every page carries its number and a short
+    /// paragraph, so the real engine has something to read on each page.
+    pub(crate) fn synthetic_text_pdf(pages: u32) -> Vec<u8> {
+        let mut document = Document::with_version("1.7");
+        let pages_id = document.new_object_id();
+        let font = document.add_object(dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" });
+        let mut kids = Vec::new();
+        for page in 0..pages {
+            let lines = [
+                format!("Page {} of {pages}", page + 1),
+                "The quick brown fox jumps over the lazy dog.".to_string(),
+                format!("Reference number {}", 100_000 + page * 7),
+            ];
+            let mut content = String::from("BT\n/F1 16 Tf\n72 700 Td\n20 TL\n");
+            for line in lines { content.push_str(&format!("({line}) Tj\nT*\n")); }
+            content.push_str("ET\n");
+            let content = document.add_object(Stream::new(dictionary! {}, content.into_bytes()));
+            let id = document.add_object(dictionary! {
+                "Type" => "Page", "Parent" => pages_id, "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } }, "Contents" => content,
+            });
+            kids.push(Object::Reference(id));
+        }
+        document.objects.insert(pages_id, dictionary! { "Type" => "Pages", "Count" => pages as i64, "Kids" => kids }.into());
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        document.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    /// End to end with the real engine and the in-process renderer. Needs
+    /// `PDF_WORKSTATION_OCR_SETUP_ROOT`; `SM4_REAL_PAGES` sets the page count.
+    #[test]
+    #[ignore = "needs PDF_WORKSTATION_OCR_SETUP_ROOT pointing at a scripts/setup-ocr.ps1 output root"]
+    fn real_engine_large_job_publishes_a_searchable_copy() {
+        let Some(setup) = crate::ocr_test_support::require_local_setup("real_engine_large_job_publishes_a_searchable_copy") else { return; };
+        let _serial = crate::ocr_process::test_lock();
+        let _jobs = crate::large_ocr_job::tests::JOB_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let pages = std::env::var("SM4_REAL_PAGES").ok().and_then(|value| value.parse().ok()).unwrap_or(120_u32);
+        let folder = tempfile::tempdir().unwrap();
+        let source_path = folder.path().join("synthetic-text.pdf");
+        std::fs::write(&source_path, synthetic_text_pdf(pages)).unwrap();
+        let service = PdfService::start(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/pdfium/bin/pdfium.dll"));
+        let opened = tauri::async_runtime::block_on(service.open(source_path)).unwrap();
+        let request = opened.ocr_request(0);
+        let source = service.ocr_job_source_blocking(request.document_id, request.revision).unwrap();
+        assert_eq!(source.page_count, pages);
+        let control = JobControl::default();
+        let operation = Arc::new(OcrOperation::try_begin(control.cancellation()).unwrap());
+        let runner = OcrProcessRunner::new(setup.root.join("engine/bin/tesseract.exe"), setup.root.join("engine/tessdata"), setup.engine).unwrap();
+        let destination = folder.path().join("synthetic-text-searchable.pdf");
+        let manifest = JobManifest {
+            format: MANIFEST_FORMAT, page_count: pages, source_identity: source.identity.clone(), source_name: source.source_name.clone(),
+            destination: destination.to_string_lossy().into_owned(), dpi: 150, language: "eng".into(), engine_identity: "test".into(),
+        };
+        let workers = automatic_workers();
+        let token = control.cancellation().clone();
+        let settings = JobSettings { directory: folder.path().join("job"), start: JobStart::New(manifest), workers, commit: Box::new(move || token.commit().map_err(|error| error.to_string())) };
+        let page_source = Arc::new(InProcessSource { service: service.clone(), document_id: request.document_id, revision: request.revision, sizes: source.page_sizes, operation: operation.clone(), render_slot: Mutex::new(()) });
+        let recognizer = Arc::new(TesseractRecognizer { runner, operation: operation.clone() });
+        let started = std::time::Instant::now();
+        let outcome = run_job(settings, page_source, recognizer, control, Arc::new(|_: &JobProgress| {}));
+        let elapsed = started.elapsed();
+        drop(operation);
+        let JobOutcome::Published { bytes, report, .. } = outcome else { panic!("{outcome:?}") };
+        eprintln!("real engine: pages={pages} workers={workers} elapsed={:.1}s pages_per_min={:.1} output={bytes} report={report:?}", elapsed.as_secs_f64(), f64::from(pages) * 60.0 / elapsed.as_secs_f64());
+        assert!(report.iter().all(|entry: &PageReport| entry.outcome == crate::searchable_pdf_stream::PageOutcome::Text), "{report:?}");
+        let reopened = tauri::async_runtime::block_on(service.open(destination)).unwrap();
+        let reopened_request = reopened.ocr_request(0);
+        let mut matched = 0;
+        for page in [0, pages / 2, pages - 1] {
+            let text = tauri::async_runtime::block_on(service.text(reopened_request.document_id, page as u16, reopened_request.revision)).unwrap();
+            if text.contains(&format!("Page {} of {pages}", page + 1)) { matched += 1; }
+            assert!(text.contains("quick brown fox"), "page {page}: {text:?}");
+        }
+        eprintln!("page-number lines read exactly on {matched} of 3 sampled pages");
+    }
+}

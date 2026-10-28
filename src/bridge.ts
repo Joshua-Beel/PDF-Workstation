@@ -39,6 +39,17 @@ export const recognizePageOcr = (request: OcrRequest) => invoke<OcrReceipt>('rec
 export const cancelPageOcr = (requestId: string) => invoke<OcrCancelAck>('cancel_page_ocr', { requestId });
 export type SearchableOcrCopyRequest = { requestId: string; documentId: number; revision: number };
 export const createSearchableOcrCopy = (request: SearchableOcrCopyRequest) => invoke<SavedCopy | null>('create_searchable_ocr_copy', request);
+export type LargeOcrPauseReason = { kind: 'user' } | { kind: 'sizeLimit' } | { kind: 'engineFailing' | 'document' | 'disk' | 'publish'; message: string };
+export type LargeOcrPageReport = { page: number; outcome: 'text' | 'imageOnly' | 'placeholder'; issue: 'none' | 'timedOut' | 'engineStopped' | 'engineOutputRefused' | 'renderFailed' | 'tooManyCharacters'; reducedResolution: boolean; droppedWords: number };
+export type LargeOcrProgress = { state: 'preparing' | 'running' | 'finalising' | 'published' | 'paused' | 'cancelled'; pagesDone: number; pageCount: number; workers: number; issues: number; bytesWritten: number; projectedBytes: number | null; sizeWarning: boolean; secondsLeft: number | null };
+export type LargeOcrJob = { job: string; sourceName: string; destination: string; running: boolean; progress: LargeOcrProgress; pauseReason: LargeOcrPauseReason | null; report: LargeOcrPageReport[]; interrupted: boolean };
+export type LargeOcrStatus = { available: boolean; reason: string | null; maxPages: number; job: LargeOcrJob | null };
+export const largeOcrStatus = () => invoke<LargeOcrStatus>('large_ocr_status');
+export const startLargeOcr = (documentId: number, revision: number) => invoke<LargeOcrStatus | null>('start_large_ocr', { documentId, revision });
+export const resumeLargeOcr = (documentId: number, revision: number) => invoke<LargeOcrStatus>('resume_large_ocr', { documentId, revision });
+export const pauseLargeOcr = () => invoke<LargeOcrStatus>('pause_large_ocr');
+export const cancelLargeOcr = () => invoke<LargeOcrStatus>('cancel_large_ocr');
+export const dismissLargeOcr = () => invoke<LargeOcrStatus>('dismiss_large_ocr');
 export type PrintResult = { status: 'cancelled' } | { status: 'submitted'; pages: number };
 export const printDocument = (id: number, revision: number, currentPage: number, requestId: string) => invoke<PrintResult>('print_document', { id, revision, currentPage, requestId });
 export const cancelPrint = (requestId: string) => invoke<void>('cancel_print', { requestId });
