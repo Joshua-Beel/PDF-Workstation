@@ -85,7 +85,7 @@ export default function PageList({ document, page, pageLabels, go }: { document:
     else if (event.key === 'End') { event.preventDefault(); event.stopPropagation(); moveFocus(count - 1); }
     else if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); go(index); }
   };
-  return <div ref={list} className={s.list} onScroll={event => setScrollTop(event.currentTarget.scrollTop)} aria-label="Page list">
+  return <div ref={list} className={s.list} onScroll={event => setScrollTop(event.currentTarget.scrollTop)} role="group" aria-label="Page list">
     {gaps.map(({ before, page: index }) => {
       const size = document.pages[index], label = pageLabelFor(pageLabels, index), description = label === null ? null : pageLabelDescription(label);
       return <Fragment key={index}>

@@ -44,7 +44,7 @@ const Page = memo(function Page({ id, index, width, height, scale, revision, sel
   }, [id, index, width, scale, revision, attempt]);
   useEffect(() => () => { if (shown.current.url) URL.revokeObjectURL(shown.current.url); }, []);
   const tryAgain = () => { void retryPdfEngine(id).catch(() => undefined).finally(() => setAttempt(value => value + 1)); };
-  return <div className={styles.paper} style={{ width: width * scale, height: height * scale }} aria-label={`Page ${index + 1}`}>
+  return <div className={styles.paper} style={{ width: width * scale, height: height * scale }} role="group" aria-label={`Page ${index + 1}`}>
     {url ? <><img ref={image} src={url} alt={`Page ${index + 1}`} draggable={false} onLoad={() => setImageReady(true)} /><TextLayer id={id} page={index} revision={revision} enabled={selectable} imageReady={imageReady} pageWidth={width * scale} pageHeight={height * scale} search={search} onTextSelection={onTextSelection} />{imageReady && <CommentLayer page={index} pageWidth={width} pageHeight={height} annotations={annotations} creatingComment={commentMode && annotationAvailable} creatingHighlight={highlightMode && annotationAvailable} creatingRedaction={redactionMode} redactions={redactions} interactive={annotationInteractive && annotationAvailable} onCommentCreate={onCommentCreate} onHighlightCreate={onHighlightCreate} onRedactionCreate={onRedactionCreate} onSelect={onAnnotationSelect} imageBounds={() => image.current?.getBoundingClientRect() ?? null} layoutKey={`${revision}:${width * scale}:${height * scale}`} />}</> : <div className={styles.pageLoading}>{error ? <><span role="alert">{error}</span> <button type="button" aria-label={`Try again to render page ${index + 1}`} onClick={tryAgain}>Try again</button></> : `Rendering page ${index + 1}…`}</div>}
   </div>;
 });
@@ -111,7 +111,7 @@ export default function Viewer({ document, zoom, fit, target, onPage, onView, ha
     if (Math.abs(plan.scale - scale) < 1e-9) viewport.current?.scrollTo(plan.left === null ? { top: plan.top } : { top: plan.top, left: plan.left });
     else pendingView.current = plan;
   }, [target]);
-  return <div ref={viewport} className={`${styles.viewport} ${hand ? styles.hand : ''}`} onScroll={event => {
+  return <div ref={viewport} className={`${styles.viewport} ${hand ? styles.hand : ''}`} role="region" aria-label="Document pages" tabIndex={0} onScroll={event => {
     const scrollTop = event.currentTarget.scrollTop;
     setTop(scrollTop);
     onPage(currentPageAt(layout, scrollTop + 80));
