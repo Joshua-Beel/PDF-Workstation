@@ -396,7 +396,7 @@ function ConvertTo-SanitizedWebDriverError {
     } catch { $code = 'unparsed' }
     if ($code -cnotmatch '^[a-z][a-z ]{0,39}$') { $code = 'unrecognized' }
     $message = (($message -split "`r?`n")[0])
-    $message = $message -replace '(?i)file:///[^''"<>|]*','<path>' -replace '(?i)(?<![a-z0-9])[a-z]:[\\/][^''"<>|]*','<path>' -replace '(?<![:\w])(?:\\\\|//)[^''"<>|]+','<path>' -replace '(?i)\b(users|runneradmin)\b','<redacted>'
+    $message = $message -replace '(?i)file://[^''"<>|]*','<path>' -replace '(?i)(?<![a-z0-9])[a-z]:[\\/][^''"<>|]*','<path>' -replace '(?:(?<![:\w])//|(?<!:)\\\\)[^''"<>|]+','<path>' -replace '(?i)\b(users|runneradmin)\b','<redacted>'
     $message = ($message -replace '[^\x20-\x7E]',' ').Trim()
     if ($message.Length -gt 200) { $message = $message.Substring(0,200) }
     return [pscustomobject][ordered]@{ status = $StatusCode; error = $code; message = $message }

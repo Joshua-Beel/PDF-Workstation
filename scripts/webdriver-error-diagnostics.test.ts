@@ -57,13 +57,16 @@ describe('WebDriver error diagnostics', () => {
         'see //server/share/dir name/file'='see <path>'
         'see \\server\share\dir name\file'='see <path>'
         'see file:///C:/a b/c'='see <path>'
+        'see file://server/share/x'='see <path>'
+        'see foo\\srv\share\x'='see foo<path>'
+        'see foo\\srv\share\a b\x'='see foo<path>'
       }
       foreach($text in $cases.Keys){
         $body=(@{value=@{error='unknown error';message=$text}}|ConvertTo-Json -Compress)
         $s=ConvertTo-SanitizedWebDriverError -StatusCode 500 -BodyText $body
         if($s.message-cne$cases[$text]){throw ('path case ['+$text+'] -> ['+$s.message+']')}
       }
-      $clean=@('Element not found: a/b ratio 1/2','navigate to http://localhost:4444/session/x','ratio 3:4 of a:b','element click intercepted: <div> at (10, 20)')
+      $clean=@('Element not found: a/b ratio 1/2','navigate to http://localhost:4444/session/x','ratio 3:4 of a:b','element click intercepted: <div> at (10, 20)','fetch https://example.com/a//b and http://host/x','see http://localhost:4444/session/x')
       foreach($text in $clean){
         $body=(@{value=@{error='unknown error';message=$text}}|ConvertTo-Json -Compress)
         $s=ConvertTo-SanitizedWebDriverError -StatusCode 500 -BodyText $body

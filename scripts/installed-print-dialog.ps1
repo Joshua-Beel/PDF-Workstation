@@ -1536,6 +1536,19 @@ function Get-ExactNativeSaveDialogRoles {
     }
 }
 
+function Get-NativeWindowReceiptRank {
+    param([int]$TopLevelCount = 0,[string]$Stage = 'not-started',[string]$ReceiptJson)
+    if (-not [string]::IsNullOrEmpty($ReceiptJson)) {
+        $receipt = $ReceiptJson | ConvertFrom-Json
+        $TopLevelCount = [int]$receipt.topLevelOwnedCount
+        $Stage = [string]$receipt.nativeEnumerationStage
+    }
+    $order = @('not-started','native-enumeration-started','native-enumeration-complete','uia-conversion-started','uia-conversion-complete')
+    $index = [Array]::IndexOf($order,$Stage)
+    if ($TopLevelCount -lt 1 -or $index -lt 0) { return 0 }
+    return $index + 1
+}
+
 function Wait-NewProcessNativeWindowSurface {
     param(
         [Parameter(Mandatory = $true)][int]$ProcessId,
@@ -1636,7 +1649,9 @@ function Wait-NewProcessNativeWindowSurface {
             }
         } catch {
             if ([datetime]::UtcNow -ge $Deadline) {
-                $structure = Get-SanitizedNativeWindowTopologyJson -TopLevelRecords $topLevelRecords -CandidateTopLevelRecords $candidateTopLevelRecords -SurfaceRecords $surfaceRecords -NativeEnumerationStage $rootedEnumerationStage
+                if ((Get-NativeWindowReceiptRank -TopLevelCount $topLevelRecords.Count -Stage $rootedEnumerationStage) -ge (Get-NativeWindowReceiptRank -ReceiptJson $structure)) {
+                    $structure = Get-SanitizedNativeWindowTopologyJson -TopLevelRecords $topLevelRecords -CandidateTopLevelRecords $candidateTopLevelRecords -SurfaceRecords $surfaceRecords -NativeEnumerationStage $rootedEnumerationStage
+                }
                 break
             }
             if ($topLevelRecords.Count -gt 0) {
