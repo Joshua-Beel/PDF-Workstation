@@ -106,6 +106,37 @@ describe('published in-app update verification infrastructure', () => {
     expect(script).toContain('documentSentinelPreserved = $true');
   });
 
+  it('requires the automatic relaunch whenever an Explorer shell window exists and labels the verifier launch', () => {
+    const script = readFileSync(scriptPath, 'utf8');
+    expect(script).toMatch(/Assert-FirewallEnforcing\r?\n#[^\n]*RunAsUser[^\n]*\r?\n\$shellWindowBeforeUpdate = Test-ShellWindowPresent\r?\n\$session = \$null/);
+    expect(script).toContain('-ShellWindowAtRelaunch (Test-ShellWindowPresent)');
+    expect(script).toContain('automaticRelaunchVerified = [bool]$relaunchOutcome.verified');
+    expect(script).toContain('automaticRelaunchObserved = [bool]$relaunchOutcome.observed; automaticRelaunchNotObservedReason = $relaunchOutcome.notObservedReason');
+    expect(script).toContain("postUpdateLaunchedBy = 'verifier-webdriver'");
+    expect(script).not.toMatch(/automaticRelaunch(Verified|Observed)\s*=\s*\$true/);
+    expect(script.indexOf('Resolve-AutomaticRelaunch -Observed')).toBeLessThan(script.indexOf('$postSession = Start-WebDriverSession'));
+    const source = verifierHarness(
+      ['Test-ShellWindowPresent', 'Resolve-AutomaticRelaunch'],
+      String.raw`
+        $observed=Resolve-AutomaticRelaunch -Observed $true -ShellWindowBeforeUpdate $false -ShellWindowAtRelaunch $false
+        if(-not$observed.observed-or-not$observed.verified-or$null-ne$observed.notObservedReason){throw 'Observed relaunch was not recorded as verified.'}
+        $observed=Resolve-AutomaticRelaunch -Observed $true -ShellWindowBeforeUpdate $true -ShellWindowAtRelaunch $true
+        if(-not$observed.verified){throw 'Observed relaunch with a shell was not verified.'}
+        foreach($shell in @(@($true,$false),@($false,$true),@($true,$true))){
+          $message='';try{$null=Resolve-AutomaticRelaunch -Observed $false -ShellWindowBeforeUpdate $shell[0] -ShellWindowAtRelaunch $shell[1]}catch{$message=$_.Exception.Message}
+          if($message-cne'The updater did not automatically relaunch the exact installed target application.'){throw 'A missing relaunch was excused although a shell window existed.'}
+        }
+        $missing=Resolve-AutomaticRelaunch -Observed $false -ShellWindowBeforeUpdate $false -ShellWindowAtRelaunch $false
+        if($missing.observed-or$missing.verified-or$missing.notObservedReason-cne'github-hosted-no-explorer-shell'){throw 'No-shell outcome was not recorded honestly.'}
+        if((Test-ShellWindowPresent -Provider {$true})-ne$true-or(Test-ShellWindowPresent -Provider {$false})-ne$false){throw 'Shell probe provider was not honored.'}
+        $rejected=$false;try{$null=Test-ShellWindowPresent -Provider {'yes'}}catch{$rejected=$true};if(-not$rejected){throw 'Non-boolean shell probe was accepted.'}
+        if((Test-ShellWindowPresent)-isnot[bool]){throw 'Live shell probe did not return a boolean.'}
+      `,
+    );
+    const result = spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', source], { encoding: 'utf8', timeout: 30_000 });
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
   it('drives WebDriver through the shared hosted-proven launch helpers', () => {
     const script = readFileSync(scriptPath, 'utf8');
     expect(script).toMatch(/Set-StrictMode -Version Latest\r?\n\r?\n\. \(Join-Path \$PSScriptRoot 'installed-app-launch\.ps1'\)/);
@@ -167,7 +198,7 @@ describe('published in-app update verification infrastructure', () => {
     expect(script).not.toContain('Invoke-InstalledPublisherUiProof');
     expect(script.match(/= New-HostedPublisherUiNotAttemptedEvidence -Path/g)).toHaveLength(2);
     expect(script.match(/Assert-HostedPublisherUiEvidence -Value \$/g)).toHaveLength(2);
-    expect(script).toContain('schemaVersion = 2');
+    expect(script).toContain('schemaVersion = 3');
     expect(script).toContain("mode = 'hosted-noninteractive'");
     expect(script).toContain("reason = 'github-hosted-noninteractive-session'");
     expect(script).toContain("publisherUiMode = 'hosted-noninteractive'; publisherUiAttempted = $false");

@@ -466,6 +466,22 @@ function Assert-FirewallEnforcing {
     }
 }
 
+function Test-ShellWindowPresent {
+    param([scriptblock]$Provider)
+    if ($Provider) { $value = & $Provider; if ($value -isnot [bool]) { throw 'Shell window probe returned a non-boolean.' }; return $value }
+    if (-not ('SmacrobatUpdateShellProbe' -as [type])) {
+        Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class SmacrobatUpdateShellProbe { [DllImport("user32.dll")] public static extern IntPtr GetShellWindow(); }'
+    }
+    return [SmacrobatUpdateShellProbe]::GetShellWindow() -ne [IntPtr]::Zero
+}
+
+function Resolve-AutomaticRelaunch {
+    param([bool]$Observed,[bool]$ShellWindowBeforeUpdate,[bool]$ShellWindowAtRelaunch)
+    if ($Observed) { return [ordered]@{ observed = $true; verified = $true; notObservedReason = $null } }
+    if ($ShellWindowBeforeUpdate -or $ShellWindowAtRelaunch) { throw 'The updater did not automatically relaunch the exact installed target application.' }
+    return [ordered]@{ observed = $false; verified = $false; notObservedReason = 'github-hosted-no-explorer-shell' }
+}
+
 function Assert-Sentinel {
     param([string]$Path,[uint64]$Bytes,[string]$Sha256)
     Assert-FileReceipt -Path $Path -Bytes $Bytes -Sha256 $Sha256 -Kind 'Upgrade sentinel'
@@ -578,6 +594,8 @@ Assert-FileReceipt -Path $tauriDriver -Bytes ([uint64]$driverReceipt.tauriDriver
 Assert-FileReceipt -Path $edgeDriver -Bytes ([uint64]$driverReceipt.edgeDriver.bytes) -Sha256 ([string]$driverReceipt.edgeDriver.sha256) -Kind 'Pinned EdgeDriver'
 
 Assert-FirewallEnforcing
+# Tauri's NSIS /R relaunch runs nsis_tauri_utils::RunAsUser, which de-elevates through the Explorer shell window.
+$shellWindowBeforeUpdate = Test-ShellWindowPresent
 $session = $null
 $postSession = $null
 $firewallName = $null
@@ -648,7 +666,7 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
         if ($relaunches.Count -gt 1) { throw 'Automatic updater relaunch was ambiguous.' }
         Start-Sleep -Milliseconds 200
     } while ([datetime]::UtcNow -lt $installDeadline)
-    if ($null -eq $automaticRelaunch) { throw 'The updater did not automatically relaunch the exact installed target application.' }
+    $relaunchOutcome = Resolve-AutomaticRelaunch -Observed ($null -ne $automaticRelaunch) -ShellWindowBeforeUpdate $shellWindowBeforeUpdate -ShellWindowAtRelaunch (Test-ShellWindowPresent)
     Stop-ExactProcesses -ApplicationPath ([string]$upgraded.appPath)
     Stop-WebDriverSession -Session $session
     $session = $null
@@ -691,8 +709,8 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
     Assert-HostedPublisherUiEvidence -Value $applicationPublisherUi -Kind 'installed-application' -FileName 'pdf-workstation.exe' -Bytes ([uint64]$targetApplicationReceipt.bytes) -Sha256 ([string]$targetApplicationReceipt.sha256) -Publisher $ExpectedPublisher
     [IO.Directory]::CreateDirectory($output) | Out-Null
     $record = [ordered]@{
-        schemaVersion = 2
-        scope = 'Ephemeral GitHub-hosted proof of the exact published 0.2.0 UI checking the public latest manifest, deterministic pre-download network failure and retry, signed target install, automatic relaunch, current-version recheck, exact Authenticode publisher and trusted-timestamp verification, sentinel preservation, and standalone signed-installer restoration of a controlled missing-application-executable state; the noninteractive hosted session does not attempt or verify Windows Explorer Digital Signatures UI, and partial-byte interruption and installer transactionality are not established.'
+        schemaVersion = 3
+        scope = 'Ephemeral GitHub-hosted proof of the exact published 0.2.0 UI checking the public latest manifest, deterministic pre-download network failure and retry, signed target install, automatic relaunch when the session has an Explorer shell window (otherwise recorded as not observed with its reason), a verifier-launched current-version recheck, exact Authenticode publisher and trusted-timestamp verification, sentinel preservation, and standalone signed-installer restoration of a controlled missing-application-executable state; the noninteractive hosted session does not attempt or verify Windows Explorer Digital Signatures UI, and partial-byte interruption and installer transactionality are not established.'
         mode = 'published-stable-in-app-update'
         workflowSourceRevision = $WorkflowSourceRevision
         targetSourceRevision = $TargetSourceRevision
@@ -724,7 +742,9 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
         updater = [ordered]@{
             baselineUiVersion = [string]$available.installed; offeredVersion = [string]$available.status; earlyFailureStatus = [string]$failed.status
             retryDownloadStateObserved = [bool]$sawDownloadState; updaterSessionClosedForInstall = [bool]$sessionClosedForInstall
-            automaticRelaunchObserved = $true; targetUiVersion = [string]$current.installed; targetUiStatus = [string]$current.status
+            automaticRelaunchObserved = [bool]$relaunchOutcome.observed; automaticRelaunchNotObservedReason = $relaunchOutcome.notObservedReason
+            shellWindowBeforeUpdate = [bool]$shellWindowBeforeUpdate
+            postUpdateLaunchedBy = 'verifier-webdriver'; targetUiVersion = [string]$current.installed; targetUiStatus = [string]$current.status
         }
         verification = [ordered]@{
             runner = 'github-hosted-windows-2022'; ephemeral = $true
@@ -732,7 +752,7 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
             exactPublishedBaselineInstalled = $true; inAppUpdateUiVerified = $true
             deterministicEarlyDownloadCutoffVerified = $true; failedDownloadLeftBaselineUnchanged = $true
             retryThroughSameUiVerified = $true; updaterSignatureVerified = $true; targetPublisherSignatureVerified = $true
-            registryVersionUpdated = $true; installedApplicationReceiptMatched = $true; automaticRelaunchVerified = $true
+            registryVersionUpdated = $true; installedApplicationReceiptMatched = $true; automaticRelaunchVerified = [bool]$relaunchOutcome.verified
             postUpdateLatestCheckVerified = $true; settingsSentinelPreserved = $true; documentSentinelPreserved = $true
             publisherUiMode = 'hosted-noninteractive'; publisherUiAttempted = $false
             installerShellPublisherUiVerified = $false; installedApplicationShellPublisherUiVerified = $false
