@@ -1,7 +1,8 @@
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Upgrade')]
 param(
-    [Parameter(Mandatory = $true)][string]$BaselineInstaller,
-    [Parameter(Mandatory = $true)][string]$SignedArtifactRoot,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Upgrade')][string]$BaselineInstaller,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Upgrade')][string]$SignedArtifactRoot,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Published')][string]$PublishedInstaller,
     [Parameter(Mandatory = $true)][string]$WorkRoot,
     [Parameter(Mandatory = $true)][string]$OutputRoot,
     [Parameter(Mandatory = $true)][string]$WebDriverRoot,
@@ -10,16 +11,19 @@ param(
     [Parameter(Mandatory = $true)][string]$TargetSourceRoot,
     [Parameter(Mandatory = $true)][string]$TargetVersion,
     [Parameter(Mandatory = $true)][string]$SourceRevision,
-    [Parameter(Mandatory = $true)][string]$ArtifactRunId,
-    [Parameter(Mandatory = $true)][string]$ArtifactId,
-    [Parameter(Mandatory = $true)][string]$ArtifactName,
-    [Parameter(Mandatory = $true)][string]$ArtifactBytes,
-    [Parameter(Mandatory = $true)][string]$ArtifactDigest,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Upgrade')][string]$ArtifactRunId,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Upgrade')][string]$ArtifactId,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Upgrade')][string]$ArtifactName,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Upgrade')][string]$ArtifactBytes,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Upgrade')][string]$ArtifactDigest,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Published')][string]$PublishedTag,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Published')][string]$PublishedReleaseId,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Published')][string]$PublishedInstallerAssetId,
     [Parameter(Mandatory = $true)][string]$InstallerName,
     [Parameter(Mandatory = $true)][string]$InstallerBytes,
     [Parameter(Mandatory = $true)][string]$InstallerSha256,
-    [Parameter(Mandatory = $true)][string]$RecordBytes,
-    [Parameter(Mandatory = $true)][string]$RecordSha256
+    [Parameter(Mandatory = $true, ParameterSetName = 'Upgrade')][string]$RecordBytes,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Upgrade')][string]$RecordSha256
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -315,13 +319,13 @@ function Get-UniqueResource {
         [Parameter(Mandatory = $true)][string]$Kind
     )
     $shape = $Suffix.Replace('\','/')
-    $matches = @($Files | Where-Object {
+    $found = @($Files | Where-Object {
         $relative = $_.FullName.Replace('\','/')
         $relative.Equals($shape, [StringComparison]::OrdinalIgnoreCase) -or $relative.EndsWith('/' + $shape, [StringComparison]::OrdinalIgnoreCase)
     })
-    if ($matches.Count -ne 1) { throw "$Kind is missing or duplicated." }
-    Assert-NoReparseAncestors -Path $matches[0].FullName
-    return $matches[0]
+    if ($found.Count -ne 1) { throw "$Kind is missing or duplicated." }
+    Assert-NoReparseAncestors -Path $found[0].FullName
+    return $found[0]
 }
 
 function Assert-ReceiptFileObject {
@@ -404,13 +408,13 @@ function Assert-ExtractedSignedArtifact {
         Assert-ReceiptFileObject -File $match -Receipt $entry -Kind 'Base resource'
     }
     foreach ($entry in $ReceiptSets.Ocr) {
-        $matches = @($Files | Where-Object {
+        $found = @($Files | Where-Object {
             $shape = $_.FullName.Replace('\','/')
             $shape -match '/resources/ocr/[a-f0-9]{64}/' -and $shape.EndsWith('/' + [string]$entry.suffix, [StringComparison]::OrdinalIgnoreCase)
         })
-        if ($matches.Count -ne 1) { throw 'OCR resource is missing or duplicated.' }
-        Assert-NoReparseAncestors -Path $matches[0].FullName
-        Assert-ReceiptFileObject -File $matches[0] -Receipt $entry -Kind 'OCR resource'
+        if ($found.Count -ne 1) { throw 'OCR resource is missing or duplicated.' }
+        Assert-NoReparseAncestors -Path $found[0].FullName
+        Assert-ReceiptFileObject -File $found[0] -Receipt $entry -Kind 'OCR resource'
     }
     $engine = @($Files | Where-Object { $_.FullName.Replace('\','/') -match '/resources/ocr/[a-f0-9]{64}/bin/tesseract\.exe$' })
     if ($engine.Count -ne 1) { throw 'Signed OCR engine is missing or duplicated.' }
@@ -526,13 +530,13 @@ function Assert-InstalledSignedResources {
         Assert-ReceiptFileObject -File $match -Receipt $entry -Kind 'Installed base resource'
     }
     foreach ($entry in $ReceiptSets.Ocr) {
-        $matches = @($files | Where-Object {
+        $found = @($files | Where-Object {
             $shape = $_.FullName.Replace('\','/')
             $shape -match '/resources/ocr/[a-f0-9]{64}/' -and $shape.EndsWith('/' + [string]$entry.suffix, [StringComparison]::OrdinalIgnoreCase)
         })
-        if ($matches.Count -ne 1) { throw 'Installed OCR resource is missing or duplicated.' }
-        Assert-NoReparseAncestors -Path $matches[0].FullName
-        Assert-ReceiptFileObject -File $matches[0] -Receipt $entry -Kind 'Installed OCR resource'
+        if ($found.Count -ne 1) { throw 'Installed OCR resource is missing or duplicated.' }
+        Assert-NoReparseAncestors -Path $found[0].FullName
+        Assert-ReceiptFileObject -File $found[0] -Receipt $entry -Kind 'Installed OCR resource'
     }
     $pdfium = Get-UniqueResource -Files $files -Suffix 'resources/pdfium/bin/pdfium.dll' -Kind 'Installed PDFium'
     $identity = ([string]$ReceiptSets.Engine.sha256).ToLowerInvariant()
@@ -793,11 +797,416 @@ function Write-SanitizedUpgradeRecord {
     return $path
 }
 
+function Assert-PublishedInstallerInputs {
+    param(
+        [Parameter(Mandatory = $true)][string]$TargetVersion,
+        [Parameter(Mandatory = $true)][string]$PublishedTag,
+        [Parameter(Mandatory = $true)][string]$SourceRevision,
+        [Parameter(Mandatory = $true)][string]$PublishedReleaseId,
+        [Parameter(Mandatory = $true)][string]$PublishedInstallerAssetId,
+        [Parameter(Mandatory = $true)][string]$InstallerName,
+        [Parameter(Mandatory = $true)][string]$InstallerBytes,
+        [Parameter(Mandatory = $true)][string]$InstallerSha256
+    )
+    if ($TargetVersion -cnotmatch '^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$') { throw 'Published target version must be plain MAJOR.MINOR.PATCH.' }
+    if ($PublishedTag -cne "v$TargetVersion") { throw 'Published tag must be exactly v plus the target version.' }
+    if ($SourceRevision -cnotmatch '^[a-f0-9]{40}$') { throw 'Published source revision must be a full lowercase 40-character commit id.' }
+    if ($InstallerName -cne "PDF.Workstation_${TargetVersion}_x64-setup.exe") { throw 'Published installer name is not the exact release asset name.' }
+    if ($InstallerSha256 -cnotmatch '^[A-F0-9]{64}$') { throw 'Published installer SHA-256 must be 64 uppercase hexadecimal characters.' }
+    return [pscustomobject][ordered]@{
+        TargetVersion = $TargetVersion
+        Tag = $PublishedTag
+        SourceRevision = $SourceRevision
+        ReleaseId = ConvertTo-SignedInputUInt64 $PublishedReleaseId 'Published release id'
+        InstallerAssetId = ConvertTo-SignedInputUInt64 $PublishedInstallerAssetId 'Published installer asset id'
+        InstallerName = $InstallerName
+        InstallerBytes = ConvertTo-SignedInputUInt64 $InstallerBytes 'Published installer bytes'
+        InstallerSha256 = $InstallerSha256
+    }
+}
+
+function Get-PublishedReceiptSets {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Files,
+        [Parameter(Mandatory = $true)][string]$ExtractionRoot,
+        [Parameter(Mandatory = $true)][object[]]$BaseEntries,
+        [Parameter(Mandatory = $true)]$OcrPins,
+        [scriptblock]$SignatureProvider,
+        [scriptblock]$PdfiumEquivalenceProvider
+    )
+    $root = [IO.Path]::GetFullPath($ExtractionRoot).TrimEnd('\')
+    $ocrRelative = @()
+    foreach ($file in $Files) {
+        $path = [IO.Path]::GetFullPath([string]$file.FullName)
+        if (-not $path.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Published extraction escaped its proof root.' }
+        $relative = $path.Substring($root.Length + 1).Replace('\','/')
+        if ($relative.StartsWith('resources/ocr/', [StringComparison]::OrdinalIgnoreCase)) { $ocrRelative += $relative }
+    }
+    $suffixes = @('bin/tesseract.exe','tessdata/eng.traineddata','licenses/Tesseract-Apache-2.0.txt','licenses/Leptonica-BSD-2-Clause.txt','licenses/eng-fast-Apache-2.0.txt')
+    if ($ocrRelative.Count -ne $suffixes.Count) { throw 'Published installer must contain exactly five OCR resources.' }
+    $identities = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($relative in $ocrRelative) {
+        $shape = [regex]::Match($relative, '^resources/ocr/([a-f0-9]{64})/(.+)$')
+        if (-not $shape.Success -or $suffixes -cnotcontains $shape.Groups[2].Value) { throw 'Published OCR resource path is invalid.' }
+        $null = $identities.Add($shape.Groups[1].Value)
+    }
+    if ($identities.Count -ne 1) { throw 'Published OCR resources do not share one identity folder.' }
+    $identity = @($identities)[0]
+
+    $app = Get-UniqueResource -Files $Files -Suffix 'pdf-workstation.exe' -Kind 'Published packaged application'
+    $null = Assert-TrustedWindowsSignature -Path $app.FullName -SignatureProvider $SignatureProvider -ExpectedPublisher $script:Pins.ExpectedPublisher
+    $engine = Get-UniqueResource -Files $Files -Suffix "resources/ocr/$identity/bin/tesseract.exe" -Kind 'Published OCR engine'
+    $engineSha256 = Get-ExactSha256 -Path $engine.FullName
+    if ($engineSha256.ToLowerInvariant() -cne $identity) { throw 'Published OCR engine SHA-256 does not match its identity folder.' }
+    $null = Assert-TrustedWindowsSignature -Path $engine.FullName -SignatureProvider $SignatureProvider -ExpectedPublisher $script:Pins.ExpectedPublisher
+    if (-not (Test-ExecutableContainsAscii -Path $app.FullName -Marker $engineSha256)) { throw 'Published application does not embed the packaged OCR engine identity.' }
+
+    $pinned = @(
+        ,@('tessdata/eng.traineddata','model',$OcrPins.model.data,'eng.traineddata')
+        ,@('licenses/Tesseract-Apache-2.0.txt','license',$OcrPins.tesseract.license,'Tesseract-Apache-2.0.txt')
+        ,@('licenses/Leptonica-BSD-2-Clause.txt','license',$OcrPins.leptonica.license,'Leptonica-BSD-2-Clause.txt')
+        ,@('licenses/eng-fast-Apache-2.0.txt','license',$OcrPins.model.license,'eng-fast-Apache-2.0.txt')
+    )
+    $ocr = @()
+    foreach ($pin in $pinned) {
+        $pinFile = if ($pin[1] -ceq 'model') { [string]$pin[2].file } else { [string]$pin[2].output }
+        if ($pinFile -cne [string]$pin[3] -or [uint64]$pin[2].bytes -eq 0 -or [string]$pin[2].sha256 -cnotmatch '^[A-F0-9]{64}$') {
+            throw 'Tagged OCR pins are not the expected model and license receipts.'
+        }
+        $file = Get-UniqueResource -Files $Files -Suffix "resources/ocr/$identity/$($pin[0])" -Kind 'Published OCR resource'
+        if ([uint64]$file.Length -ne [uint64]$pin[2].bytes -or (Get-ExactSha256 -Path $file.FullName) -cne [string]$pin[2].sha256) {
+            throw 'Published OCR resource differs from the tagged pins.'
+        }
+        $ocr += [pscustomobject][ordered]@{ suffix = [string]$pin[0]; role = [string]$pin[1]; bytes = [uint64]$file.Length; sha256 = [string]$pin[2].sha256 }
+    }
+    $engineReceipt = [pscustomobject][ordered]@{ suffix = 'bin/tesseract.exe'; role = 'engine'; bytes = [uint64]$engine.Length; sha256 = $engineSha256 }
+    $ocr += $engineReceipt
+
+    $base = @()
+    $pdfium = @()
+    foreach ($entry in $BaseEntries) {
+        $target = [string]$entry.Target
+        $file = Get-UniqueResource -Files $Files -Suffix $target -Kind 'Published base resource'
+        if ($target -ceq 'resources/pdfium/bin/pdfium.dll') {
+            if ($PdfiumEquivalenceProvider) {
+                & $PdfiumEquivalenceProvider ([string]$entry.Source) $file.FullName
+            } else {
+                Assert-SignedPdfiumEquivalent -UnsignedPath ([string]$entry.Source) -SignedPath $file.FullName -SignatureProvider $SignatureProvider -ExpectedPublisher $script:Pins.ExpectedPublisher
+            }
+            $record = [pscustomobject][ordered]@{ target = $target; bytes = [uint64]$file.Length; sha256 = Get-ExactSha256 -Path $file.FullName; unsignedBytes = [uint64]$entry.Receipt.Bytes; unsignedSha256 = [string]$entry.Receipt.Sha256 }
+            $pdfium += $record
+        } else {
+            if ([uint64]$file.Length -ne [uint64]$entry.Receipt.Bytes -or (Get-ExactSha256 -Path $file.FullName) -cne [string]$entry.Receipt.Sha256) {
+                throw 'Published base resource differs from the tagged source.'
+            }
+            $record = [pscustomobject][ordered]@{ target = $target; bytes = [uint64]$file.Length; sha256 = [string]$entry.Receipt.Sha256 }
+        }
+        $base += $record
+    }
+    if ($pdfium.Count -ne 1) { throw 'Published base resources do not contain exactly one PDFium binary.' }
+    if (@($base | Where-Object { [string]$_.target -ceq 'resources/welcome.pdf' }).Count -ne 1) { throw 'Published base resources do not contain exactly one welcome sample.' }
+    return [pscustomobject]@{
+        Identity = $identity
+        Receipt = [pscustomobject]@{ packagedApplication = [pscustomobject][ordered]@{ bytes = [uint64]$app.Length; sha256 = Get-ExactSha256 -Path $app.FullName } }
+        Sets = [pscustomobject]@{ Base = $base; Ocr = $ocr; Pdfium = $pdfium[0]; Engine = $engineReceipt }
+    }
+}
+
+function Assert-HostedPublisherEvidence {
+    param([Parameter(Mandatory = $true)]$Value, [Parameter(Mandatory = $true)][string]$Kind, [Parameter(Mandatory = $true)][string]$FileName, [Parameter(Mandatory = $true)][uint64]$Bytes, [Parameter(Mandatory = $true)][string]$Sha256)
+    Assert-ExactProperties -Value $Value -Expected @(
+        'kind','fileName','bytes','sha256','publisher','authenticodeStatus','trustedTimestampVerified',
+        'shellPublisherUiAttempted','shellPublisherUiVerified','notAttemptedReason','screenshotsUsed'
+    ) -Kind 'Hosted publisher evidence receipt'
+    if ([string]$Value.kind -cne $Kind -or [string]$Value.fileName -cne $FileName -or
+        [uint64]$Value.bytes -ne $Bytes -or [string]$Value.sha256 -cne $Sha256 -or
+        [string]$Value.publisher -cne $script:Pins.ExpectedPublisher -or [string]$Value.authenticodeStatus -cne 'Valid' -or
+        $Value.trustedTimestampVerified -isnot [bool] -or -not $Value.trustedTimestampVerified -or
+        $Value.shellPublisherUiAttempted -isnot [bool] -or $Value.shellPublisherUiAttempted -or
+        $Value.shellPublisherUiVerified -isnot [bool] -or $Value.shellPublisherUiVerified -or
+        [string]$Value.notAttemptedReason -cne 'github-hosted-noninteractive-session' -or
+        $Value.screenshotsUsed -isnot [bool] -or $Value.screenshotsUsed) {
+        throw 'Hosted publisher evidence receipt is incomplete or malformed.'
+    }
+}
+
+function Write-SanitizedPublishedRecord {
+    param(
+        [Parameter(Mandatory = $true)][string]$OutputRoot,
+        [Parameter(Mandatory = $true)][string]$WorkflowSourceRevision,
+        [Parameter(Mandatory = $true)]$Inputs,
+        [Parameter(Mandatory = $true)]$Published,
+        [Parameter(Mandatory = $true)]$InstalledEngineSmoke,
+        [Parameter(Mandatory = $true)]$InstalledAppLaunch,
+        [Parameter(Mandatory = $true)]$InstallerPublisherEvidence,
+        [Parameter(Mandatory = $true)]$ApplicationPublisherEvidence
+    )
+    if ($WorkflowSourceRevision -cnotmatch '^[a-f0-9]{40}$') { throw 'Workflow source revision is malformed.' }
+    $application = $Published.Receipt.packagedApplication
+    Assert-HostedPublisherEvidence -Value $InstallerPublisherEvidence -Kind 'installer' -FileName $Inputs.InstallerName -Bytes $Inputs.InstallerBytes -Sha256 $Inputs.InstallerSha256
+    Assert-HostedPublisherEvidence -Value $ApplicationPublisherEvidence -Kind 'installed-application' -FileName 'pdf-workstation.exe' -Bytes ([uint64]$application.bytes) -Sha256 ([string]$application.sha256)
+    $model = @($Published.Sets.Ocr | Where-Object { [string]$_.suffix -ceq 'tessdata/eng.traineddata' })
+    $welcome = @($Published.Sets.Base | Where-Object { [string]$_.target -ceq 'resources/welcome.pdf' })
+    if ($model.Count -ne 1 -or $welcome.Count -ne 1) { throw 'Published model or welcome receipt is not unique.' }
+    if ([string]$Published.Identity -cnotmatch '^[a-f0-9]{64}$' -or ([string]$Published.Sets.Engine.sha256).ToLowerInvariant() -cne [string]$Published.Identity) {
+        throw 'Published OCR engine identity receipt is inconsistent.'
+    }
+    if (Test-Path -LiteralPath $OutputRoot) { throw 'Sanitized output root must be fresh.' }
+    [IO.Directory]::CreateDirectory($OutputRoot) | Out-Null
+    Assert-NoReparseAncestors -Path $OutputRoot
+    $record = [ordered]@{
+        schemaVersion = 1
+        scope = 'Ephemeral GitHub-hosted silent NSIS installation of the exact published release installer on a fresh runner, exact Authenticode publisher and trusted-timestamp verification, packaged OCR engine identity and signature verification, direct installed-engine OCR smoke, and installed application WebView launch/sample-render/current-page OCR completion on the packaged welcome.pdf page 1; the noninteractive hosted session does not attempt or verify Windows Explorer Digital Signatures UI, and OCR accuracy, searchable OCR, other native dialogs, native visuals, UAC and SmartScreen prompts, user documents, printing, preferences, drag-and-drop, and updater behavior are not established.'
+        mode = 'ephemeral-current-user-silent-published-install'
+        workflowSourceRevision = $WorkflowSourceRevision
+        published = [ordered]@{
+            version = $Inputs.TargetVersion
+            tag = $Inputs.Tag
+            sourceRevision = $Inputs.SourceRevision
+            releaseId = [uint64]$Inputs.ReleaseId
+            installerAssetId = [uint64]$Inputs.InstallerAssetId
+            installer = [ordered]@{ fileName = $Inputs.InstallerName; bytes = [uint64]$Inputs.InstallerBytes; sha256 = $Inputs.InstallerSha256 }
+            installedApplication = [ordered]@{ bytes = [uint64]$application.bytes; sha256 = [string]$application.sha256 }
+            ocrEngine = [ordered]@{
+                identity = [string]$Published.Identity
+                bytes = [uint64]$Published.Sets.Engine.bytes
+                sha256 = [string]$Published.Sets.Engine.sha256
+                signature = 'Valid'
+                identityFolderMatched = $true
+                applicationEmbedsIdentity = $true
+            }
+            ocrModel = [ordered]@{ bytes = [uint64]$model[0].bytes; sha256 = [string]$model[0].sha256; matchedTaggedPins = $true }
+            welcomeSample = [ordered]@{ bytes = [uint64]$welcome[0].bytes; sha256 = [string]$welcome[0].sha256; matchedTaggedSource = $true }
+        }
+        installedEngineOcrSmoke = $InstalledEngineSmoke
+        installedApplicationLaunch = $InstalledAppLaunch
+        publisherUi = [ordered]@{
+            mode = 'hosted-noninteractive'
+            attempted = $false
+            verified = $false
+            reason = 'github-hosted-noninteractive-session'
+            screenshotsUsed = $false
+            installer = $InstallerPublisherEvidence
+            installedApplication = $ApplicationPublisherEvidence
+        }
+        publisher = $script:Pins.ExpectedPublisher
+        signatures = [ordered]@{ installer = 'Valid'; application = 'Valid'; pdfium = 'Valid'; engine = 'Valid'; trustedTimestampsRequired = $true }
+        verification = [ordered]@{
+            runner = 'github-hosted-windows-2022'
+            ephemeral = $true
+            publishedReleaseAssetDownloadedByWorkflow = $true
+            freshRunnerInstall = $true
+            baselineUpgradePerformed = $false
+            publishedSilentInstall = $true
+            registryVersionMatched = $true
+            extractedInventoryMatchedTaggedSource = $true
+            installedReceiptsMatched = $true
+            ocrEngineIdentityVerified = $true
+            ocrEngineSignatureVerified = $true
+            settingsSentinelPreserved = $true
+            documentSentinelPreserved = $true
+            applicationLaunchVerified = $true
+            webViewDomVerified = $true
+            nativeOcrCapabilityVerified = $true
+            samplePdfOpened = $true
+            samplePdfiumRenderVerified = $true
+            launchProcessCleanupVerified = $true
+            installedEngineOcrSmokeVerified = $true
+            applicationCurrentPageOcrCompleted = $true
+            applicationOcrRecognitionVerified = $true
+            applicationOcrTextRecorded = $false
+            applicationOcrAccuracyVerified = $false
+            applicationSearchableOcrVerified = $false
+            publisherUiMode = 'hosted-noninteractive'
+            publisherUiAttempted = $false
+            installerShellPublisherUiVerified = $false
+            installedApplicationShellPublisherUiVerified = $false
+            publisherUiScreenshotsUsed = $false
+            uacPublisherPromptVerified = $false
+            smartScreenPublisherPromptVerified = $false
+            nativeWindowVisualVerified = $false
+            realPreferencesVerified = $false
+            nativeFilePickerVerified = $false
+            userPdfVerified = $false
+            printingVerified = $false
+            nativeDragDropVerified = $false
+            inAppUpdaterVerified = $false
+        }
+    }
+    $json = $record | ConvertTo-Json -Depth 12
+    if ($json -match '(?i)([A-Z]:\\|\\Users\\|runneradmin|GITHUB_TOKEN|GH_TOKEN|AZURE_|TAURI_SIGNING|codesigning\.azure\.net|signingAccount|signingProfile|tenantId|clientId|raw\.log)') {
+        throw 'Sanitized published record contains a host path, token, credential identifier, or raw log reference.'
+    }
+    $path = Join-Path $OutputRoot 'published-ocr-verification.json'
+    [IO.File]::WriteAllText($path, $json, [Text.UTF8Encoding]::new($false))
+    $files = @(Get-ChildItem -LiteralPath $OutputRoot -File -Force)
+    if ($files.Count -ne 1 -or -not $files[0].FullName.Equals($path, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Sanitized published output must contain exactly one JSON record.'
+    }
+    return $path
+}
+
+function Invoke-PublishedInstallerOcrVerification {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$WorkflowSourceRevision,
+        [Parameter(Mandatory = $true)][string]$PublishedInstaller,
+        [Parameter(Mandatory = $true)][string]$WorkRoot,
+        [Parameter(Mandatory = $true)][string]$OutputRoot,
+        [Parameter(Mandatory = $true)][string]$WebDriverRoot,
+        [Parameter(Mandatory = $true)][string]$WebViewProfileRoot,
+        [Parameter(Mandatory = $true)][string]$TargetSourceRoot,
+        [Parameter(Mandatory = $true)][string]$TargetVersion,
+        [Parameter(Mandatory = $true)][string]$PublishedTag,
+        [Parameter(Mandatory = $true)][string]$SourceRevision,
+        [Parameter(Mandatory = $true)][string]$PublishedReleaseId,
+        [Parameter(Mandatory = $true)][string]$PublishedInstallerAssetId,
+        [Parameter(Mandatory = $true)][string]$InstallerName,
+        [Parameter(Mandatory = $true)][string]$InstallerBytes,
+        [Parameter(Mandatory = $true)][string]$InstallerSha256
+    )
+    $inputs = Assert-PublishedInstallerInputs -TargetVersion $TargetVersion -PublishedTag $PublishedTag -SourceRevision $SourceRevision -PublishedReleaseId $PublishedReleaseId -PublishedInstallerAssetId $PublishedInstallerAssetId -InstallerName $InstallerName -InstallerBytes $InstallerBytes -InstallerSha256 $InstallerSha256
+
+    $runnerTemp = [string]$env:RUNNER_TEMP
+    if ([string]::IsNullOrWhiteSpace($runnerTemp)) { throw 'RUNNER_TEMP is unavailable.' }
+    $installerPath = Resolve-RunnerPath -Path $PublishedInstaller -RunnerTemp $runnerTemp -MustExist
+    $work = Resolve-RunnerPath -Path $WorkRoot -RunnerTemp $runnerTemp -MustBeFresh
+    $output = Resolve-RunnerPath -Path $OutputRoot -RunnerTemp $runnerTemp -MustBeFresh
+    $driverRoot = Resolve-RunnerPath -Path $WebDriverRoot -RunnerTemp $runnerTemp -MustExist
+    $profileRoot = Resolve-RunnerPath -Path $WebViewProfileRoot -RunnerTemp $runnerTemp -MustBeFresh
+    if (-not [IO.Path]::GetFileName($installerPath).Equals($inputs.InstallerName, [StringComparison]::Ordinal)) { throw 'Published installer file name differs from the release asset name.' }
+
+    $targetHead = (& git -C $TargetSourceRoot rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or $targetHead -cne $inputs.SourceRevision) { throw 'The target source checkout is not the published source revision.' }
+    $tagCommit = (& git -C $TargetSourceRoot rev-parse "$($inputs.Tag)^{commit}").Trim()
+    if ($LASTEXITCODE -ne 0 -or $tagCommit -cne $inputs.SourceRevision) { throw 'The published tag does not resolve to the published source revision.' }
+    if ((Get-SignedSourceVersion -ProjectRoot $TargetSourceRoot -Revision $inputs.SourceRevision) -cne $inputs.TargetVersion) { throw 'The published source revision version does not match the target version.' }
+
+    $installRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'PDF Workstation')).TrimEnd('\')
+    $settingsRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'local.pdfworkstation.desktop')).TrimEnd('\')
+    $registryPath = 'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\PDF Workstation'
+    Assert-NoReparseAncestors -Path $installRoot
+    Assert-NoReparseAncestors -Path $settingsRoot
+
+    Assert-FileReceipt -Path $installerPath -Bytes $inputs.InstallerBytes -Sha256 $inputs.InstallerSha256 -Kind 'Published release installer'
+    $null = Assert-TrustedWindowsSignature -Path $installerPath -ExpectedPublisher $script:Pins.ExpectedPublisher
+
+    $freshFacts = Get-FreshInstallFacts -InstallRoot $installRoot -SettingsRoot $settingsRoot -RegistryPath $registryPath -InstallerPaths @($installerPath)
+    Assert-FreshInstallFacts -Facts $freshFacts
+    $installerPublisherEvidence = New-HostedPublisherUiNotAttemptedEvidence `
+        -Path $installerPath `
+        -Receipt ([pscustomobject]@{ bytes = $inputs.InstallerBytes; sha256 = $inputs.InstallerSha256 }) `
+        -Kind 'installer' `
+        -ExpectedPublisher $script:Pins.ExpectedPublisher
+
+    [IO.Directory]::CreateDirectory($work) | Out-Null
+    Assert-NoReparseAncestors -Path $work
+    $baseMap = Get-BaseBundleResourceMap -ProjectRoot $TargetSourceRoot
+    if ([uint64]$baseMap.Count -eq 0) { throw 'The published source revision expands to no base resources.' }
+    $pinsPath = Join-Path $TargetSourceRoot 'scripts/ocr/pins.json'
+    Assert-NoReparseAncestors -Path $pinsPath
+    $ocrPins = Get-Content -LiteralPath $pinsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $extractedRoot = Join-Path $work 'published-extracted'
+    $extracted = Expand-InstallerProof -Installer $installerPath -Destination $extractedRoot
+    $published = Get-PublishedReceiptSets -Files $extracted -ExtractionRoot $extractedRoot -BaseEntries @($baseMap.Entries) -OcrPins $ocrPins
+    $null = Assert-ExtractedSignedArtifact -Files $extracted -ExtractionRoot $extractedRoot -Receipt $published.Receipt -ReceiptSets $published.Sets
+
+    Invoke-BoundedSilentInstaller -Path $installerPath
+    $processFacts = Get-ConflictingProcessFacts -InstallerPaths @($installerPath)
+    if ($processFacts.applicationProcessPresent -or $processFacts.installerProcessPresent) { throw 'Published silent install left an application or installer process running.' }
+    $installed = Get-InstallFacts -RegistryPath $registryPath -ExpectedInstallRoot $installRoot
+    Assert-InstallFacts -Facts $installed -ExpectedVersion $inputs.TargetVersion -ExpectedInstallRoot $installRoot -ExpectedApplication $published.Receipt.packagedApplication -ExpectedSignatureStatus 'Valid' -ExpectedPublisher $script:Pins.ExpectedPublisher -ExpectedTimestamp $true
+    $installedResources = Assert-InstalledSignedResources -InstallRoot $installRoot -Receipt $published.Receipt -ReceiptSets $published.Sets
+    $applicationPublisherEvidence = New-HostedPublisherUiNotAttemptedEvidence `
+        -Path $installedResources.Application.FullName `
+        -Receipt $published.Receipt.packagedApplication `
+        -Kind 'installed-application' `
+        -ExpectedPublisher $script:Pins.ExpectedPublisher
+
+    if (Test-Path -LiteralPath $settingsRoot) { throw 'The published installer unexpectedly created the application settings root without launching the app.' }
+    [IO.Directory]::CreateDirectory($settingsRoot) | Out-Null
+    Assert-NoReparseAncestors -Path $settingsRoot
+    $settingsSentinel = Join-Path $settingsRoot 'upgrade-sentinel.json'
+    [IO.File]::WriteAllText($settingsSentinel, '{"kind":"ephemeral-published-install-sentinel","version":1}', [Text.UTF8Encoding]::new($false))
+    $settingsSentinelBytes = [uint64](Get-Item -LiteralPath $settingsSentinel).Length
+    $settingsSentinelSha256 = Get-ExactSha256 -Path $settingsSentinel
+    $documentSentinel = Join-Path $work 'document-sentinel.pdf'
+    $fixture = Join-Path $ProjectRoot 'src-tauri/tests/fixtures/reportlab-plain-fields.pdf'
+    Assert-NoReparseAncestors -Path $fixture
+    [IO.File]::Copy($fixture, $documentSentinel, $false)
+    $documentSentinelSha256 = Get-ExactSha256 -Path $documentSentinel
+
+    $smokeRoot = Join-Path $work 'installed-engine-ocr-smoke'
+    [IO.Directory]::CreateDirectory($smokeRoot) | Out-Null
+    Assert-NoReparseAncestors -Path $smokeRoot
+    $smokeInput = Join-Path $smokeRoot 'known-text.pnm'
+    $smokeGenerator = Join-Path $ProjectRoot 'scripts/ocr/generate-smoke.ps1'
+    Assert-NoReparseAncestors -Path $smokeGenerator
+    if (-not (Test-Path -LiteralPath $smokeGenerator -PathType Leaf)) { throw 'The tracked OCR smoke generator is missing.' }
+    $smokeGeneratorItem = Get-Item -LiteralPath $smokeGenerator
+    $smokeGeneratorReceipt = [pscustomobject]@{ bytes = [uint64]$smokeGeneratorItem.Length; sha256 = Get-ExactSha256 -Path $smokeGenerator }
+    $smokeMetadata = & $smokeGenerator -OutputPath $smokeInput
+    $modelReceipt = @($published.Sets.Ocr | Where-Object { [string]$_.suffix -ceq 'tessdata/eng.traineddata' })
+    if ($modelReceipt.Count -ne 1) { throw 'The installed OCR smoke model receipt is not unique.' }
+    $installedEngineSmoke = Invoke-InstalledEngineOcrSmoke `
+        -EnginePath $installedResources.Engine.FullName `
+        -ModelPath $installedResources.Model.FullName `
+        -InputPath $smokeInput `
+        -GeneratorPath $smokeGenerator `
+        -RepositoryRoot $ProjectRoot `
+        -GeneratorReceipt $smokeGeneratorReceipt `
+        -GeneratorMetadata $smokeMetadata `
+        -EngineReceipt $published.Sets.Engine `
+        -ModelReceipt $modelReceipt[0]
+    Assert-SentinelReceipts -SettingsPath $settingsSentinel -SettingsSha256 $settingsSentinelSha256 -DocumentPath $documentSentinel -DocumentSha256 $documentSentinelSha256
+    $welcomeReceipt = @($published.Sets.Base | Where-Object { [string]$_.target -ceq 'resources/welcome.pdf' })
+    if ($welcomeReceipt.Count -ne 1) { throw 'The installed launch sample receipt is not unique.' }
+    $installedAppLaunch = Invoke-InstalledAppLaunchSmoke `
+        -ApplicationPath $installedResources.Application.FullName `
+        -ApplicationReceipt $published.Receipt.packagedApplication `
+        -OcrEnginePath $installedResources.Engine.FullName `
+        -OcrEngineReceipt $published.Sets.Engine `
+        -WelcomePath $installedResources.Welcome.FullName `
+        -WelcomeReceipt $welcomeReceipt[0] `
+        -WebDriverRoot $driverRoot `
+        -ProfileRoot $profileRoot `
+        -ApplicationSettingsRoot $settingsRoot `
+        -SettingsSentinelPath $settingsSentinel `
+        -SettingsSentinelBytes $settingsSentinelBytes `
+        -SettingsSentinelSha256 $settingsSentinelSha256 `
+        -RunnerTemp $runnerTemp `
+        -ExpectedPublisher $script:Pins.ExpectedPublisher
+    Assert-SentinelReceipts -SettingsPath $settingsSentinel -SettingsSha256 $settingsSentinelSha256 -DocumentPath $documentSentinel -DocumentSha256 $documentSentinelSha256
+
+    $recordPath = Write-SanitizedPublishedRecord `
+        -OutputRoot $output `
+        -WorkflowSourceRevision $WorkflowSourceRevision `
+        -Inputs $inputs `
+        -Published $published `
+        -InstalledEngineSmoke $installedEngineSmoke `
+        -InstalledAppLaunch $installedAppLaunch `
+        -InstallerPublisherEvidence $installerPublisherEvidence `
+        -ApplicationPublisherEvidence $applicationPublisherEvidence
+    Write-Output 'Ephemeral published installer OCR verification succeeded.'
+    Write-Output ('Sanitized record SHA-256: ' + (Get-ExactSha256 -Path $recordPath))
+}
+
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $runnerFacts = Get-HostedRunnerFacts -ProjectRoot $projectRoot
 Assert-HostedRunnerFacts -Facts $runnerFacts
 if ($PublisherUiMode -cne 'HostedNonInteractive') {
     throw 'GitHub-hosted upgrade verification requires exact HostedNonInteractive publisher UI mode.'
+}
+if ($PSCmdlet.ParameterSetName -ceq 'Published') {
+    Invoke-PublishedInstallerOcrVerification `
+        -ProjectRoot $projectRoot `
+        -WorkflowSourceRevision ([string]$runnerFacts.githubSha) `
+        -PublishedInstaller $PublishedInstaller `
+        -WorkRoot $WorkRoot -OutputRoot $OutputRoot -WebDriverRoot $WebDriverRoot -WebViewProfileRoot $WebViewProfileRoot `
+        -TargetSourceRoot $TargetSourceRoot -TargetVersion $TargetVersion -PublishedTag $PublishedTag -SourceRevision $SourceRevision `
+        -PublishedReleaseId $PublishedReleaseId -PublishedInstallerAssetId $PublishedInstallerAssetId `
+        -InstallerName $InstallerName -InstallerBytes $InstallerBytes -InstallerSha256 $InstallerSha256
+    return
 }
 
 $signedInputs = Get-SignedCheckInputs -TargetVersion $TargetVersion -SourceRevision $SourceRevision -ArtifactRunId $ArtifactRunId -ArtifactId $ArtifactId -ArtifactName $ArtifactName -ArtifactBytes $ArtifactBytes -ArtifactDigest $ArtifactDigest -InstallerName $InstallerName -InstallerBytes $InstallerBytes -InstallerSha256 $InstallerSha256 -RecordBytes $RecordBytes -RecordSha256 $RecordSha256

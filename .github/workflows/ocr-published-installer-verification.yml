@@ -1,0 +1,195 @@
+name: Manual published installer OCR verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_version: { required: true, type: string }
+      target_tag: { required: true, type: string }
+      source_revision: { required: true, type: string }
+      release_id: { required: true, type: string }
+      installer_asset_id: { required: true, type: string }
+      installer_name: { required: true, type: string }
+      installer_bytes: { required: true, type: string }
+      installer_sha256: { required: true, type: string }
+
+permissions:
+  contents: read
+
+concurrency:
+  group: published-ocr-verification-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  published:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      TARGET_VERSION: ${{ inputs.target_version }}
+      TARGET_TAG: ${{ inputs.target_tag }}
+      SOURCE_REVISION: ${{ inputs.source_revision }}
+      RELEASE_ID: ${{ inputs.release_id }}
+      INSTALLER_ASSET_ID: ${{ inputs.installer_asset_id }}
+      INSTALLER_NAME: ${{ inputs.installer_name }}
+      INSTALLER_BYTES: ${{ inputs.installer_bytes }}
+      INSTALLER_SHA256: ${{ inputs.installer_sha256 }}
+    steps:
+      - name: Require a manual master dispatch
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REPOSITORY -cne 'Joshua-Beel/PDF-Workstation' -or
+              $env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or
+              $env:GITHUB_REF -cne 'refs/heads/master') {
+            throw 'Dispatch this published installer verification only from the master branch.'
+          }
+
+      - name: Initialize fresh runner paths
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP) -or [string]::IsNullOrWhiteSpace($env:GITHUB_ENV)) {
+            throw 'GitHub-hosted runner path variables are unavailable.'
+          }
+          $root = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')
+          $values = @(
+            "PUBLISHED_ROOT=$root\pdf-workstation-published"
+            "PUBLISHED_WORK_ROOT=$root\pdf-workstation-published-work"
+            "PUBLISHED_OUTPUT_ROOT=$root\pdf-workstation-published-output"
+            "WEBDRIVER_ROOT=$root\pdf-workstation-webdriver"
+            "WEBVIEW_PROFILE_ROOT=$root\pdf-workstation-webview-profile"
+          )
+          $writer = [IO.StreamWriter]::new($env:GITHUB_ENV, $true, [Text.UTF8Encoding]::new($false))
+          try {
+            foreach ($value in $values) { $writer.WriteLine([string]$value) }
+          } finally {
+            $writer.Dispose()
+          }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the exact clean dispatched source and inputs
+        shell: pwsh
+        run: |
+          $headRevision = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $headRevision -cne $env:GITHUB_SHA) {
+            throw 'Checked-out HEAD does not match github.sha.'
+          }
+          git diff --quiet --
+          if ($LASTEXITCODE -ne 0) { throw 'Tracked working-tree files changed after checkout.' }
+          git diff --cached --quiet --
+          if ($LASTEXITCODE -ne 0) { throw 'The tracked index changed after checkout.' }
+          if ($env:TARGET_VERSION -cnotmatch '^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$' -or
+              $env:TARGET_TAG -cne "v$env:TARGET_VERSION" -or
+              $env:SOURCE_REVISION -cnotmatch '^[a-f0-9]{40}$' -or
+              $env:RELEASE_ID -cnotmatch '^[1-9][0-9]{0,19}$' -or
+              $env:INSTALLER_ASSET_ID -cnotmatch '^[1-9][0-9]{0,19}$' -or
+              $env:INSTALLER_NAME -cne "PDF.Workstation_$($env:TARGET_VERSION)_x64-setup.exe" -or
+              $env:INSTALLER_BYTES -cnotmatch '^[1-9][0-9]{0,19}$' -or
+              $env:INSTALLER_SHA256 -cnotmatch '^[A-F0-9]{64}$') {
+            throw 'Published installer inputs are malformed.'
+          }
+
+      - name: Prepare exact hosted WebDriver inputs
+        shell: pwsh
+        run: |
+          ./scripts/setup-installed-app-webdriver.ps1 -OutputRoot $env:WEBDRIVER_ROOT
+
+      - name: Recheck clean source after driver preparation
+        shell: pwsh
+        run: |
+          $headRevision = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $headRevision -cne $env:GITHUB_SHA) {
+            throw 'Checked-out HEAD changed during WebDriver preparation.'
+          }
+          git diff --quiet --
+          if ($LASTEXITCODE -ne 0) { throw 'Tracked working-tree files changed during WebDriver preparation.' }
+          git diff --cached --quiet --
+          if ($LASTEXITCODE -ne 0) { throw 'The tracked index changed during WebDriver preparation.' }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.source_revision }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: target-source
+
+      - name: Verify the exact clean published source
+        shell: pwsh
+        run: |
+          $target = (git -C target-source rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $target -cne $env:SOURCE_REVISION) { throw 'Published source checkout does not match the input revision.' }
+          $tag = (git -C target-source rev-parse "$($env:TARGET_TAG)^{commit}").Trim()
+          if ($LASTEXITCODE -ne 0 -or $tag -cne $env:SOURCE_REVISION) { throw 'Published tag does not resolve to the input revision.' }
+          git -C target-source diff --quiet --
+          if ($LASTEXITCODE -ne 0) { throw 'Published source changed after checkout.' }
+          git -C target-source diff --cached --quiet --
+          if ($LASTEXITCODE -ne 0) { throw 'Published source index changed after checkout.' }
+
+      - name: Prepare exact pinned PDFium resources in the published source
+        shell: pwsh
+        run: ./scripts/prepare-default-draft-pdfium.ps1 -TargetSourceRoot (Resolve-Path target-source).Path -WorkRoot (Join-Path $env:RUNNER_TEMP 'published-pdfium-prep')
+
+      - name: Download the exact published release installer
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if (Test-Path -LiteralPath $env:PUBLISHED_ROOT) { throw 'Published download root must be fresh.' }
+          [IO.Directory]::CreateDirectory($env:PUBLISHED_ROOT) | Out-Null
+          $jsonHeaders = @{
+            Authorization = "Bearer $env:GITHUB_TOKEN"
+            Accept = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/Joshua-Beel/PDF-Workstation/releases/$($env:RELEASE_ID)" -Headers $jsonHeaders
+          if ([string]$release.id -cne $env:RELEASE_ID -or
+              [string]$release.tag_name -cne $env:TARGET_TAG -or
+              $release.draft -isnot [bool] -or $release.draft -or
+              $release.prerelease -isnot [bool] -or $release.prerelease -or
+              [string]::IsNullOrWhiteSpace([string]$release.published_at)) {
+            throw 'Release is not the exact published stable release.'
+          }
+          $assets = @($release.assets | Where-Object { [string]$_.id -ceq $env:INSTALLER_ASSET_ID })
+          if ($assets.Count -ne 1) { throw 'Published installer asset is not unique in the release.' }
+          $asset = $assets[0]
+          if ([string]$asset.name -cne $env:INSTALLER_NAME -or
+              [string]$asset.size -cne $env:INSTALLER_BYTES -or
+              [string]$asset.state -cne 'uploaded' -or
+              [string]$asset.digest -cne ('sha256:' + $env:INSTALLER_SHA256.ToLowerInvariant())) {
+            throw 'Published installer asset metadata does not match the pinned inputs.'
+          }
+          $downloadHeaders = @{
+            Authorization = "Bearer $env:GITHUB_TOKEN"
+            Accept = 'application/octet-stream'
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $installer = Join-Path $env:PUBLISHED_ROOT $env:INSTALLER_NAME
+          Invoke-WebRequest -Uri "https://api.github.com/repos/Joshua-Beel/PDF-Workstation/releases/assets/$($env:INSTALLER_ASSET_ID)" -Headers $downloadHeaders -OutFile $installer
+          $item = Get-Item -LiteralPath $installer
+          if ([string]$item.Length -cne $env:INSTALLER_BYTES -or (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash -cne $env:INSTALLER_SHA256) {
+            throw 'Downloaded published installer does not match its pinned byte and SHA-256 receipt.'
+          }
+
+      - name: Verify fresh silent install and installed OCR
+        shell: pwsh
+        run: |
+          ./scripts/verify-signed-ocr-upgrade.ps1 `
+            -PublishedInstaller (Join-Path $env:PUBLISHED_ROOT $env:INSTALLER_NAME) `
+            -WorkRoot $env:PUBLISHED_WORK_ROOT `
+            -OutputRoot $env:PUBLISHED_OUTPUT_ROOT `
+            -WebDriverRoot $env:WEBDRIVER_ROOT `
+            -WebViewProfileRoot $env:WEBVIEW_PROFILE_ROOT `
+            -PublisherUiMode HostedNonInteractive `
+            -TargetSourceRoot (Resolve-Path target-source).Path `
+            -TargetVersion $env:TARGET_VERSION -PublishedTag $env:TARGET_TAG -SourceRevision $env:SOURCE_REVISION `
+            -PublishedReleaseId $env:RELEASE_ID -PublishedInstallerAssetId $env:INSTALLER_ASSET_ID `
+            -InstallerName $env:INSTALLER_NAME -InstallerBytes $env:INSTALLER_BYTES -InstallerSha256 $env:INSTALLER_SHA256
+
+      - name: Upload only the sanitized published verification record
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: published-ocr-verification-${{ github.sha }}
+          path: ${{ env.PUBLISHED_OUTPUT_ROOT }}/published-ocr-verification.json
+          if-no-files-found: error
