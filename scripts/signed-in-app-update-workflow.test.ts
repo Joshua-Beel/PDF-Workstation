@@ -132,7 +132,9 @@ public sealed class InAppRecordingHandler : HttpMessageHandler {
           if($null-ne[Environment]::GetEnvironmentVariable('IN_APP_UPDATE_API_TOKEN')-or(Test-Path env:IN_APP_UPDATE_API_TOKEN)){throw 'Token stayed in the process environment.'}
           $child=& pwsh.exe -NoProfile -NonInteractive -Command '[string][Environment]::GetEnvironmentVariable(''IN_APP_UPDATE_API_TOKEN'')'
           if(-not[string]::IsNullOrEmpty(($child-join''))){throw 'A child process inherited the token.'}
-          foreach($bad in @('','short','has space in it 1234567890',('ghs_'+('x'*20)+'!'),('x'*256))){
+          [Environment]::SetEnvironmentVariable('IN_APP_UPDATE_API_TOKEN',('eyJ'+('a1_-'*12)+'.'+('b2'*20)+'.'+('c3-'*10)),'Process')
+          $null=Read-ApiTokenFromEnvironment -Name 'IN_APP_UPDATE_API_TOKEN'
+          foreach($bad in @('','short','has space in it 1234567890',('ghs_'+('x'*20)+'!'),('ghs_'+('x'*20)+[char]10),('x'*4097))){
             [Environment]::SetEnvironmentVariable('IN_APP_UPDATE_API_TOKEN',$bad,'Process')
             $rejected=$false;try{$null=Read-ApiTokenFromEnvironment -Name 'IN_APP_UPDATE_API_TOKEN'}catch{$rejected=$true}
             if(-not$rejected){throw ('Malformed token was accepted: length '+$bad.Length)}

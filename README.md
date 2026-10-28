@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- In-app update check: accepts GitHub's longer token format (`.`, `-`), anchored so a trailing newline is rejected (SM0; script and test only).
 - In-app update check: tauri-driver start moved inside the session try, so a start failure is cleaned up and reported as itself (SM6; review P3).
 - In-app update check: 7-Zip and the standalone silent installers run with the shared minimal environment, as tauri-driver already does (SM6; review P3).
 - In-app update check: before the post-update session, waits up to 60 s for updater setup processes started from temp after the retry to exit, and fails if any remain (SM6; review P3).
@@ -132,11 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - Save-copy prune follow-ups (SM2): dead page links are dropped when the `/Dest` or GoTo `/D` is an indirect array too; links that never had a destination stay; `/Annots` null cleanup tested.
 - In-app update check: the installed-facts check now expects Tauri's quoted InstallLocation and names any mismatched field (no paths). Run 40596111704 failed there (SM6; script and tests).
 - In-app update check: hosted noninteractive publisher mode, as in the OCR upgrade check; Explorer dialog not attempted, signatures still verified. Run 40588308128 failed there (SM6; scripts, workflow, tests).
-- Comments/forms verifier sweep: every step now polls; fixed four checks that could never have passed (icon Save control, toggled Comments panel, checkbox/radio entry, choice option ids). No app change (SM3; scripts and tests only).
-- Comments/forms rehearsal fix: the verifier probed the sticky-comment controls once, right after the open dialog closed, before page 1 had rendered; it now polls for them and names any that stay missing. No app change (SM3; scripts and tests only).
-- Uninstall leftover fixed at its source: the default verifier itself kept the installed PDFium loaded for its proofs, so the uninstaller could not delete it; the verifier now releases it before uninstalling. The installer and app were not at fault (SM6; scripts and tests only).
-- Uninstall leftover diagnostics hardened after review: a failed snapshot or unreadable entry can no longer fail the run, and enumeration stops at 5,000 entries (SM6; scripts and tests only).
-- Uninstall leftover diagnostics: when the install folder survives the silent uninstall, the default check now lists what is left (relative names, kind, size, whether the installer or the running app created it) and any process still running from there (SM6; scripts and tests only; the check itself is unchanged).
-- Rehearsal fixes, round 8: final cleanup waits for the silent uninstaller to finish (it relaunches itself and returns at once) and names what remains if it does not (SM6; scripts and tests only).
-- Rehearsal fixes, round 7: two structural-check scripts sent truncated JavaScript because of PowerShell quoting, and every WebDriver HTTP error now logs a sanitized error code and message (SM6; scripts and tests only).
-- Rehearsal fixes, round 6: the structural page-tools check accepts and fully verifies the signed PDFium resource record and the pinned WebDriver records the earlier stages pass to it (SM6; scripts and tests only).

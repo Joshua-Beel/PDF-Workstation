@@ -29,7 +29,7 @@ function Read-ApiTokenFromEnvironment {
     $value = [Environment]::GetEnvironmentVariable($Name,[EnvironmentVariableTarget]::Process)
     [Environment]::SetEnvironmentVariable($Name,[NullString]::Value,[EnvironmentVariableTarget]::Process)
     if ($null -ne [Environment]::GetEnvironmentVariable($Name,[EnvironmentVariableTarget]::Process) -or (Test-Path -LiteralPath ('Env:' + $Name))) { throw 'The GitHub API token could not be removed from the process environment.' }
-    if ([string]::IsNullOrWhiteSpace($value) -or $value -cnotmatch '^[A-Za-z0-9_]{20,255}$') { throw 'The GitHub API token for release metadata is unavailable or malformed.' }
+    if ([string]::IsNullOrWhiteSpace($value) -or $value -cnotmatch '\A[A-Za-z0-9_.-]{20,4096}\z') { throw 'The GitHub API token for release metadata is unavailable or malformed.' }
     return $value
 }
 
