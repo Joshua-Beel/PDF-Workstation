@@ -32,7 +32,7 @@ Version 0.3.1 is the current published release (2026-10-27): publisher-signed in
 - On-page text selection (source build): select supported embedded text directly on the page.
 - Search (source build): Ctrl+F across embedded text, with case matching, one excerpt per matching page (up to 500 pages) and on-page highlights where text geometry is supported.
 
-**[OCR](docs/features.md#ocr)** (in the 0.3.1 installer; installed use checked only on the packaged sample, in the pre-tag signed build)
+**[OCR](docs/features.md#ocr)** (in the 0.3.1 installer; installed use checked only on the packaged sample, including on the published installer, run 40672496983)
 - Current-page OCR: recognize one page into a copyable dialog with a local English engine; accuracy and real-document use unverified.
 - Searchable OCR copy: save a new 150-DPI raster PDF with an invisible text layer; real-scan accuracy unverified.
 
@@ -118,7 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
-- Release scripts: new manual workflow installs a published release installer on a fresh hosted runner and runs current-page OCR on the packaged sample; prepared for 0.3.1, not yet run (SM6; scripts and tests only).
+- Published 0.3.1 installer OCR check recorded: hosted run 40672496983 installed it fresh and current-page OCR on packaged welcome.pdf p1 was recognized (402 bytes); accuracy, searchable copies, real scans not verified (SM6; docs only).
 - Child-process spawning (OCR and PDF helper) now holds a process-wide lock while its pipes are inheritable, and test processes started with `std::process::Command` take the same lock: fixes intermittent "OCR output pipes did not close" in parallel `cargo test` (SM4; test-visible only).
 - Release scripts: the installed print-dialog diagnostic keeps its last completed native-window receipt when the final poll is cut short by the deadline (fixes a CI flake), and the `WEBDRIVER_ERROR_DIAG` sanitizer now also redacts `file://server/share` and a UNC path glued to a word (SM6; scripts and tests only).
 - Text replacement and selected-text highlights now pass the same two-reader copy-permission check as search and copy (SM3).
