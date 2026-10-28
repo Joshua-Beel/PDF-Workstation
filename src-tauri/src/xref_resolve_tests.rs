@@ -344,8 +344,8 @@ fn kept_loads_match_pdfium_and_refusals_are_real_disagreements() {
     use pdfium_render::prelude::*;
     const CHILD: &str = "SM3_XREF_PDFIUM_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "xref_resolve::tests::kept_loads_match_pdfium_and_refusals_are_real_disagreements", "--nocapture", "--test-threads=1"]).env(CHILD, "1").output().unwrap();
+        let output = crate::child_job::test_output(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "xref_resolve::tests::kept_loads_match_pdfium_and_refusals_are_real_disagreements", "--nocapture", "--test-threads=1"]).env(CHILD, "1")).unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success() && stdout.contains("xref-pdfium-agreement-ok"), "child failed:
 {stdout}
@@ -563,8 +563,8 @@ fn text_extraction_needs_lopdf_and_pdfium_to_agree() {
     use crate::pdf_engine::{EngineDocument, PdfEngine};
     const CHILD: &str = "SM3_PDFIUM_PERMISSION_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "xref_resolve::tests::text_extraction_needs_lopdf_and_pdfium_to_agree", "--nocapture", "--test-threads=1"]).env(CHILD, "1").output().unwrap();
+        let output = crate::child_job::test_output(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "xref_resolve::tests::text_extraction_needs_lopdf_and_pdfium_to_agree", "--nocapture", "--test-threads=1"]).env(CHILD, "1")).unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success() && stdout.contains("pdfium-permission-ok"), "child failed:\n{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
         return;

@@ -62,6 +62,39 @@ pub(crate) const EXIT_RESOURCE_LIMIT: u32 = 0xc000_009a;
 /// Windows Error Reporting and can write a dump to the system drive).
 pub(crate) const EXIT_ALLOCATION_FAILURE: u32 = 0xe000_0a11;
 
+/// Held by `spawn_suspended` for its whole run. The child-side pipe ends are inheritable only around its
+/// `CreateProcessW` call (the handle list requires it), and a process started meanwhile by another thread
+/// with ordinary inheritance (`std::process::Command`) would copy them and keep the pipe open until that
+/// process ends. Anything in this program that starts a process the other way takes the same lock. The
+/// lock cannot cover third-party code running inside this process (shell extensions, WebView2, printer
+/// drivers); that stays a known limit, bounded by the drain grace in `run_bounded`.
+static SPAWN_LOCK: Mutex<()> = Mutex::new(());
+
+fn spawn_lock() -> std::sync::MutexGuard<'static, ()> {
+    SPAWN_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Test processes started with `std::process::Command` (which inherits every inheritable handle) are started
+/// through these, so they cannot copy another thread's half-built child pipes. The lock covers only the
+/// start, not the wait.
+#[cfg(test)]
+pub(crate) fn test_spawn(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    let _guard = spawn_lock();
+    command.spawn()
+}
+
+#[cfg(test)]
+pub(crate) fn test_output(command: &mut std::process::Command) -> std::io::Result<std::process::Output> {
+    use std::process::Stdio;
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    test_spawn(command)?.wait_with_output()
+}
+
+#[cfg(test)]
+pub(crate) fn test_status(command: &mut std::process::Command) -> std::io::Result<std::process::ExitStatus> {
+    test_spawn(command)?.wait()
+}
+
 /// How long `run_bounded` waits, once the child has ended, for its pipe threads to finish. A pipe end held by
 /// some other process (for example one started by another thread while the child's pipe ends were briefly
 /// inheritable) keeps the pipe open after the child is gone; the blocked read or write is then cancelled and
@@ -347,10 +380,11 @@ pub(crate) fn spawn_suspended<E: From<ChildSystemError>>(
     prepare: impl FnOnce() -> Result<ChildCommand, E>,
     before_create: impl FnOnce() -> Result<(), E>,
 ) -> Result<SuspendedChild, E> {
+    let _spawning = spawn_lock();
     let (job, notifications) = create_job(label, limits)?;
-    let (child_stdin, parent_stdin) = create_pipe(label, true)?;
-    let (parent_stdout, child_stdout) = create_pipe(label, false)?;
-    let (parent_stderr, child_stderr) = create_pipe(label, false)?;
+    let (child_stdin, parent_stdin) = create_pipe(label)?;
+    let (parent_stdout, child_stdout) = create_pipe(label)?;
+    let (parent_stderr, child_stderr) = create_pipe(label)?;
     let inherited = [as_windows_handle(&child_stdin), as_windows_handle(&child_stdout), as_windows_handle(&child_stderr)];
     let mut attributes = ProcThreadAttributes::with_handle_list(label, &inherited)?;
     let mut startup = STARTUPINFOEXW::default();
@@ -364,7 +398,13 @@ pub(crate) fn spawn_suspended<E: From<ChildSystemError>>(
     let ChildCommand { application, mut command_line, current_directory } = prepare()?;
     let creation_flags = CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT;
     before_create()?;
-    unsafe {
+    // The child ends are inheritable only for the `CreateProcessW` call itself; `SPAWN_LOCK` is still held.
+    // Known limit: code inside this process that starts a process without taking the lock (shell
+    // extensions, WebView2, printer drivers) could still copy them in this window; the lock cannot cover that.
+    for handle in inherited {
+        set_inheritable(label, handle, true)?;
+    }
+    let created = unsafe {
         CreateProcessW(
             PCWSTR(application.as_ptr()),
             Some(PWSTR(command_line.as_mut_ptr())),
@@ -377,8 +417,11 @@ pub(crate) fn spawn_suspended<E: From<ChildSystemError>>(
             &startup.StartupInfo,
             &mut process_info,
         )
+    };
+    for handle in inherited {
+        let _ = set_inheritable(label, handle, false);
     }
-    .map_err(|error| ChildSystemError(format!("Could not create suspended {label} process: {error}")))?;
+    created.map_err(|error| ChildSystemError(format!("Could not create suspended {label} process: {error}")))?;
     attributes.release();
     let process = unsafe { owned_handle(process_info.hProcess) };
     let thread = unsafe { owned_handle(process_info.hThread) };
@@ -675,11 +718,11 @@ fn query_extended_limits(job: &OwnedHandle, label: &str) -> Result<JOBOBJECT_EXT
     Ok(information)
 }
 
-fn create_pipe(label: &str, stdin: bool) -> Result<(OwnedHandle, OwnedHandle), ChildSystemError> {
+fn create_pipe(label: &str) -> Result<(OwnedHandle, OwnedHandle), ChildSystemError> {
     let attributes = SECURITY_ATTRIBUTES {
         nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).unwrap(),
         lpSecurityDescriptor: std::ptr::null_mut(),
-        bInheritHandle: BOOL(1),
+        bInheritHandle: BOOL(0),
     };
     let mut read = HANDLE::default();
     let mut write = HANDLE::default();
@@ -687,10 +730,13 @@ fn create_pipe(label: &str, stdin: bool) -> Result<(OwnedHandle, OwnedHandle), C
         .map_err(|error| ChildSystemError(format!("Could not create {label} pipe: {error}")))?;
     let read = unsafe { owned_handle(read) };
     let write = unsafe { owned_handle(write) };
-    let parent = if stdin { &write } else { &read };
-    unsafe { SetHandleInformation(as_windows_handle(parent), HANDLE_FLAG_INHERIT.0, windows::Win32::Foundation::HANDLE_FLAGS(0)) }
-        .map_err(|error| ChildSystemError(format!("Could not restrict {label} pipe inheritance: {error}")))?;
     Ok((read, write))
+}
+
+fn set_inheritable(label: &str, handle: HANDLE, inheritable: bool) -> Result<(), ChildSystemError> {
+    let flags = windows::Win32::Foundation::HANDLE_FLAGS(if inheritable { HANDLE_FLAG_INHERIT.0 } else { 0 });
+    unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT.0, flags) }
+        .map_err(|error| ChildSystemError(format!("Could not set {label} pipe inheritance: {error}")))
 }
 
 fn write_input(label: &str, handle: OwnedHandle, input: &[u8], io: &IoWorker) -> Result<(), ChildSystemError> {
@@ -1098,7 +1144,7 @@ mod tests {
     /// as if another process had inherited it: that pipe never closes when the child exits. Also returns
     /// the replaced end, which the test keeps open so the child's own writes still succeed.
     fn leak_pipe(running: &mut RunningChild, which: &str) -> (OwnedHandle, OwnedHandle) {
-        let (read, write) = create_pipe(LABEL, false).unwrap();
+        let (read, write) = create_pipe(LABEL).unwrap();
         match which {
             "stdout" => (write, std::mem::replace(&mut running.pipes.stdout, read)),
             "stdin" => (read, std::mem::replace(&mut running.pipes.stdin, write)),
@@ -1288,14 +1334,14 @@ mod tests {
     fn a_worker_without_a_thread_handle_does_no_blocking_io() {
         // Both pipes keep their other end open here, so a read or a large write would block forever;
         // without a handle to cancel it with, the worker must not start the I/O at all.
-        let (read, held_write) = create_pipe(LABEL, false).unwrap();
+        let (read, held_write) = create_pipe(LABEL).unwrap();
         let reader = IoWorker::default();
         reader.arm(None);
         let exceeded = AtomicBool::new(false);
         let started = Instant::now();
         assert_eq!(read_bounded(LABEL, read, 1024, &exceeded, &reader).unwrap(), Vec::<u8>::new());
         assert!(reader.cancelled_io.load(Ordering::Acquire));
-        let (held_read, write) = create_pipe(LABEL, true).unwrap();
+        let (held_read, write) = create_pipe(LABEL).unwrap();
         let writer = IoWorker::default();
         writer.arm(None);
         assert_eq!(write_input(LABEL, write, &vec![b'x'; 4 * 1024 * 1024], &writer), Ok(()));
@@ -1321,9 +1367,8 @@ mod tests {
 
     #[test]
     fn the_child_dies_when_its_owner_exits_without_cleanup() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", ENTRY, "--nocapture", "--quiet", "--test-threads=1", &format!("{MODE_PREFIX}host")])
-            .output()
+        let output = test_output(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", ENTRY, "--nocapture", "--quiet", "--test-threads=1", &format!("{MODE_PREFIX}host")]))
             .unwrap();
         assert!(output.status.success(), "{output:?}");
         let stdout = String::from_utf8_lossy(&output.stdout);

@@ -325,10 +325,9 @@ fn t5_a_file_that_kills_every_helper_stops_restarts_after_three_in_the_window() 
 
 #[test]
 fn t12_the_helper_dies_when_the_app_is_killed() {
-    let mut host = std::process::Command::new(std::env::current_exe().unwrap())
+    let mut host = crate::child_job::test_spawn(std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", ENTRY, "--nocapture", "--quiet", "--test-threads=1", &format!("{MODE_PREFIX}host")])
-        .stdout(std::process::Stdio::piped())
-        .spawn()
+        .stdout(std::process::Stdio::piped()))
         .unwrap();
     let mut lines = BufReader::new(host.stdout.take().unwrap()).lines();
     let pid: u32 = loop {
@@ -721,10 +720,9 @@ const EQUIVALENCE_NAME: &str = "pdf_helper::tests::remote_engine_matches_in_proc
 #[test]
 fn remote_engine_matches_in_process_engine_on_the_fixtures() {
     if std::env::var_os(EQUIVALENCE_CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::child_job::test_output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", EQUIVALENCE_NAME, "--nocapture", "--test-threads=1"])
-            .env(EQUIVALENCE_CHILD, "1")
-            .output()
+            .env(EQUIVALENCE_CHILD, "1"))
             .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success() && stdout.contains("helper-equivalence-ok"), "child failed:\n{stdout}\n{}", String::from_utf8_lossy(&output.stderr));

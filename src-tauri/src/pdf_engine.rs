@@ -419,8 +419,8 @@ mod tests {
     #[test]
     fn render_bgra_into_matches_render_with_config() {
         if std::env::var_os(CHILD).is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", NAME, "--nocapture", "--test-threads=1"]).env(CHILD, "1").output().unwrap();
+            let output = crate::child_job::test_output(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture", "--test-threads=1"]).env(CHILD, "1")).unwrap();
             let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(output.status.success() && stdout.contains("engine-equivalence-ok"), "child failed:\n{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
             return;
@@ -520,8 +520,8 @@ mod tests {
     #[test]
     fn page_sizes_by_index_match_loading_every_page() {
         if std::env::var_os(SIZES_CHILD).is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", SIZES_NAME, "--nocapture", "--test-threads=1"]).env(SIZES_CHILD, "1").output().unwrap();
+            let output = crate::child_job::test_output(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", SIZES_NAME, "--nocapture", "--test-threads=1"]).env(SIZES_CHILD, "1")).unwrap();
             let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(output.status.success() && stdout.contains("page-sizes-identical"), "child failed:\n{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
             if let Some(line) = stdout.lines().find(|line| line.contains("page-sizes-identical")) { println!("{line}"); }

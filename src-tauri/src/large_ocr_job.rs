@@ -1269,7 +1269,7 @@ pub(crate) mod tests {
         std::fs::write(elsewhere.join("keep.txt"), b"keep").unwrap();
         let open_part = directory.join(format!("part-{}", state.closed.len() + 1));
         std::fs::remove_dir_all(&open_part).unwrap();
-        let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&open_part).arg(&elsewhere).output().unwrap();
+        let made = crate::child_job::test_output(std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&open_part).arg(&elsewhere)).unwrap();
         assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
         let outcome = run_in_parts(&directory, &destination, true);
         let JobOutcome::Paused { reason: PauseReason::Publish(message), .. } = outcome else { panic!("{outcome:?}") };

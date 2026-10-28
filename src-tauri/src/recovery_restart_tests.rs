@@ -191,7 +191,7 @@ fn run_child(name: &str, root: &Path, nonce: &str) {
     for name in ["SystemRoot", "WINDIR", "TEMP", "TMP"] {
         if let Some(value) = std::env::var_os(name) { command.env(name, value); }
     }
-    let mut child = command.spawn().expect("spawn owned restart child");
+    let mut child = crate::child_job::test_spawn(&mut command).expect("spawn owned restart child");
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         if let Some(status) = child.try_wait().expect("poll owned restart child") {

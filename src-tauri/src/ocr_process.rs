@@ -861,13 +861,12 @@ fn main() {
                 let source = directory.join("fake-child.rs");
                 let executable = directory.join("fake-child.exe");
                 std::fs::write(&source, fake_source()).map_err(|error| error.to_string())?;
-                let output = Command::new("rustc")
+                let output = crate::child_job::test_output(Command::new("rustc")
                     .arg("--edition=2021")
                     .arg("-O")
                     .arg(&source)
                     .arg("-o")
-                    .arg(&executable)
-                    .output()
+                    .arg(&executable))
                     .map_err(|error| format!("could not start rustc: {error}"))?;
                 if !output.status.success() {
                     return Err(format!("fake OCR child did not compile: {}", String::from_utf8_lossy(&output.stderr)));
@@ -1119,6 +1118,46 @@ fn main() {
     }
 
     #[test]
+    fn processes_started_by_other_threads_cannot_keep_a_childs_pipe_ends_open() {
+        let _serial = test_lock();
+        let case = fake_case("exact");
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let mut leaked = 0;
+        std::thread::scope(|scope| {
+            let spawner = scope.spawn(|| {
+                let mut holders = std::collections::VecDeque::new();
+                while !stop.load(AtomicOrdering::Acquire) {
+                    let mut command = Command::new("ping");
+                    command.args(["-n", "6", "127.0.0.1"]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+                    if let Ok(child) = crate::child_job::test_spawn(&mut command) {
+                        holders.push_back((std::time::Instant::now(), child));
+                    }
+                    while holders.front().is_some_and(|(started, _)| started.elapsed() > Duration::from_millis(2_600)) {
+                        let (_, mut child) = holders.pop_front().unwrap();
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                for (_, mut child) in holders {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            });
+            for _ in 0..40 {
+                match case.runner.recognize_p6(TEST_P6, &OcrCancellation::default()) {
+                    Ok(output) => assert_eq!(output.text, "recognized text\n"),
+                    Err(OcrProcessError::System(message)) if message == "OCR output pipes did not close" => leaked += 1,
+                    Err(other) => panic!("{other:?}"),
+                }
+            }
+            stop.store(true, AtomicOrdering::Release);
+            spawner.join().unwrap();
+        });
+        assert_eq!(leaked, 0, "another thread's process kept a pipe end of the OCR child open");
+    }
+
+    #[test]
     fn stdout_and_stderr_caps_are_exact_and_fast_exit_cannot_bypass_them() {
         let _serial = test_lock();
         let exact_stdout = fake_case("stdout-exact");
@@ -1241,13 +1280,12 @@ fn main() {
         let directory = repository_root().join("target/ocr-process-tests/host-exit").join(format!("{}-{number}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         let pid_file = directory.join("child.pid");
-        let status = Command::new(std::env::current_exe().unwrap())
+        let status = crate::child_job::test_status(Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
             .arg("ocr_process::tests::abrupt_host_exit_helper_closes_the_job")
             .arg("--nocapture")
             .env("OCR_PROCESS_HOST_EXIT_HELPER", "1")
-            .env("OCR_PROCESS_HOST_PID_FILE", &pid_file)
-            .status()
+            .env("OCR_PROCESS_HOST_PID_FILE", &pid_file))
             .unwrap();
         assert!(status.success());
         let pid = std::fs::read_to_string(&pid_file).unwrap().parse().unwrap();
@@ -1350,7 +1388,7 @@ fn main() {
         std::fs::write(actual.join("engine/bin/tesseract.exe"), b"stand-in").unwrap();
         assert!(assert_no_reparse_ancestors(&actual.join("engine/bin/tesseract.exe"), "OCR executable").is_ok());
         let link = folder.path().join("link");
-        let output = Command::new("cmd.exe").args(["/d", "/c", "mklink", "/J"]).arg(&link).arg(&actual).output().unwrap();
+        let output = crate::child_job::test_output(Command::new("cmd.exe").args(["/d", "/c", "mklink", "/J"]).arg(&link).arg(&actual)).unwrap();
         assert!(output.status.success(), "mklink failed: {}", String::from_utf8_lossy(&output.stderr));
         let result = assert_no_reparse_ancestors(&link.join("engine/bin/tesseract.exe"), "OCR executable");
         std::fs::remove_dir(&link).unwrap();

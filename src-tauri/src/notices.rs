@@ -93,7 +93,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         write_base(outside.path(), b"outside");
         let resources = folder.path().join("resources");
-        let output = std::process::Command::new("cmd.exe").args(["/d", "/c", "mklink", "/J"]).arg(&resources).arg(outside.path().join("resources")).output().unwrap();
+        let output = crate::child_job::test_output(std::process::Command::new("cmd.exe").args(["/d", "/c", "mklink", "/J"]).arg(&resources).arg(outside.path().join("resources"))).unwrap();
         assert!(output.status.success(), "mklink failed: stdout={} stderr={}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         assert!(load(folder.path()).is_err());
         std::fs::remove_dir(&resources).unwrap();
