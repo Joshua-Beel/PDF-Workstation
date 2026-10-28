@@ -71,6 +71,7 @@ fn unicode_words_extract_exactly_and_stay_inside_their_boxes() {
     assert_eq!(text.all(), expected_text);
 
     let mut generated = 0;
+    let mut separators = 0;
     let mut chars = Vec::new();
     let all_chars = text.chars();
     for character in all_chars.iter() {
@@ -78,8 +79,13 @@ fn unicode_words_extract_exactly_and_stay_inside_their_boxes() {
             generated += 1;
             continue;
         }
+        if character.unicode_value() == 0x20 {
+            separators += 1;
+            continue;
+        }
         chars.push(character);
     }
+    assert_eq!(separators, words.len() - lines.len(), "one drawn separator between words of a line");
     let units = |character: &pdfium_render::prelude::PdfPageTextChar| {
         let value = character.unicode_value();
         match char::from_u32(value) {
@@ -209,7 +215,7 @@ fn engine_tsv_pages_get_an_extractable_text_layer() {
     let mut entries = std::fs::read_dir(&folder).unwrap().map(|entry| entry.unwrap().path())
         .filter(|path| path.extension().is_some_and(|extension| extension == "tsv")).collect::<Vec<_>>();
     entries.sort();
-    let (mut accepted, mut total) = (0, 0);
+    let (mut accepted, mut total, mut same_words_in_order, mut same_word_set, mut drawn_chars_match, mut lost_words, mut total_words) = (0, 0, 0, 0, 0, 0, 0);
     for tsv_path in entries {
         total += 1;
         let p6 = std::fs::read(tsv_path.with_extension("pnm")).unwrap();
@@ -232,9 +238,30 @@ fn engine_tsv_pages_get_an_extractable_text_layer() {
             page_width, page_height, image_width: width, image_height: height, rgb, words,
         }]).unwrap();
         let document = pdfium().load_pdf_from_byte_vec(bytes, None).unwrap();
-        let extracted = document.pages().get(0).unwrap().text().unwrap().all();
+        let page = document.pages().get(0).unwrap();
+        let text = page.text().unwrap();
+        let extracted = text.all();
+        let drawn = text.chars().iter().filter(|c| !c.is_generated().unwrap() && c.unicode_value() != 0x20)
+            .map(|c| char::from_u32(c.unicode_value()).unwrap_or('\u{fffd}')).collect::<String>();
+        let concatenated = parsed.words.iter().map(|w| w.text.as_str()).collect::<String>();
+        if drawn == concatenated { drawn_chars_match += 1; } else {
+            let at = drawn.chars().zip(concatenated.chars()).take_while(|(a, b)| a == b).count();
+            println!("SM4_TEXTLAYER {stem} drawn chars differ at {at}: {:?} vs {:?}", drawn.chars().skip(at.saturating_sub(5)).take(15).collect::<String>(), concatenated.chars().skip(at.saturating_sub(5)).take(15).collect::<String>());
+        }
         let expected = parsed.extracted_text.replace('\n', "\r\n");
         let exact = extracted == expected;
+        {
+            let mut a = extracted.split_whitespace().collect::<Vec<_>>();
+            let mut b = expected.split_whitespace().collect::<Vec<_>>();
+            if a == b { same_words_in_order += 1; }
+            a.sort_unstable();
+            b.sort_unstable();
+            if a == b { same_word_set += 1; }
+            let mut pool = a.clone();
+            let lost = b.iter().filter(|word| match pool.binary_search(word) { Ok(i) => { pool.remove(i); false } Err(_) => true }).count();
+            lost_words += lost;
+            total_words += b.len();
+        }
         if exact {
             accepted += 1;
         } else {
@@ -253,5 +280,45 @@ fn engine_tsv_pages_get_an_extractable_text_layer() {
         }
         println!("SM4_TEXTLAYER {stem} words={count} pdfium_text_exact={exact}");
     }
-    println!("SM4_TEXTLAYER {accepted} of {total} pages have an exact extractable text layer");
+    println!("SM4_TEXTLAYER of {total} pages: exact {accepted}, same words in order {same_words_in_order}, same words any order {same_word_set}, drawn characters in order {drawn_chars_match}; OCR words not found as a whole word in the extraction {lost_words} of {total_words}");
+}
+
+/// Words whose boxes touch or overlap (common on scans) used to come out of
+/// PDFium joined ("boxestouch"); the drawn separators keep them apart.
+#[test]
+fn touching_and_overlapping_words_extract_as_separate_words_on_their_lines() {
+    const HEADER: &str =
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext";
+    let lines: [&[(u32, u32, &str)]; 3] = [
+        &[(100, 120, "pack"), (220, 90, "my"), (308, 150, "boxes"), (470, 40, "with")],
+        &[(100, 80, "five"), (182, 140, "dozen,"), (322, 60, "in"), (380, 200, "liquor")],
+        &[(100, 130, "jugs"), (226, 60, "by"), (300, 90, "noon")],
+    ];
+    let mut rows = vec![
+        "1\t1\t0\t0\t0\t0\t0\t0\t1000\t500\t-1\t".to_string(),
+        "2\t1\t1\t0\t0\t0\t50\t40\t900\t300\t-1\t".to_string(),
+        "3\t1\t1\t1\t0\t0\t50\t40\t900\t300\t-1\t".to_string(),
+    ];
+    for (line_index, words) in lines.iter().enumerate() {
+        let top = 50 + 70 * line_index as u32;
+        rows.push(format!("4\t1\t1\t1\t{}\t0\t60\t{top}\t880\t50\t-1\t", line_index + 1));
+        for (word_index, (left, width, text)) in words.iter().enumerate() {
+            rows.push(format!("5\t1\t1\t1\t{}\t{}\t{left}\t{}\t{width}\t40\t91.5\t{text}", line_index + 1, word_index + 1, top + 5));
+        }
+    }
+    let tsv = std::iter::once(HEADER.to_string()).chain(rows).collect::<Vec<_>>().join("\n");
+    let parsed = parse_tesseract_tsv(tsv.as_bytes(), 1000, 500).unwrap();
+    let words = map_words_to_display(&parsed, 480.0, 240.0).unwrap().into_iter()
+        .map(|word| SearchableWord { x: word.x, y: word.y, width: word.width, height: word.height, text: word.text })
+        .collect::<Vec<_>>();
+    let bytes = write_searchable_pdf(&[SearchableRasterPage {
+        page_width: 480.0, page_height: 240.0, image_width: 4, image_height: 2, rgb: vec![255; 24], words,
+    }]).unwrap();
+    let document = pdfium().load_pdf_from_byte_vec(bytes, None).unwrap();
+    let page = document.pages().get(0).unwrap();
+    let extracted = page.text().unwrap().all();
+    assert_eq!(parsed.extracted_text, "pack my boxes with\nfive dozen, in liquor\njugs by noon");
+    let words_only = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(words_only(&extracted), words_only(&parsed.extracted_text), "{extracted:?}");
+    assert_eq!(extracted.lines().count(), 3, "{extracted:?}");
 }

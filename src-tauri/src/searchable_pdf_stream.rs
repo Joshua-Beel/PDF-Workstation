@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::searchable_pdf::{
-    glyphless_truetype, to_unicode_cmap, validate_word, SearchableWord, FONT_ASCENT, FONT_DESCENT, FONT_NAME,
+    cid_to_gid_map, glyphless_truetype, page_text_content, to_unicode_cmap, validate_word, SearchableWord, FONT_ASCENT, FONT_DESCENT, FONT_NAME, SPACE_CODE,
     GLYPH_ADVANCE, MAX_SEARCHABLE_DISTINCT_CHARS,
 };
 
@@ -241,17 +241,6 @@ fn text_sha256(words: &[SearchableWord]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     for word in words { hasher.update(word.text.as_bytes()); hasher.update([0]); }
     hasher.finalize().into()
-}
-
-fn real(value: f64) -> Result<String, StreamError> {
-    if !value.is_finite() || value.abs() > 1.0e6 {
-        return Err(StreamError::Invalid("searchable text transform is outside the supported range".into()));
-    }
-    let converted = value as f32;
-    if !converted.is_finite() || (value != 0.0 && converted == 0.0) {
-        return Err(StreamError::Invalid("searchable text transform cannot be represented exactly enough".into()));
-    }
-    Ok(format!("{converted}"))
 }
 
 fn page_dimension(value: f32) -> Result<String, StreamError> {
@@ -500,20 +489,9 @@ impl PartialWriter {
 
         let content_offset = self.position;
         let mut content = format!("q\n{} 0 0 {} 0 0 cm\n/Image Do\nQ\n", page_dimension(page.page_width)?, page_dimension(page.page_height)?);
-        if !kept.is_empty() {
-            content.push_str("BT\n/F1 1 Tf\n3 Tr\n");
-            let em_height = (FONT_ASCENT - FONT_DESCENT) as f64 / 1000.0;
-            for word in &kept {
-                let glyphs = word.text.chars().count() as f64;
-                let vertical = word.height / em_height;
-                let horizontal = word.width / (glyphs * GLYPH_ADVANCE as f64 / 1000.0);
-                let baseline = f64::from(page.page_height) - word.y - word.height - FONT_DESCENT as f64 / 1000.0 * vertical;
-                content.push_str(&format!("{} 0 0 {} {} {} Tm\n<", real(horizontal)?, real(vertical)?, real(word.x)?, real(baseline)?));
-                for character in word.text.chars() { content.push_str(&format!("{:04X}", self.ids[&character])); }
-                content.push_str("> Tj\n");
-            }
-            content.push_str("ET\n");
-        }
+        let kept_words = kept.into_iter().cloned().collect::<Vec<_>>();
+        content.push_str(&page_text_content(&kept_words, f64::from(page.page_height), |character| self.ids.get(&character).copied())
+            .map_err(StreamError::Invalid)?);
         if content.len() > MAX_CONTENT_BYTES { return Err(StreamError::Invalid("OCR page text is too large.".into())); }
         let mut stream = Stream::new(Dictionary::new(), content.into_bytes());
         stream.compress().map_err(|error| StreamError::Invalid(format!("OCR text compression failed: {error}")))?;
@@ -524,7 +502,7 @@ impl PartialWriter {
 
         let page_offset = self.position;
         let parent = node_object(self.manifest.page_count, index / TREE_FAN_OUT);
-        let fonts = if kept.is_empty() { String::new() } else { " /Font << /F1 3 0 R >>".into() };
+        let fonts = if kept_words.is_empty() { String::new() } else { " /Font << /F1 3 0 R >>".into() };
         self.put(format!(
             "{} 0 obj\n<< /Type /Page /Parent {parent} 0 R /MediaBox [0 0 {} {}] /Resources << /XObject << /Image {image_id} 0 R >>{fonts} >> /Contents {} 0 R >>\nendobj\n",
             image_id + 2, page_dimension(page.page_width)?, page_dimension(page.page_height)?, image_id + 1,
@@ -532,7 +510,6 @@ impl PartialWriter {
         let end_offset = self.position;
         self.part.flush().map_err(io)?;
 
-        let kept_words = kept.into_iter().cloned().collect::<Vec<_>>();
         let issue = if dropped > 0 && page.issue == PageIssue::None { PageIssue::TooManyCharacters } else { page.issue };
         Ok(PageRecord {
             page: index, outcome: page.outcome, issue, reduced_resolution: page.reduced_resolution,
@@ -768,14 +745,12 @@ fn font_objects(characters: &[char]) -> Result<Vec<(u32, Vec<u8>)>, StreamError>
         Ok((id, body))
     }
     let program = glyphless_truetype();
-    let mut gid_map = vec![0_u8; (characters.len() + 1) * 2];
-    for pair in gid_map.chunks_exact_mut(2).skip(1) { pair[1] = 1; }
     Ok(vec![
         (3, format!("3 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /{FONT_NAME} /Encoding /Identity-H /DescendantFonts [4 0 R] /ToUnicode 8 0 R >>\nendobj\n").into_bytes()),
         (4, format!("4 0 obj\n<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{FONT_NAME} /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 5 0 R /DW {GLYPH_ADVANCE} /CIDToGIDMap 7 0 R >>\nendobj\n").into_bytes()),
         (5, format!("5 0 obj\n<< /Type /FontDescriptor /FontName /{FONT_NAME} /Flags 5 /FontBBox [0 {FONT_DESCENT} {GLYPH_ADVANCE} {FONT_ASCENT}] /ItalicAngle 0 /Ascent {FONT_ASCENT} /Descent {FONT_DESCENT} /CapHeight {FONT_ASCENT} /StemV 80 /FontFile2 6 0 R >>\nendobj\n").into_bytes()),
         stream_object(6, &format!(" /Length1 {}", program.len()), program)?,
-        stream_object(7, "", gid_map)?,
+        stream_object(7, "", cid_to_gid_map())?,
         stream_object(8, "", to_unicode_cmap(characters).into_bytes())?,
     ])
 }
@@ -853,6 +828,7 @@ fn check_finished(path: &Path, records: &[PageRecord], characters: &[char], offs
         let mut words = 0_u32;
         for line in content.lines().filter(|line| line.ends_with("> Tj")) {
             let codes = line.strip_prefix('<').and_then(|rest| rest.strip_suffix("> Tj")).ok_or_else(|| fail(format!("page {} text operator", index + 1)))?;
+            if codes == format!("{SPACE_CODE:04X}") { continue; }
             if codes.is_empty() || codes.len() % 4 != 0 { return Err(fail(format!("page {} text codes", index + 1))); }
             for chunk in codes.as_bytes().chunks_exact(4) {
                 let code = u16::from_str_radix(std::str::from_utf8(chunk).unwrap_or("x"), 16).map_err(|_| fail(format!("page {} text code", index + 1)))?;
