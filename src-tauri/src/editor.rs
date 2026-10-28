@@ -371,21 +371,25 @@ impl EditSession {
 }
 
 /// Cuts every reference to the removed pages (and old page-tree nodes) in `removed`. A `/Dest` or a GoTo
-/// `/A` that targets one is dropped rather than left as `[null ...]`; a link annotation left with
-/// neither is dropped too, and nulls left in `/Annots` arrays are removed. Every other reference
-/// becomes null, so pruning cannot keep a removed page alive.
+/// `/A` that targets one is dropped rather than left as `[null ...]`, whether the destination array is
+/// inline or an indirect object; a link annotation left with neither because of that is dropped too,
+/// while a link that never had a `/Dest` or `/A` is kept untouched. Nulls left in `/Annots` arrays are
+/// removed. Every other reference becomes null, so pruning cannot keep a removed page alive.
 pub(crate) fn remove_page_references(document: &mut Document, mut removed: HashSet<ObjectId>) {
     if removed.is_empty() { return; }
-    let targets_removed = |destination: &Object| matches!(destination.as_array().ok().and_then(|array| array.first()), Some(Object::Reference(id)) if removed.contains(id));
+    let first_removed = |array: &Object| matches!(array.as_array().ok().and_then(|array| array.first()), Some(Object::Reference(id)) if removed.contains(id));
+    let dead_arrays: HashSet<ObjectId> = document.objects.iter().filter(|(_, object)| first_removed(object)).map(|(id, _)| *id).collect();
+    let targets_removed = |destination: &Object| match destination { Object::Reference(id) => dead_arrays.contains(id), other => first_removed(other) };
     let goto_removed = |action: &lopdf::Dictionary| action.get(b"S").and_then(Object::as_name).is_ok_and(|name| name == b"GoTo") && action.get(b"D").is_ok_and(targets_removed);
     let dead_actions: HashSet<ObjectId> = document.objects.iter().filter(|(_, object)| object.as_dict().is_ok_and(goto_removed)).map(|(id, _)| *id).collect();
     let mut dead_links = Vec::new();
     for (id, object) in document.objects.iter_mut() {
         let Ok(dict) = object.as_dict_mut() else { continue };
-        if dict.get(b"Dest").is_ok_and(targets_removed) { dict.remove(b"Dest"); }
+        let mut dropped = false;
+        if dict.get(b"Dest").is_ok_and(targets_removed) { dict.remove(b"Dest"); dropped = true; }
         let dead_action = match dict.get(b"A") { Ok(Object::Dictionary(action)) => goto_removed(action), Ok(Object::Reference(action)) => dead_actions.contains(action), _ => false };
-        if dead_action { dict.remove(b"A"); }
-        if dict.get(b"Subtype").and_then(Object::as_name).is_ok_and(|name| name == b"Link") && !dict.has(b"Dest") && !dict.has(b"A") { dead_links.push(*id); }
+        if dead_action { dict.remove(b"A"); dropped = true; }
+        if dropped && dict.get(b"Subtype").and_then(Object::as_name).is_ok_and(|name| name == b"Link") && !dict.has(b"Dest") && !dict.has(b"A") { dead_links.push(*id); }
     }
     removed.extend(dead_links);
     null_references(document, &removed);
@@ -1019,6 +1023,37 @@ mod tests {
             assert_eq!(links[0].get(b"Dest").unwrap().as_array().unwrap()[0], Object::Reference(kept));
             assert!(!document.objects.values().any(|object| object.as_dict().is_ok_and(|dict| dict.get(b"S").and_then(Object::as_name).is_ok_and(|name| name == b"GoTo"))), "dead GoTo actions are unreachable");
         }
+    }
+
+    #[test]
+    fn page_reference_removal_resolves_indirect_destinations_keeps_bare_links_and_cleans_annots() {
+        let source = literal_pdf(&[
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [4 0 R 6 0 R] /Count 2 >>".into(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R /Annots [8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R] >>".into(),
+            content("kept page"),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>".into(),
+            content("removed page"),
+            "<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /Dest 14 0 R >>".into(),
+            "<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /A << /S /GoTo /D 14 0 R >> >>".into(),
+            "<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /A 15 0 R >>".into(),
+            "<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] >>".into(),
+            "<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /Dest [4 0 R /Fit] >>".into(),
+            "<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /Dest [6 0 R /Fit] >>".into(),
+            "[6 0 R /Fit]".into(),
+            "<< /S /GoTo /D 14 0 R >>".into(),
+        ], &[]);
+        let mut document = Document::load_mem(&source).unwrap();
+        remove_page_references(&mut document, HashSet::from([(6, 0)]));
+        let annots = document.get_dictionary((4, 0)).unwrap().get(b"Annots").unwrap().as_array().unwrap().clone();
+        assert_eq!(annots, vec![Object::Reference((11, 0)), Object::Reference((12, 0))], "dead links leave no null behind in /Annots");
+        for number in [8, 9, 10] {
+            let link = document.get_dictionary((number, 0)).unwrap();
+            assert!(!link.has(b"Dest") && !link.has(b"A"), "object {number}: an indirect destination to the removed page is dropped, not left as [null ...]");
+        }
+        assert!(document.get_dictionary((11, 0)).unwrap().get(b"Subtype").is_ok_and(|value| value.as_name().is_ok_and(|name| name == b"Link")), "a link that never had a destination or action is left untouched");
+        assert_eq!(document.get_dictionary((12, 0)).unwrap().get(b"Dest").unwrap().as_array().unwrap()[0], Object::Reference((4, 0)));
     }
 
     #[test]
