@@ -116,6 +116,9 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+Full history: [docs/changelog.md](docs/changelog.md)
+
+- Save-copy prune: regression test that an indirect destination to a kept page survives (SM2); README recent changes trimmed to 15 lines (SM0). Full entries in [docs/changelog.md](docs/changelog.md).
 - In-app update check: stopped assigning the read-only `$HOME` (run 40618989631) and `$Matches`; suppressed stray `WaitForExit` output; AST test guards both (SM6; scripts and tests).
 - Save-copy prune follow-ups (SM2): dead page links are dropped when the `/Dest` or GoTo `/D` is an indirect array too; links that never had a destination stay; `/Annots` null cleanup tested.
 - In-app update check: the installed-facts check now expects Tauri's quoted InstallLocation and names any mismatched field (no paths). Run 40596111704 failed there (SM6; script and tests).
@@ -130,44 +133,3 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 - Rehearsal fixes, round 6: the structural page-tools check accepts and fully verifies the signed PDFium resource record and the pinned WebDriver records the earlier stages pass to it (SM6; scripts and tests only).
 - Rehearsal fixes, round 5: the default page-tools check writes the settings sentinel the organizer expects, and the split check drives the real folder picker (Folder box, existing parent, `Split PDFs` inside) (SM6; scripts and tests only).
 - Intermittent native-dialog test failures fixed: tests that needed one observation before a 20–250 ms wall-clock deadline now warm up first and use budgets that slow runners can meet (SM6; tests only).
-- Page images and redacted copies at 150 and 300 DPI now have the pixel size the export dialog shows (Letter at 150 DPI is 1275 × 1650, not 1651) (SM2; source build).
-- Rehearsal fixes, round 3: image and structural Save dialogs keep the app's own suggested name (checked against the dialog's folder), comments and forms type the filename as keyboard input, and the PDFium fetch retries up to 3 times (SM6; scripts and tests only).
-- Rehearsal fixes, round 2: the recovery check waits for page 1 to be selected before rotating (it had rotated the still-selected page 2) and checks the rotated thumbnails; the Save-dialog wait accepts the suggestion with its extension hidden (SM6; scripts and tests only).
-- Rehearsal fixes: the recovery check now really moves to page 2 before the edit (its old synthetic blur never reached React), and app Save dialogs are typed into only after the app's suggested name appears, with a re-check before Save (SM6; scripts and tests only).
-- Review fixes for the input-driven signed checks: the reading-tools source record no longer claims blob verification it does not perform, the OCR upgrade workflow checks source-revision ancestry and validates artifact metadata before its second checkout (SM6b).
-- The five signed installed checks (expanded page tools, OCR upgrade, persistence, print dialog, reading tools) now take the signed OCR artifact, source revision, hashes and version as dispatch inputs, computing fingerprints at run time, so a new build needs no code change; none run hosted yet (SM6b).
-- Pre-tag rehearsal: the three default installed checks can now run on a signed release-candidate artifact before tagging (`default-rehearsal-verification.yml`, read-only, no secrets); the draft checks are unchanged (SM6; scripts, workflows, tests and docs only).
-- Version 0.3.1 prepared as the first public update (0.3.0 was tagged and drafted but withdrawn): version bump, 0.3.1 notes with the new Fill forms controls, key-rotation docs moved to 0.3.1 (SM6). Not tagged or built.
-- Installed-app verifiers: typed Save-dialog filenames are re-checked after the dialog settles and re-typed if the dialog replaced them with its suggested name (SM6; scripts and tests only).
-- Recovery: after "Keep recovered edits", a page rendered while the recovery offer was showing is no longer served stale; the render cache key now includes the document revision (SM5).
-- Step 2 verifiers, third round: the recovery rotation check now accepts the default fit-width layout, failed recovery checks report what they saw, and image-output timeouts log file and dialog diagnostics (SM6; scripts and tests only).
-- Review fixes for the signed-check re-pin: the reading-tools drift test now has negative controls (wrong feature blob, wrong app-shell blob), and releases.md, ocr-feasibility.md and license-inventory.md name the new pin (SM6b).
-- The five signed installed checks (expanded page tools, OCR upgrade, persistence, print dialog, reading tools) are re-pinned to a fresh signed 0.3.0 OCR artifact (artifact 12510717103, run 39969839829, source `4a0f89c`); none has been run hosted against it yet (SM6b).
-- Step 2 verifiers, second round: closure callbacks that could not see helper functions on the hosted runner removed, transitive helper analysis for everything the default verifier workflows reach, recovery stage markers and abrupt-termination cleanup (SM6; scripts and tests only).
-- Installed-app Step 2 verifiers: missing helper imports added, the recovery check clicks only the toolbar Open button, and a static test checks every verifier helper resolves (SM6; scripts and tests only).
-- `ocr-signed-artifact.yml` checks out full history (`fetch-depth: 0`) so its vitest step can read pinned commit 67d2382; run 39967979362 failed 3 tests on the shallow clone (SM6b).
-- 0.3.0 trusts the new updater public key `3E6DD54916A4E5E8`; it is still signed with the old key `85970C34AEABD775` that 0.2.0 trusts (SM6).
-- Key rotation follow-up: release docs match the rotation order, a 0.3.0 run stops before building if the app would still trust the old key, and the updater signature is verified before upload (SM6).
-- Updater key rotation prepared: release and draft checks require the release signature to come from the key installed apps trust, and the app to embed the configured key; new public key still pending (SM6).
-- Draft verifiers expect the 28 bundled base resources (PDFium `VERSION` and `args.gn` were added), not the stale 26 (SM6).
-- Installer builds restore the Cargo.toml formatting that the Tauri CLI rewrites, so the Windows validation pre-flight leaves the tree clean; two timing-sensitive tests get hosted-safe limits (SM6).
-- 0.3.0 update notes now mention accented Latin letters and scrolling list boxes in Fill forms; README trimmed to the newest 15 change lines (SM0; docs only).
-- Removing or replacing pages now drops links and destinations that pointed at the removed pages instead of leaving them broken; Replace cuts stray references the same way (SM2; SM7 F-1; source build).
-- Saved copies after rotate, crop, move or comments keep only objects reachable from the document, so old revisions and orphaned objects in the source no longer travel along (SM2; SM7 L-1; source build).
-- Release review follow-ups: uninstaller-safe installer extraction, a tested release staging path, a Windows 2022 pre-flight option and clearer 0.3.0 notes (SM6). Never run hosted.
-- The release workflow now builds the installer with OCR, signing the engine with the app's Azure profile; the draft verifiers require the five OCR files (SM6). Never run hosted.
-- Dev tooling: vite 6.4.3 to 6.4.4 for a dev-server advisory; `npm audit` reports 0 and the built frontend is byte-identical (SM6).
-- Release notes always check out with LF line endings, so the update text in `latest.json` carries no CRLF (SM6).
-- Version 0.3.0 prepared: six version sources bumped, 0.3.0-only release notes, notices regenerated, release steps rewritten (SM6). Not tagged or built; unverified in an installed build.
-- Fill forms review fixes (SM3; source tests only): the PDFium check reads choice values from the engine, and a typed combo value matches option labels only.
-- Fill forms: multi-select list boxes (checkbox list, several option ids per patch) and editable combo boxes (typed Latin-1 text or a listed option) (SM3; source tests only).
-- Forms breadth follow-ups (SM3; source tests only): U+00A0 refused, overflow-safe encoding differences, list-box labels encoded like other text, full Latin-1 width table and more tests.
-- Fill forms list boxes may have more options than visible rows (SM3; source tests only): the scroll position (`/TI`) is validated and an out-of-view choice scrolls into view.
-- Fill forms text values accept printable ASCII plus Latin-1 letters and symbols (SM3; source tests only): WinAnsi appearance bytes, UTF-16 value, Latin-1 Helvetica widths. Not Unicode beyond Latin-1.
-- Split folder-picker unit test compares canonical folders, so an 8.3 short TEMP path on CI no longer fails it (SM2; test only).
-- CI fix after its first hosted run failed: full-history checkout for the tests that read pinned commits, and a 15 s timeout on one slow PowerShell workflow test (SM6). Unverified until the next hosted run.
-- Repo renamed to `Joshua-Beel/PDF-Workstation`: workflow guards, release URLs, the updater endpoint for new builds and verifier pins use the new name; older installs keep updating through GitHub's redirects (SM6).
-- README restructured: one-line feature and change summaries here; full feature text moved to [docs/features.md](docs/features.md) and the full change log to [docs/changelog.md](docs/changelog.md), verbatim; README links now use the renamed repo `Joshua-Beel/PDF-Workstation` (docs only).
-- CI on every push to `master` and every pull request: tests, type-check and build, read-only, no secrets (SM6). Unverified until its first hosted run.
-
-Full history: [docs/changelog.md](docs/changelog.md)
