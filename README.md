@@ -116,6 +116,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 ## Recent changes
 
+- In-app update check: WebDriver lifecycle now uses the shared hosted-proven launch helpers (30 s session create, native-driver wait, owned-process cleanup); firewall precheck added (SM6; scripts and tests).
 - In-app update check: stopped assigning the read-only `$HOME` (run 40618989631) and `$Matches`; suppressed stray `WaitForExit` output; AST test guards both (SM6; scripts and tests).
 - In-app update check: the installed-facts check now expects Tauri's quoted InstallLocation and names any mismatched field (no paths). Run 40596111704 failed there (SM6; script and tests).
 - In-app update check: hosted noninteractive publisher mode, as in the OCR upgrade check; Explorer dialog not attempted, signatures still verified. Run 40588308128 failed there (SM6; scripts, workflow, tests).

@@ -1068,14 +1068,14 @@ function Invoke-InstalledAppLaunchSmoke {
     )
     $runner = [IO.Path]::GetFullPath($RunnerTemp).TrimEnd('\')
     $driverRoot = [IO.Path]::GetFullPath($WebDriverRoot).TrimEnd('\')
-    $profile = [IO.Path]::GetFullPath($ProfileRoot).TrimEnd('\')
+    $profilePath = [IO.Path]::GetFullPath($ProfileRoot).TrimEnd('\')
     $settingsRoot = [IO.Path]::GetFullPath($ApplicationSettingsRoot).TrimEnd('\')
     $settingsSentinel = [IO.Path]::GetFullPath($SettingsSentinelPath)
-    foreach ($candidate in @($driverRoot,$profile)) {
+    foreach ($candidate in @($driverRoot,$profilePath)) {
         if (-not $candidate.StartsWith($runner + '\',[StringComparison]::OrdinalIgnoreCase)) { throw 'Launch-smoke paths must stay beneath RUNNER_TEMP.' }
         Assert-NoReparseAncestors -Path $candidate
     }
-    if (-not (Test-Path -LiteralPath $driverRoot -PathType Container) -or (Test-Path -LiteralPath $profile)) { throw 'WebDriver inputs must exist and the WebView profile must be fresh.' }
+    if (-not (Test-Path -LiteralPath $driverRoot -PathType Container) -or (Test-Path -LiteralPath $profilePath)) { throw 'WebDriver inputs must exist and the WebView profile must be fresh.' }
     $expectedSettingsRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'local.pdfworkstation.desktop')).TrimEnd('\')
     $expectedSettingsSentinel = [IO.Path]::GetFullPath((Join-Path $settingsRoot 'upgrade-sentinel.json'))
     if (-not $settingsRoot.Equals($expectedSettingsRoot,[StringComparison]::OrdinalIgnoreCase) -or
@@ -1091,7 +1091,7 @@ function Invoke-InstalledAppLaunchSmoke {
         throw 'The controlled application settings root must contain only the receipt-bound sentinel before launch.'
     }
     $applicationProfile = [IO.Path]::GetFullPath((Join-Path $settingsRoot 'EBWebView')).TrimEnd('\')
-    $requestedChildProfile = [IO.Path]::GetFullPath((Join-Path $profile 'EBWebView')).TrimEnd('\')
+    $requestedChildProfile = [IO.Path]::GetFullPath((Join-Path $profilePath 'EBWebView')).TrimEnd('\')
     if (Test-Path -LiteralPath $applicationProfile) { throw 'The exact Tauri application WebView profile must be absent before launch.' }
     if (Test-Path -LiteralPath $requestedChildProfile) { throw 'The exact requested WebView child profile must be absent before launch.' }
     $ambient = @(Get-LaunchProcessSnapshot)
@@ -1110,11 +1110,11 @@ function Invoke-InstalledAppLaunchSmoke {
     Assert-FileReceipt -Path $tauriDriver -Bytes ([uint64]$receipt.tauriDriver.bytes) -Sha256 ([string]$receipt.tauriDriver.sha256) -Kind 'Pinned tauri-driver executable'
     Assert-FileReceipt -Path $edgeDriver -Bytes ([uint64]$receipt.edgeDriver.bytes) -Sha256 ([string]$receipt.edgeDriver.sha256) -Kind 'Exact EdgeDriver executable'
     $null = Assert-TrustedWindowsSignature -Path $edgeDriver -ExpectedPublisher $script:LaunchPins.EdgePublisher
-    [IO.Directory]::CreateDirectory($profile) | Out-Null
-    Assert-NoReparseAncestors -Path $profile
-    if (@(Get-ChildItem -LiteralPath $profile -Force).Count -ne 0) { throw 'The requested WebDriver profile was not empty before launch.' }
+    [IO.Directory]::CreateDirectory($profilePath) | Out-Null
+    Assert-NoReparseAncestors -Path $profilePath
+    if (@(Get-ChildItem -LiteralPath $profilePath -Force).Count -ne 0) { throw 'The requested WebDriver profile was not empty before launch.' }
     $expectedEdgeDriverVersion = [string]$receipt.edgeDriver.version
-    $result = if ($ProcessProvider) { & $ProcessProvider $ApplicationPath $tauriDriver $edgeDriver $OcrEnginePath $profile $settingsRoot $applicationProfile $expectedEdgeDriverVersion } else { Invoke-RealInstalledAppLaunch -ApplicationPath $ApplicationPath -TauriDriverPath $tauriDriver -EdgeDriverPath $edgeDriver -OcrEnginePath $OcrEnginePath -ProfileRoot $profile -SettingsRoot $settingsRoot -ExpectedEdgeDriverVersion $expectedEdgeDriverVersion }
+    $result = if ($ProcessProvider) { & $ProcessProvider $ApplicationPath $tauriDriver $edgeDriver $OcrEnginePath $profilePath $settingsRoot $applicationProfile $expectedEdgeDriverVersion } else { Invoke-RealInstalledAppLaunch -ApplicationPath $ApplicationPath -TauriDriverPath $tauriDriver -EdgeDriverPath $edgeDriver -OcrEnginePath $OcrEnginePath -ProfileRoot $profilePath -SettingsRoot $settingsRoot -ExpectedEdgeDriverVersion $expectedEdgeDriverVersion }
     Assert-LaunchExactProperties -Value $result -Expected @('nativeDriverVersion','driverVersionBinding','returnedRuntimeVersion','profileBindingMethod','sessionCapabilityKeys','title','homeButton','ocrCapabilityStatus','sampleName','samplePages','renderedPageWidth','renderedPageHeight','renderedPageBlob','ocrPage','ocrDialogTitle','ocrTextUtf8Bytes','ocrTextSha256','ocrSourceUiPreserved','sessionDeleted','ownedProcessTreeStopped','relevantProcessesRemaining') -Kind 'Installed application launch result'
     $returnedRuntimeParts = ([string]$result.returnedRuntimeVersion).Split('.')
     $expectedRuntimeParts = ([string]$receipt.webView2RuntimeVersion).Split('.')
@@ -1138,11 +1138,11 @@ function Invoke-InstalledAppLaunchSmoke {
     Assert-FileReceipt -Path $OcrEnginePath -Bytes ([uint64]$OcrEngineReceipt.bytes) -Sha256 ([string]$OcrEngineReceipt.sha256) -Kind 'Postlaunch installed signed OCR engine'
     $null = Assert-TrustedWindowsSignature -Path $OcrEnginePath -ExpectedPublisher $ExpectedPublisher
     Assert-FileReceipt -Path $WelcomePath -Bytes ([uint64]$WelcomeReceipt.bytes) -Sha256 ([string]$WelcomeReceipt.sha256) -Kind 'Postlaunch installed sample PDF'
-    Assert-NoReparseAncestors -Path $profile
+    Assert-NoReparseAncestors -Path $profilePath
     Assert-FileReceipt -Path $settingsSentinel -Bytes $SettingsSentinelBytes -Sha256 $SettingsSentinelSha256 -Kind 'Postlaunch synthetic settings sentinel'
     $usesTauriProfile = ([string]$result.profileBindingMethod).EndsWith('tauri-app-settings-ebwebview',[StringComparison]::Ordinal)
     $usesRequestedChildProfile = ([string]$result.profileBindingMethod).EndsWith('requested-ebwebview',[StringComparison]::Ordinal)
-    $requestedProfileEntries = @(Get-ChildItem -LiteralPath $profile -Force)
+    $requestedProfileEntries = @(Get-ChildItem -LiteralPath $profilePath -Force)
     $postlaunchSettingsEntries = @(Get-ChildItem -LiteralPath $settingsRoot -Force)
     if ($usesTauriProfile) {
         if (-not (Test-Path -LiteralPath $applicationProfile -PathType Container) -or $requestedProfileEntries.Count -ne 0) {
