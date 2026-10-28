@@ -198,3 +198,60 @@ fn deterministic_fixtures_reopen_with_exact_pixels_and_pdfium_text() {
         assert_eq!(text.inside_rect(visible), expected_text, "{name} text");
     }
 }
+
+/// Evidence, not a gate: for every `<stem>.pnm` with a `<stem>.tsv` written by
+/// the engine with the app's TSV arguments in `SM4_TEXTLAYER_DIR`, build the
+/// searchable page and check PDFium extracts exactly the parsed text.
+#[test]
+#[ignore = "measurement: set SM4_TEXTLAYER_DIR to a folder of engine TSV and P6 pages"]
+fn engine_tsv_pages_get_an_extractable_text_layer() {
+    let Some(folder) = std::env::var_os("SM4_TEXTLAYER_DIR") else { return; };
+    let mut entries = std::fs::read_dir(&folder).unwrap().map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "tsv")).collect::<Vec<_>>();
+    entries.sort();
+    let (mut accepted, mut total) = (0, 0);
+    for tsv_path in entries {
+        total += 1;
+        let p6 = std::fs::read(tsv_path.with_extension("pnm")).unwrap();
+        let mut parts = p6.splitn(4, |byte| *byte == b'\n');
+        parts.next();
+        let size = std::str::from_utf8(parts.next().unwrap()).unwrap().to_owned();
+        parts.next();
+        let rgb = parts.next().unwrap().to_vec();
+        let (width, height) = size.split_once(' ').map(|(w, h)| (w.parse::<u32>().unwrap(), h.parse::<u32>().unwrap())).unwrap();
+        let (page_width, page_height) = ((f64::from(width) * 72.0 / 150.0) as f32, (f64::from(height) * 72.0 / 150.0) as f32);
+        let stem = tsv_path.file_stem().unwrap().to_string_lossy().into_owned();
+        let parsed = match parse_tesseract_tsv(&std::fs::read(&tsv_path).unwrap(), width, height) {
+            Ok(parsed) => parsed,
+            Err(error) => { println!("SM4_TEXTLAYER {stem} refused: {error}"); continue; }
+        };
+        let words = map_words_to_display(&parsed, f64::from(page_width), f64::from(page_height)).unwrap().into_iter()
+            .map(|word| SearchableWord { x: word.x, y: word.y, width: word.width, height: word.height, text: word.text }).collect::<Vec<_>>();
+        let count = words.len();
+        let bytes = write_searchable_pdf(&[SearchableRasterPage {
+            page_width, page_height, image_width: width, image_height: height, rgb, words,
+        }]).unwrap();
+        let document = pdfium().load_pdf_from_byte_vec(bytes, None).unwrap();
+        let extracted = document.pages().get(0).unwrap().text().unwrap().all();
+        let expected = parsed.extracted_text.replace('\n', "\r\n");
+        let exact = extracted == expected;
+        if exact {
+            accepted += 1;
+        } else {
+            let at = extracted.chars().zip(expected.chars()).take_while(|(a, b)| a == b).count();
+            let around = |text: &str| text.chars().skip(at.saturating_sub(10)).take(30).collect::<String>();
+            println!("SM4_TEXTLAYER {stem} differs at char {at}: extracted {:?} expected {:?}", around(&extracted), around(&expected));
+            let collapse = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let mut extracted_words = extracted.split_whitespace().collect::<Vec<_>>();
+            let mut expected_words = expected.split_whitespace().collect::<Vec<_>>();
+            let same_order = collapse(&extracted) == collapse(&expected);
+            extracted_words.sort_unstable();
+            expected_words.sort_unstable();
+            println!("SM4_TEXTLAYER {stem} same words in order={same_order} same words any order={}", extracted_words == expected_words);
+            let only = |a: &[&str], b: &[&str]| { let mut b = b.to_vec(); a.iter().filter(|w| match b.iter().position(|x| x == *w) { Some(i) => { b.remove(i); false } None => true }).take(6).map(|w| w.to_string()).collect::<Vec<_>>() };
+            println!("SM4_TEXTLAYER {stem} only extracted {:?} only expected {:?}", only(&extracted_words, &expected_words), only(&expected_words, &extracted_words));
+        }
+        println!("SM4_TEXTLAYER {stem} words={count} pdfium_text_exact={exact}");
+    }
+    println!("SM4_TEXTLAYER {accepted} of {total} pages have an exact extractable text layer");
+}
