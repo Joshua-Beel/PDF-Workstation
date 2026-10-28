@@ -39,12 +39,18 @@ $script:ApiToken = Read-ApiTokenFromEnvironment -Name 'IN_APP_UPDATE_API_TOKEN'
 
 $script:UpdatePins = [ordered]@{
     Repository = 'Joshua-Beel/PDF-Workstation'
-    BaselineVersion = '0.2.0'
-    BaselineName = 'PDF.Workstation_0.2.0_x64-setup.exe'
-    BaselineBytes = [uint64]6418229
-    BaselineSha256 = '17788CB82BB42DEAC35EA197A385A9BAFC8CD331422446A2B834E115A90C4D2E'
-    BaselineUrl = 'https://github.com/Joshua-Beel/PDF-Workstation/releases/download/v0.2.0/PDF.Workstation_0.2.0_x64-setup.exe'
+    BaselineVersion = '0.3.1'
+    BaselineTag = 'v0.3.1'
+    BaselineReleaseId = [uint64]425998245
+    BaselineInstallerAssetId = [uint64]682909274
+    BaselineName = 'PDF.Workstation_0.3.1_x64-setup.exe'
+    BaselineBytes = [uint64]11210976
+    BaselineSha256 = '67C685264ABC094246E95C04629BFFF5D4854BD4FE5B84FEDE8760261A119038'
+    BaselineUrl = 'https://github.com/Joshua-Beel/PDF-Workstation/releases/download/v0.3.1/PDF.Workstation_0.3.1_x64-setup.exe'
+    BaselinePublisher = 'Joshua Beel'
     LatestManifestUrl = 'https://github.com/Joshua-Beel/PDF-Workstation/releases/latest/download/latest.json'
+    ConfirmationTitle = 'Install update?'
+    ConfirmationDeadlineSeconds = 30
     PortHandoffTimeoutMilliseconds = 300000
     NetworkBytesMaximum = [uint64](128MB)
     JsonBytesMaximum = [uint64](1MB)
@@ -252,12 +258,12 @@ function Read-BoundedJson {
 }
 
 function Assert-ExactAsset {
-    param($Release,[uint64]$Id,[string]$Name,[uint64]$Bytes,[string]$Sha256)
+    param($Release,[uint64]$Id,[string]$Name,[uint64]$Bytes,[string]$Sha256,[Parameter(Mandatory = $true)][string]$Tag)
     $found = @($Release.assets | Where-Object { [uint64]$_.id -eq $Id })
     if ($found.Count -ne 1) { throw 'Target release asset id is absent or ambiguous.' }
     $asset = $found[0]
     $assetUri = [Uri]([string]$asset.browser_download_url)
-    $expectedPath = "/$($script:UpdatePins.Repository)/releases/download/$TargetTag/$Name"
+    $expectedPath = "/$($script:UpdatePins.Repository)/releases/download/$Tag/$Name"
     if ([string]$asset.name -cne $Name -or [uint64]$asset.size -ne $Bytes -or [string]$asset.state -cne 'uploaded' -or
         [string]$asset.digest -cne ('sha256:' + $Sha256.ToLowerInvariant()) -or $assetUri.Scheme -cne 'https' -or
         $assetUri.DnsSafeHost -cne 'github.com' -or $assetUri.UserInfo -or $assetUri.Query -or $assetUri.Fragment -or
@@ -495,13 +501,144 @@ const b=[...document.querySelectorAll('button')].filter(x=>x.textContent.trim()=
 function Wait-AvailableUpdate {
     param([string]$SessionId,[datetime]$Deadline,[string]$Version,[string]$Notes)
     $script = @'
-const d=document.querySelector('dialog[aria-labelledby="updates-title"]');const ps=d?[...d.querySelectorAll('p')].map(x=>x.textContent.trim()):[];const install=d?[...d.querySelectorAll('button')].filter(x=>x.textContent.trim()==='Install update and restart'):[];return {dialog:!!d,installed:ps.find(x=>x.startsWith('Installed version: '))||'',status:d?.querySelector('[role="status"]')?.textContent.trim()||'',notes:d?.querySelector('pre')?.textContent||'',installCount:install.length,installEnabled:install.length===1&&!install[0].disabled,alerts:d?.querySelectorAll('[role="alert"]').length||0};
+const d=document.querySelector('dialog[aria-labelledby="updates-title"]');const ps=d?[...d.querySelectorAll('p')].map(x=>x.textContent.trim()):[];const install=d?[...d.querySelectorAll('button')].filter(x=>x.textContent.trim()==='Install update and restart'):[];return {dialog:!!d,installed:ps.find(x=>x.startsWith('Installed version: '))||'',status:d?.querySelector('[role="status"]')?.textContent.trim()||'',notes:d?.querySelector('pre')?.textContent||'',saveNotice:ps.filter(x=>x==='The app will close and reopen during installation. Save your work before continuing.').length,installCount:install.length,installEnabled:install.length===1&&!install[0].disabled,alerts:d?.querySelectorAll('[role="alert"]').length||0};
 '@
+    $installedText = 'Installed version: ' + $script:UpdatePins.BaselineVersion
     return Wait-WebDriverValue -SessionId $SessionId -Script $script -Deadline $Deadline -Kind 'Published available update UI' -Predicate {
         param($v)
-        [bool]$v.dialog -and [string]$v.installed -ceq 'Installed version: 0.2.0' -and [string]$v.status -ceq "Version $Version is available." -and
-        [string]$v.notes -ceq $Notes -and [int]$v.installCount -eq 1 -and [bool]$v.installEnabled -and [int]$v.alerts -eq 0
+        [bool]$v.dialog -and [string]$v.installed -ceq $installedText -and [string]$v.status -ceq "Version $Version is available." -and
+        [string]$v.notes -ceq $Notes -and [int]$v.saveNotice -eq 1 -and [int]$v.installCount -eq 1 -and [bool]$v.installEnabled -and [int]$v.alerts -eq 0
     }
+}
+
+function Wait-DeclinedUpdate {
+    param([string]$SessionId,[datetime]$Deadline,[string]$Version)
+    $script = @'
+const d=document.querySelector('dialog[aria-labelledby="updates-title"]'),ps=d?[...d.querySelectorAll('p')].map(x=>x.textContent.trim()):[],install=d?[...d.querySelectorAll('button')].filter(x=>x.textContent.trim()==='Install update and restart'):[];return {dialog:!!d,installed:ps.find(x=>x.startsWith('Installed version: '))||'',status:d?.querySelector('[role="status"]')?.textContent.trim()||'',installCount:install.length,installEnabled:install.length===1&&!install[0].disabled,alerts:d?.querySelectorAll('[role="alert"]').length||0};
+'@
+    $installedText = 'Installed version: ' + $script:UpdatePins.BaselineVersion
+    $declinedText = "Version $Version was not installed. Your installed version is unchanged. You can install it later."
+    return Wait-WebDriverValue -SessionId $SessionId -Script $script -Deadline $Deadline -Kind 'Declined update confirmation UI' -Predicate {
+        param($v)
+        [bool]$v.dialog -and [string]$v.installed -ceq $installedText -and [string]$v.status -ceq $declinedText -and
+        [int]$v.installCount -eq 1 -and [bool]$v.installEnabled -and [int]$v.alerts -eq 0
+    }
+}
+
+function Get-UpdateConfirmationText {
+    param([Parameter(Mandatory = $true)][string]$Version)
+    return "PDF Workstation $Version is ready to install.`n`nPDF Workstation will close and reopen to finish the update. Save your work first: changes that are not saved will be lost.`n`nInstall version $Version now?"
+}
+
+function Initialize-UpdateConfirmationNative {
+    if ('SmacrobatUpdateConfirmNative' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text;
+public static class SmacrobatUpdateConfirmNative {
+ delegate bool EnumProc(IntPtr window, IntPtr parameter);
+ [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc callback, IntPtr parameter);
+ [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+ [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window);
+ [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr window);
+ [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr window);
+ [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr window, StringBuilder text, int count);
+ [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr window, uint command);
+ [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr dialog, int id);
+ [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, IntPtr wParam, StringBuilder lParam, uint flags, uint timeout, out IntPtr result);
+ [DllImport("user32.dll")] static extern IntPtr SendMessageTimeoutW(IntPtr window, uint message, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
+ [DllImport("user32.dll")] static extern bool PostMessageW(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+ public static uint ProcessOf(IntPtr window) { uint id; GetWindowThreadProcessId(window, out id); return id; }
+ public static string ClassOf(IntPtr window) { var text = new StringBuilder(256); GetClassNameW(window, text, text.Capacity); return text.ToString(); }
+ public static IntPtr[] DialogsOf(uint processId) {
+  var found = new List<IntPtr>();
+  EnumWindows((window, parameter) => { if (ProcessOf(window) == processId && IsWindowVisible(window) && ClassOf(window) == "#32770") found.Add(window); return true; }, IntPtr.Zero);
+  return found.ToArray();
+ }
+ public static string TextOf(IntPtr window) {
+  IntPtr length;
+  if (SendMessageTimeoutW(window, 0x000E, IntPtr.Zero, IntPtr.Zero, 0x0002, 2000, out length) == IntPtr.Zero) throw new InvalidOperationException("Window text length was unavailable.");
+  int size = (int)length; if (size < 0 || size > 4096) throw new InvalidOperationException("Window text length is outside its bound.");
+  var text = new StringBuilder(size + 1); IntPtr copied;
+  if (SendMessageTimeoutW(window, 0x000D, new IntPtr(size + 1), text, 0x0002, 2000, out copied) == IntPtr.Zero) throw new InvalidOperationException("Window text was unavailable.");
+  return text.ToString();
+ }
+ public static int DefaultIdOf(IntPtr dialog) {
+  IntPtr value;
+  if (SendMessageTimeoutW(dialog, 0x0400, IntPtr.Zero, IntPtr.Zero, 0x0002, 2000, out value) == IntPtr.Zero) throw new InvalidOperationException("Dialog default button was unavailable.");
+  long raw = value.ToInt64(); if (((raw >> 16) & 0xFFFF) != 0x534B) return 0; return (int)(raw & 0xFFFF);
+ }
+ public static void Answer(IntPtr dialog, int id) {
+  IntPtr button = GetDlgItem(dialog, id); if (button == IntPtr.Zero) throw new InvalidOperationException("Confirmation answer button is absent.");
+  if (!PostMessageW(dialog, 0x0111, new IntPtr(id), button)) throw new InvalidOperationException("Confirmation answer could not be posted.");
+ }
+}
+'@
+}
+
+function Get-UpdateConfirmationFacts {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    Initialize-UpdateConfirmationNative
+    $dialogs = @([SmacrobatUpdateConfirmNative]::DialogsOf([uint32]$ProcessId))
+    if ($dialogs.Count -ne 1) { return [pscustomobject]@{ count = $dialogs.Count } }
+    $dialog = $dialogs[0]
+    $owner = [SmacrobatUpdateConfirmNative]::GetWindow($dialog,[uint32]4)
+    $message = [SmacrobatUpdateConfirmNative]::GetDlgItem($dialog,0xFFFF)
+    $buttons = [ordered]@{}
+    foreach ($id in @(1,2,6,7)) { $buttons[[string]$id] = [SmacrobatUpdateConfirmNative]::GetDlgItem($dialog,$id) }
+    return [pscustomobject]@{
+        count = 1; handle = $dialog
+        className = [SmacrobatUpdateConfirmNative]::ClassOf($dialog)
+        title = [SmacrobatUpdateConfirmNative]::TextOf($dialog)
+        text = if ($message -ne [IntPtr]::Zero) { [SmacrobatUpdateConfirmNative]::TextOf($message) } else { '' }
+        ownerSameProcess = $owner -ne [IntPtr]::Zero -and [SmacrobatUpdateConfirmNative]::ProcessOf($owner) -eq [uint32]$ProcessId
+        ownerDisabled = $owner -ne [IntPtr]::Zero -and -not [SmacrobatUpdateConfirmNative]::IsWindowEnabled($owner)
+        okPresent = $buttons['1'] -ne [IntPtr]::Zero; cancelPresent = $buttons['2'] -ne [IntPtr]::Zero
+        yesText = if ($buttons['6'] -ne [IntPtr]::Zero) { [SmacrobatUpdateConfirmNative]::TextOf($buttons['6']) } else { '' }
+        noText = if ($buttons['7'] -ne [IntPtr]::Zero) { [SmacrobatUpdateConfirmNative]::TextOf($buttons['7']) } else { '' }
+        yesEnabled = $buttons['6'] -ne [IntPtr]::Zero -and [SmacrobatUpdateConfirmNative]::IsWindowEnabled($buttons['6'])
+        noEnabled = $buttons['7'] -ne [IntPtr]::Zero -and [SmacrobatUpdateConfirmNative]::IsWindowEnabled($buttons['7'])
+        defaultId = [SmacrobatUpdateConfirmNative]::DefaultIdOf($dialog)
+    }
+}
+
+function Get-UpdateConfirmationMismatches {
+    param([Parameter(Mandatory = $true)]$Facts,[Parameter(Mandatory = $true)][string]$Version)
+    $fields = [Collections.Generic.List[string]]::new()
+    if ([int]$Facts.count -ne 1) { $fields.Add('count(actual=' + [int]$Facts.count + ')'); return @($fields) }
+    if ([string]$Facts.className -cne '#32770') { $fields.Add('className') }
+    if ([string]$Facts.title -cne $script:UpdatePins.ConfirmationTitle) { $fields.Add('title') }
+    if (([string]$Facts.text).Replace("`r`n","`n") -cne (Get-UpdateConfirmationText -Version $Version)) { $fields.Add('text') }
+    if (-not [bool]$Facts.ownerSameProcess) { $fields.Add('owner') }
+    if (-not [bool]$Facts.ownerDisabled) { $fields.Add('modality') }
+    if ([bool]$Facts.okPresent -or [bool]$Facts.cancelPresent) { $fields.Add('extraButtons') }
+    if (([string]$Facts.yesText).Replace('&','') -cne 'Yes' -or -not [bool]$Facts.yesEnabled) { $fields.Add('yesButton') }
+    if (([string]$Facts.noText).Replace('&','') -cne 'No' -or -not [bool]$Facts.noEnabled) { $fields.Add('noButton') }
+    if ([int]$Facts.defaultId -ne 7) { $fields.Add('defaultButton(actual=' + [int]$Facts.defaultId + ')') }
+    return @($fields)
+}
+
+function Wait-UpdateConfirmation {
+    param([Parameter(Mandatory = $true)][int]$ProcessId,[Parameter(Mandatory = $true)][string]$Version,[Parameter(Mandatory = $true)][datetime]$Deadline,[scriptblock]$FactsProvider)
+    $mismatches = @('count(actual=0)')
+    do {
+        $facts = if ($FactsProvider) { & $FactsProvider $ProcessId } else { Get-UpdateConfirmationFacts -ProcessId $ProcessId }
+        if ([int]$facts.count -gt 1) { throw 'More than one native dialog is open in the installed application.' }
+        $mismatches = @(Get-UpdateConfirmationMismatches -Facts $facts -Version $Version)
+        if ($mismatches.Count -eq 0) { return $facts }
+        Start-Sleep -Milliseconds 150
+    } while ([datetime]::UtcNow -lt $Deadline)
+    throw ('The native update confirmation did not match before its deadline: ' + ($mismatches -join ', ') + '.')
+}
+
+function Invoke-UpdateConfirmationAnswer {
+    param([Parameter(Mandatory = $true)]$Facts,[Parameter(Mandatory = $true)][ValidateSet('Yes','No')][string]$Answer,[Parameter(Mandatory = $true)][datetime]$Deadline)
+    Initialize-UpdateConfirmationNative
+    [SmacrobatUpdateConfirmNative]::Answer([IntPtr]$Facts.handle,$(if ($Answer -ceq 'Yes') { 6 } else { 7 }))
+    do {
+        if (-not [SmacrobatUpdateConfirmNative]::IsWindow([IntPtr]$Facts.handle)) { return }
+        Start-Sleep -Milliseconds 100
+    } while ([datetime]::UtcNow -lt $Deadline)
+    throw "The native update confirmation did not close after answering $Answer."
 }
 
 function Invoke-InstallButton {
@@ -652,6 +789,7 @@ $downloads = Join-Path $work 'downloads'
 [IO.Directory]::CreateDirectory($downloads) | Out-Null
 $metadataPath = Join-Path $downloads 'release.json'
 $latestMetadataPath = Join-Path $downloads 'latest-release.json'
+$baselineMetadataPath = Join-Path $downloads 'baseline-release.json'
 $baselinePath = Join-Path $downloads $script:UpdatePins.BaselineName
 $targetInstallerPath = Join-Path $downloads $TargetInstallerName
 $targetSignatureName = "$TargetInstallerName.sig"
@@ -659,26 +797,34 @@ $targetSignaturePath = Join-Path $downloads $targetSignatureName
 $targetManifestPath = Join-Path $downloads 'latest.json'
 Invoke-GitHubReleaseApi -Path "/repos/$($script:UpdatePins.Repository)/releases/tags/$TargetTag" -Destination $metadataPath -Token $script:ApiToken
 Invoke-GitHubReleaseApi -Path "/repos/$($script:UpdatePins.Repository)/releases/latest" -Destination $latestMetadataPath -Token $script:ApiToken
+Invoke-GitHubReleaseApi -Path "/repos/$($script:UpdatePins.Repository)/releases/tags/$($script:UpdatePins.BaselineTag)" -Destination $baselineMetadataPath -Token $script:ApiToken
 $script:ApiToken = $null
 $release = Read-BoundedJson -Path $metadataPath
 $latestRelease = Read-BoundedJson -Path $latestMetadataPath
+$baselineRelease = Read-BoundedJson -Path $baselineMetadataPath
+if ([uint64]$baselineRelease.id -ne $script:UpdatePins.BaselineReleaseId -or [string]$baselineRelease.tag_name -cne $script:UpdatePins.BaselineTag -or
+    [bool]$baselineRelease.draft -or [bool]$baselineRelease.prerelease -or [string]::IsNullOrWhiteSpace([string]$baselineRelease.published_at)) {
+    throw 'Baseline is not the exact published stable 0.3.1 release.'
+}
+$baselineAsset = Assert-ExactAsset -Release $baselineRelease -Id $script:UpdatePins.BaselineInstallerAssetId -Name $script:UpdatePins.BaselineName -Bytes $script:UpdatePins.BaselineBytes -Sha256 $script:UpdatePins.BaselineSha256 -Tag $script:UpdatePins.BaselineTag
+if ([string]$baselineAsset.browser_download_url -cne $script:UpdatePins.BaselineUrl) { throw 'Baseline installer asset URL does not match its pin.' }
 if ([uint64]$release.id -ne $targetReleaseIdValue -or [uint64]$latestRelease.id -ne $targetReleaseIdValue -or
     [string]$release.tag_name -cne $TargetTag -or [bool]$release.draft -or [bool]$release.prerelease -or
     [string]::IsNullOrWhiteSpace([string]$release.published_at)) {
     throw 'Target is not the exact latest published stable release.'
 }
-$installerAsset = Assert-ExactAsset -Release $release -Id $targetInstallerAssetIdValue -Name $TargetInstallerName -Bytes $targetInstallerBytesValue -Sha256 $TargetInstallerSha256
-$signatureAsset = Assert-ExactAsset -Release $release -Id $targetSignatureAssetIdValue -Name $targetSignatureName -Bytes $targetSignatureBytesValue -Sha256 $TargetSignatureSha256
-$manifestAsset = Assert-ExactAsset -Release $release -Id $targetManifestAssetIdValue -Name 'latest.json' -Bytes $targetManifestBytesValue -Sha256 $TargetManifestSha256
+$installerAsset = Assert-ExactAsset -Release $release -Id $targetInstallerAssetIdValue -Name $TargetInstallerName -Bytes $targetInstallerBytesValue -Sha256 $TargetInstallerSha256 -Tag $TargetTag
+$signatureAsset = Assert-ExactAsset -Release $release -Id $targetSignatureAssetIdValue -Name $targetSignatureName -Bytes $targetSignatureBytesValue -Sha256 $TargetSignatureSha256 -Tag $TargetTag
+$manifestAsset = Assert-ExactAsset -Release $release -Id $targetManifestAssetIdValue -Name 'latest.json' -Bytes $targetManifestBytesValue -Sha256 $TargetManifestSha256 -Tag $TargetTag
 $null = Invoke-PublicDownload -Uri $script:UpdatePins.BaselineUrl -Destination $baselinePath
 $null = Invoke-PublicDownload -Uri ([string]$installerAsset.browser_download_url) -Destination $targetInstallerPath
 $null = Invoke-PublicDownload -Uri ([string]$signatureAsset.browser_download_url) -Destination $targetSignaturePath -MaximumBytes 65536
 $null = Invoke-PublicDownload -Uri $script:UpdatePins.LatestManifestUrl -Destination $targetManifestPath -MaximumBytes $script:UpdatePins.JsonBytesMaximum
-Assert-FileReceipt -Path $baselinePath -Bytes $script:UpdatePins.BaselineBytes -Sha256 $script:UpdatePins.BaselineSha256 -Kind 'Published 0.2.0 baseline installer'
+Assert-FileReceipt -Path $baselinePath -Bytes $script:UpdatePins.BaselineBytes -Sha256 $script:UpdatePins.BaselineSha256 -Kind 'Published 0.3.1 baseline installer'
 Assert-FileReceipt -Path $targetInstallerPath -Bytes $targetInstallerBytesValue -Sha256 $TargetInstallerSha256 -Kind 'Published target installer'
 Assert-FileReceipt -Path $targetSignaturePath -Bytes $targetSignatureBytesValue -Sha256 $TargetSignatureSha256 -Kind 'Published updater signature'
 Assert-FileReceipt -Path $targetManifestPath -Bytes $targetManifestBytesValue -Sha256 $TargetManifestSha256 -Kind 'Published latest manifest'
-if ((Get-WindowsSignatureFacts -Path $baselinePath).Status -cne 'NotSigned') { throw 'Published 0.2.0 baseline installer is not exactly Authenticode NotSigned.' }
+$null = Assert-TrustedWindowsSignature -Path $baselinePath -ExpectedPublisher $script:UpdatePins.BaselinePublisher
 $null = Assert-TrustedWindowsSignature -Path $targetInstallerPath -ExpectedPublisher $ExpectedPublisher
 $manifest = Read-BoundedJson -Path $targetManifestPath
 $platform = $manifest.platforms.'windows-x86_64'
@@ -706,7 +852,7 @@ if ((Test-Path -LiteralPath $installRoot) -or (Test-Path -LiteralPath $settingsR
 Invoke-SilentInstaller -Path $baselinePath
 $baselineFacts = Get-InstallFacts -InstallRoot $installRoot -RegistryPath $registryPath
 $baselineReceipt = [ordered]@{ bytes = [uint64]$baselineFacts.appBytes; sha256 = [string]$baselineFacts.appSha256 }
-Assert-InstallFacts -Facts $baselineFacts -Version $script:UpdatePins.BaselineVersion -InstallRoot $installRoot -ApplicationReceipt $baselineReceipt -Publisher '' -SignatureStatus 'NotSigned'
+Assert-InstallFacts -Facts $baselineFacts -Version $script:UpdatePins.BaselineVersion -InstallRoot $installRoot -ApplicationReceipt $baselineReceipt -Publisher $script:UpdatePins.BaselinePublisher -SignatureStatus 'Valid'
 
 [IO.Directory]::CreateDirectory($settingsRoot) | Out-Null
 $settingsSentinel = Join-Path $settingsRoot 'upgrade-sentinel.json'
@@ -746,7 +892,7 @@ try {
     if (-not (Invoke-InstallButton -SessionId $session.SessionId -Deadline ([datetime]::UtcNow.AddSeconds(10)))) { throw 'First in-app install action was unavailable.' }
     $failed = Wait-InstallFailure -SessionId $session.SessionId -Deadline ([datetime]::UtcNow.AddSeconds($script:UpdatePins.FailedDownloadDeadlineSeconds))
     $unchanged = Get-InstallFacts -InstallRoot $installRoot -RegistryPath $registryPath
-    Assert-InstallFacts -Facts $unchanged -Version $script:UpdatePins.BaselineVersion -InstallRoot $installRoot -ApplicationReceipt $baselineReceipt -Publisher '' -SignatureStatus 'NotSigned'
+    Assert-InstallFacts -Facts $unchanged -Version $script:UpdatePins.BaselineVersion -InstallRoot $installRoot -ApplicationReceipt $baselineReceipt -Publisher $script:UpdatePins.BaselinePublisher -SignatureStatus 'Valid'
     Assert-Sentinel -Path $settingsSentinel -Bytes $settingsSentinelReceipt.bytes -Sha256 $settingsSentinelReceipt.sha256
     Assert-Sentinel -Path $documentSentinel -Bytes $documentSentinelReceipt.bytes -Sha256 $documentSentinelReceipt.sha256
     Remove-NetFirewallRule -DisplayName $firewallName -ErrorAction Stop
@@ -757,16 +903,45 @@ try {
     if (-not (Invoke-InstallButton -SessionId $session.SessionId -Deadline $retryStarted.AddSeconds(10))) { throw 'Retry in-app install action was unavailable.' }
     $sawDownloadState = $false
     $sessionClosedForInstall = $false
-    $installDeadline = $retryStarted.AddSeconds($script:UpdatePins.InstallDeadlineSeconds)
+    $confirmingStatus = "Waiting for you to confirm installing version $TargetVersion…"
     $statusScript = @'
 const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return d?.querySelector('[role="status"]')?.textContent.trim()||'';
 '@
+    $downloadDeadline = $retryStarted.AddSeconds($script:UpdatePins.FailedDownloadDeadlineSeconds)
+    $state = ''
     do {
-        try {
-            $state = Invoke-WebDriverScript -SessionId $session.SessionId -Deadline $installDeadline -Script $statusScript
-            if ([string]$state -clike 'Downloading signed update*' -or [string]$state -clike 'Downloading update:*' -or
-                [string]$state -clike 'Downloaded *' -or [string]$state -ceq 'Verifying update and starting installer…') { $sawDownloadState = $true }
-        } catch { $sessionClosedForInstall = $true }
+        $state = [string](Invoke-WebDriverScript -SessionId $session.SessionId -Deadline $downloadDeadline -Script $statusScript)
+        if ($state -clike 'Downloading signed update*' -or $state -clike 'Downloading update:*' -or $state -clike 'Downloaded *' -or
+            $state -ceq 'Verifying update and starting installer…' -or $state -ceq $confirmingStatus) { $sawDownloadState = $true }
+        if ($state -ceq $confirmingStatus) { break }
+        Start-Sleep -Milliseconds 150
+    } while ([datetime]::UtcNow -lt $downloadDeadline)
+    if ($state -cne $confirmingStatus) { throw 'The retry did not download the update and ask for confirmation before its deadline.' }
+    if (-not $sawDownloadState) { throw 'The retry never exposed a real updater download or verification state.' }
+
+    # 0.3.1 asks in a native Yes/No box (default No) before installing; No must keep the installed version.
+    $declinePrompt = Wait-UpdateConfirmation -ProcessId $baselineProcessId -Version $TargetVersion -Deadline ([datetime]::UtcNow.AddSeconds($script:UpdatePins.ConfirmationDeadlineSeconds))
+    Invoke-UpdateConfirmationAnswer -Facts $declinePrompt -Answer No -Deadline ([datetime]::UtcNow.AddSeconds($script:UpdatePins.ConfirmationDeadlineSeconds))
+    $declined = Wait-DeclinedUpdate -SessionId $session.SessionId -Deadline ([datetime]::UtcNow.AddSeconds($script:UpdatePins.ConfirmationDeadlineSeconds)) -Version $TargetVersion
+    $afterDecline = Get-InstallFacts -InstallRoot $installRoot -RegistryPath $registryPath
+    Assert-InstallFacts -Facts $afterDecline -Version $script:UpdatePins.BaselineVersion -InstallRoot $installRoot -ApplicationReceipt $baselineReceipt -Publisher $script:UpdatePins.BaselinePublisher -SignatureStatus 'Valid'
+    Assert-Sentinel -Path $settingsSentinel -Bytes $settingsSentinelReceipt.bytes -Sha256 $settingsSentinelReceipt.sha256
+    Assert-Sentinel -Path $documentSentinel -Bytes $documentSentinelReceipt.bytes -Sha256 $documentSentinelReceipt.sha256
+    $stillRunning = @(Get-AppProcesses -ApplicationPath ([string]$baselineFacts.appPath))
+    if ($stillRunning.Count -ne 1 -or [int]$stillRunning[0].Id -ne $baselineProcessId -or [long]$stillRunning[0].StartTicks -ne [long]$baselineProcesses[0].StartTicks) {
+        throw 'Declining the update confirmation did not keep the exact baseline application running.'
+    }
+    if ([int](Get-UpdateConfirmationFacts -ProcessId $baselineProcessId).count -ne 0) { throw 'A native dialog remained open after declining the update.' }
+
+    $acceptStarted = [datetime]::UtcNow
+    if (-not (Invoke-InstallButton -SessionId $session.SessionId -Deadline $acceptStarted.AddSeconds(10))) { throw 'In-app install action after declining was unavailable.' }
+    $acceptPrompt = Wait-UpdateConfirmation -ProcessId $baselineProcessId -Version $TargetVersion -Deadline $acceptStarted.AddSeconds($script:UpdatePins.ConfirmationDeadlineSeconds)
+    $acceptStatus = [string](Invoke-WebDriverScript -SessionId $session.SessionId -Deadline $acceptStarted.AddSeconds($script:UpdatePins.ConfirmationDeadlineSeconds) -Script $statusScript)
+    if ($acceptStatus -cne $confirmingStatus) { throw 'The app did not show that it is waiting for the update confirmation.' }
+    Invoke-UpdateConfirmationAnswer -Facts $acceptPrompt -Answer Yes -Deadline ([datetime]::UtcNow.AddSeconds($script:UpdatePins.ConfirmationDeadlineSeconds))
+    $installDeadline = [datetime]::UtcNow.AddSeconds($script:UpdatePins.InstallDeadlineSeconds)
+    do {
+        try { $null = Invoke-WebDriverScript -SessionId $session.SessionId -Deadline $installDeadline -Script $statusScript } catch { $sessionClosedForInstall = $true }
         if (Test-Path -LiteralPath $registryPath) {
             try { if ([string](Get-ItemProperty -LiteralPath $registryPath).DisplayVersion -ceq $TargetVersion) { break } } catch { }
         }
@@ -776,7 +951,6 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
     Assert-InstallFacts -Facts $upgraded -Version $TargetVersion -InstallRoot $installRoot -ApplicationReceipt $targetApplicationReceipt -Publisher $ExpectedPublisher -SignatureStatus 'Valid'
     Assert-Sentinel -Path $settingsSentinel -Bytes $settingsSentinelReceipt.bytes -Sha256 $settingsSentinelReceipt.sha256
     Assert-Sentinel -Path $documentSentinel -Bytes $documentSentinelReceipt.bytes -Sha256 $documentSentinelReceipt.sha256
-    if (-not $sawDownloadState) { throw 'The retry never exposed a real updater download or verification state.' }
     try {
         $null = Invoke-WebDriverScript -SessionId $session.SessionId -Deadline ([datetime]::UtcNow.AddSeconds(5)) -Script 'return document.title;'
         throw 'The baseline WebDriver session survived after the updater replaced and exited the baseline application.'
@@ -842,14 +1016,15 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
     Assert-HostedPublisherUiEvidence -Value $applicationPublisherUi -Kind 'installed-application' -FileName 'pdf-workstation.exe' -Bytes ([uint64]$targetApplicationReceipt.bytes) -Sha256 ([string]$targetApplicationReceipt.sha256) -Publisher $ExpectedPublisher
     [IO.Directory]::CreateDirectory($output) | Out-Null
     $record = [ordered]@{
-        schemaVersion = 4
-        scope = 'Ephemeral GitHub-hosted proof of the exact published 0.2.0 UI checking the public latest manifest (release metadata is read from the GitHub API with the job''s read-only token; latest.json, the installers and the signature are downloaded unauthenticated), deterministic pre-download network failure and retry, signed target install, automatic relaunch when the session has an Explorer shell window (otherwise recorded as not observed with its reason), a verifier-launched current-version recheck, exact Authenticode publisher and trusted-timestamp verification, sentinel preservation, and standalone signed-installer restoration of a controlled missing-application-executable state; updater setup exit is recorded as verified only when an updater setup process was observed; the noninteractive hosted session does not attempt or verify Windows Explorer Digital Signatures UI, and partial-byte interruption and installer transactionality are not established.'
+        schemaVersion = 5
+        scope = 'Ephemeral GitHub-hosted proof of the exact published 0.3.1 UI checking the public latest manifest (release metadata is read from the GitHub API with the job''s read-only token; latest.json, the installers and the signature are downloaded unauthenticated), deterministic pre-download network failure and retry, the native install confirmation (text, default No, answered by window message: No keeps the installed version, then Yes installs), signed target install, automatic relaunch when the session has an Explorer shell window (otherwise recorded as not observed with its reason), a verifier-launched current-version recheck, exact Authenticode publisher and trusted-timestamp verification, sentinel preservation, and standalone signed-installer restoration of a controlled missing-application-executable state; updater setup exit is recorded as verified only when an updater setup process was observed; the noninteractive hosted session does not attempt or verify Windows Explorer Digital Signatures UI, and partial-byte interruption and installer transactionality are not established.'
         mode = 'published-stable-in-app-update'
         workflowSourceRevision = $WorkflowSourceRevision
         targetSourceRevision = $TargetSourceRevision
         baseline = [ordered]@{
             version = $script:UpdatePins.BaselineVersion
-            installer = [ordered]@{ fileName = $script:UpdatePins.BaselineName; bytes = $script:UpdatePins.BaselineBytes; sha256 = $script:UpdatePins.BaselineSha256; signature = 'NotSigned' }
+            releaseId = $script:UpdatePins.BaselineReleaseId
+            installer = [ordered]@{ id = $script:UpdatePins.BaselineInstallerAssetId; fileName = $script:UpdatePins.BaselineName; bytes = $script:UpdatePins.BaselineBytes; sha256 = $script:UpdatePins.BaselineSha256; signature = 'Valid'; publisher = $script:UpdatePins.BaselinePublisher }
             installedApplication = $baselineReceipt
         }
         release = [ordered]@{
@@ -875,6 +1050,7 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
         updater = [ordered]@{
             baselineUiVersion = [string]$available.installed; offeredVersion = [string]$available.status; earlyFailureStatus = [string]$failed.status
             retryDownloadStateObserved = [bool]$sawDownloadState; updaterSessionClosedForInstall = [bool]$sessionClosedForInstall
+            confirmation = [ordered]@{ title = $script:UpdatePins.ConfirmationTitle; text = Get-TextReceipt -Value (Get-UpdateConfirmationText -Version $TargetVersion); defaultButton = 'No'; answeredBy = 'window-message'; declinedStatus = [string]$declined.status; declineKeptBaseline = $true; acceptedAnswer = 'Yes' }
             automaticRelaunchObserved = [bool]$relaunchOutcome.observed; automaticRelaunchNotObservedReason = $relaunchOutcome.notObservedReason
             shellWindowBeforeUpdate = [bool]$shellWindowBeforeUpdate; shellWindowAtRelaunch = [bool]$shellWindowAtRelaunch
             postUpdateLaunchedBy = 'verifier-webdriver'; targetUiVersion = [string]$current.installed; targetUiStatus = [string]$current.status
@@ -884,7 +1060,8 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
             releaseMetadataVerified = $true; releaseMetadataAuthenticated = $true; publicLatestManifestVerified = $true; publicLatestManifestAuthenticated = $false
             exactPublishedBaselineInstalled = $true; inAppUpdateUiVerified = $true
             deterministicEarlyDownloadCutoffVerified = $true; failedDownloadLeftBaselineUnchanged = $true
-            retryThroughSameUiVerified = $true; updaterSignatureVerified = $true; targetPublisherSignatureVerified = $true
+            retryThroughSameUiVerified = $true; nativeInstallConfirmationVerified = $true; confirmationDeclineKeptBaseline = $true
+            baselinePublisherSignatureVerified = $true; updaterSignatureVerified = $true; targetPublisherSignatureVerified = $true
             registryVersionUpdated = $true; installedApplicationReceiptMatched = $true; automaticRelaunchVerified = [bool]$relaunchOutcome.verified
             postUpdateLatestCheckVerified = $true; settingsSentinelPreserved = $true; documentSentinelPreserved = $true
             publisherUiMode = 'hosted-noninteractive'; publisherUiAttempted = $false

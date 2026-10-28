@@ -81,9 +81,23 @@ describe('published in-app update verification infrastructure', () => {
 
   it('pins public artifacts and fails closed on release, asset, manifest, and signature identity', () => {
     const script = readFileSync(scriptPath, 'utf8');
-    expect(script).toContain("BaselineVersion = '0.2.0'");
-    expect(script).toContain('BaselineBytes = [uint64]6418229');
-    expect(script).toContain("BaselineSha256 = '17788CB82BB42DEAC35EA197A385A9BAFC8CD331422446A2B834E115A90C4D2E'");
+    expect(script).toContain("BaselineVersion = '0.3.1'");
+    expect(script).toContain("BaselineTag = 'v0.3.1'");
+    expect(script).toContain('BaselineReleaseId = [uint64]425998245');
+    expect(script).toContain('BaselineInstallerAssetId = [uint64]682909274');
+    expect(script).toContain("BaselineName = 'PDF.Workstation_0.3.1_x64-setup.exe'");
+    expect(script).toContain('BaselineBytes = [uint64]11210976');
+    expect(script).toContain("BaselineSha256 = '67C685264ABC094246E95C04629BFFF5D4854BD4FE5B84FEDE8760261A119038'");
+    expect(script).toContain("BaselineUrl = 'https://github.com/Joshua-Beel/PDF-Workstation/releases/download/v0.3.1/PDF.Workstation_0.3.1_x64-setup.exe'");
+    expect(script).toContain("BaselinePublisher = 'Joshua Beel'");
+    expect(script).not.toMatch(/0\.2\.0|NotSigned|17788CB8|F-CK-Adobe/);
+    expect(script).toContain('Invoke-GitHubReleaseApi -Path "/repos/$($script:UpdatePins.Repository)/releases/tags/$($script:UpdatePins.BaselineTag)" -Destination $baselineMetadataPath -Token $script:ApiToken');
+    expect(script).toContain('[uint64]$baselineRelease.id -ne $script:UpdatePins.BaselineReleaseId');
+    expect(script).toContain('$baselineAsset = Assert-ExactAsset -Release $baselineRelease -Id $script:UpdatePins.BaselineInstallerAssetId -Name $script:UpdatePins.BaselineName -Bytes $script:UpdatePins.BaselineBytes -Sha256 $script:UpdatePins.BaselineSha256 -Tag $script:UpdatePins.BaselineTag');
+    expect(script).toContain('[string]$baselineAsset.browser_download_url -cne $script:UpdatePins.BaselineUrl');
+    expect(script).toContain('$null = Assert-TrustedWindowsSignature -Path $baselinePath -ExpectedPublisher $script:UpdatePins.BaselinePublisher');
+    expect(script.match(/-ApplicationReceipt \$baselineReceipt -Publisher \$script:UpdatePins\.BaselinePublisher -SignatureStatus 'Valid'/g)).toHaveLength(3);
+    expect(script.match(/-Tag \$TargetTag/g)).toHaveLength(3);
     expect(script).toContain('releases/latest/download/latest.json');
     expect(script).toContain('/releases/tags/$TargetTag');
     expect(script).toContain('[uint64]$latestRelease.id -ne $targetReleaseIdValue');
@@ -190,7 +204,7 @@ public sealed class InAppRecordingHandler : HttpMessageHandler {
       expect(script.indexOf(later), later).toBeGreaterThan(read);
     }
     expect(script).toMatch(/-Token \$script:ApiToken\r?\n\$script:ApiToken = \$null\r?\n/);
-    expect(script.match(/\$script:ApiToken/g)).toHaveLength(4);
+    expect(script.match(/\$script:ApiToken/g)).toHaveLength(5);
     expect(script).toContain('IN_APP_UPDATE_API_TOKEN|gh[pousr]_[A-Za-z0-9_]{16,}');
   });
 
@@ -198,14 +212,14 @@ public sealed class InAppRecordingHandler : HttpMessageHandler {
     const script = readFileSync(scriptPath, 'utf8');
     expect(script).toContain("textContent.trim()==='Check for updates…'");
     expect(script).toContain("textContent.trim()==='Install update and restart'");
-    expect(script).toContain("'Installed version: 0.2.0'");
+    expect(script).toContain("$installedText = 'Installed version: ' + $script:UpdatePins.BaselineVersion");
     expect(script).toContain('New-NetFirewallRule');
     expect(script).toContain('-Direction Outbound -Action Block -Program ([string]$baselineFacts.appPath)');
     expect(script).toContain("'Your installed version is unchanged. You can retry.'");
     expect(script).toContain('Remove-NetFirewallRule -DisplayName $firewallName -ErrorAction Stop');
     expect(script).toContain("Get-NetFirewallRule -DisplayName $firewallName -ErrorAction SilentlyContinue");
     expect(script).toMatch(/finally \{[\s\S]*Remove-NetFirewallRule -DisplayName \$firewallName -ErrorAction SilentlyContinue/);
-    expect(script.match(/Invoke-InstallButton -SessionId \$session\.SessionId/g)).toHaveLength(2);
+    expect(script.match(/Invoke-InstallButton -SessionId \$session\.SessionId/g)).toHaveLength(3);
     expect(script).toContain("if (-not $sawDownloadState)");
     expect(script).toContain("if (-not $sessionClosedForInstall)");
     expect(script).toContain('exact baseline application process did not exit');
@@ -216,6 +230,72 @@ public sealed class InAppRecordingHandler : HttpMessageHandler {
     expect(script).toContain("'You have the latest released version.'");
     expect(script).toContain('settingsSentinelPreserved = $true');
     expect(script).toContain('documentSentinelPreserved = $true');
+  });
+
+  it('drives the 0.3.1 Updates strings and native confirmation exactly as the shipped source defines them', () => {
+    const script = readFileSync(scriptPath, 'utf8');
+    const updates = readFileSync('src/Updates.tsx', 'utf8');
+    const native = readFileSync('src-tauri/src/update_commands.rs', 'utf8');
+    for (const text of [
+      'Installed version: ', 'Install update and restart', 'You have the latest released version.', 'Your installed version is unchanged. You can retry.',
+      'Update failed: ', 'Verifying update and starting installer…', 'Downloading signed update…', 'Downloading update: ', 'Downloaded ',
+      'Save your work before continuing.', 'The app will close and reopen during installation. ',
+    ]) expect(updates, text).toContain(text);
+    expect(updates).toContain('setStatus(`Waiting for you to confirm installing version ${available.version}…`);');
+    expect(script).toContain('$confirmingStatus = "Waiting for you to confirm installing version $TargetVersion…"');
+    expect(updates).toContain('setStatus(`Version ${available.version} was not installed. Your installed version is unchanged. You can install it later.`);');
+    expect(script).toContain('$declinedText = "Version $Version was not installed. Your installed version is unchanged. You can install it later."');
+    expect(updates).toContain('aria-labelledby="updates-title"');
+    expect(updates).toContain('role="status"');
+    expect(native).toContain('const CONFIRMATION_TITLE: &str = "Install update?";');
+    expect(script).toContain("ConfirmationTitle = 'Install update?'");
+    expect(native).toContain('MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND');
+    const format = native.match(/format!\("(PDF Workstation \{version\} is ready to install\.[^"]*)"\)/);
+    expect(format).not.toBeNull();
+    const expected = format![1].replaceAll('\\n', '\n').replaceAll('{version}', '9.8.7');
+    const order = ['$declinePrompt = Wait-UpdateConfirmation', 'Invoke-UpdateConfirmationAnswer -Facts $declinePrompt -Answer No', '$declined = Wait-DeclinedUpdate', 'Assert-InstallFacts -Facts $afterDecline', 'Declining the update confirmation did not keep the exact baseline application running.', '$acceptPrompt = Wait-UpdateConfirmation', 'Invoke-UpdateConfirmationAnswer -Facts $acceptPrompt -Answer Yes', 'Assert-InstallFacts -Facts $upgraded'].map(x => script.indexOf(x));
+    expect(order.every(x => x > 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(script).toContain('nativeInstallConfirmationVerified = $true; confirmationDeclineKeptBaseline = $true');
+    const source = verifierHarness(
+      ['Get-UpdateConfirmationText', 'Get-UpdateConfirmationMismatches', 'Wait-UpdateConfirmation'],
+      String.raw`
+        $script:UpdatePins=@{ConfirmationTitle='Install update?'}
+        $expected=[IO.File]::ReadAllText($env:EXPECTED_CONFIRMATION_PATH)
+        if((Get-UpdateConfirmationText -Version '9.8.7')-cne$expected){throw 'Verifier confirmation text differs from the native source.'}
+        $good=[pscustomobject]@{count=1;handle=[IntPtr]1;className='#32770';title='Install update?';text=$expected.Replace([string][char]10,([string][char]13+[char]10));ownerSameProcess=$true;ownerDisabled=$true;okPresent=$false;cancelPresent=$false;yesText='&Yes';noText='&No';yesEnabled=$true;noEnabled=$true;defaultId=7}
+        if(@(Get-UpdateConfirmationMismatches -Facts $good -Version '9.8.7').Count){throw 'Exact confirmation facts were rejected.'}
+        foreach($case in @(
+          @{field='className';value='Edit';expect='className'},@{field='title';value='Install update';expect='title'},
+          @{field='ownerSameProcess';value=$false;expect='owner'},@{field='ownerDisabled';value=$false;expect='modality'},
+          @{field='okPresent';value=$true;expect='extraButtons'},@{field='cancelPresent';value=$true;expect='extraButtons'},
+          @{field='yesText';value='&OK';expect='yesButton'},@{field='noEnabled';value=$false;expect='noButton'},
+          @{field='defaultId';value=6;expect='defaultButton(actual=6)'},@{field='defaultId';value=0;expect='defaultButton(actual=0)'})){
+          $copy=$good.PSObject.Copy();$copy.($case.field)=$case.value
+          $found=@(Get-UpdateConfirmationMismatches -Facts $copy -Version '9.8.7')
+          if($found-cnotcontains$case.expect){throw ('Mismatch was not named: '+$case.expect+' got '+($found-join','))}
+        }
+        if(@(Get-UpdateConfirmationMismatches -Facts $good -Version '9.8.8')-cnotcontains'text'){throw 'A confirmation for another version was accepted.'}
+        if(@(Get-UpdateConfirmationMismatches -Facts ([pscustomobject]@{count=0}) -Version '9.8.7')-cnotcontains'count(actual=0)'){throw 'A missing confirmation was accepted.'}
+        $script:polls=0
+        $seen=Wait-UpdateConfirmation -ProcessId 1 -Version '9.8.7' -Deadline ([datetime]::UtcNow.AddSeconds(5)) -FactsProvider {param($p)$script:polls++;if($script:polls-lt3){[pscustomobject]@{count=0}}else{$good}}
+        if($script:polls-ne3-or$seen.defaultId-ne7){throw 'Confirmation wait did not poll until the exact box appeared.'}
+        $message='';try{$null=Wait-UpdateConfirmation -ProcessId 1 -Version '9.8.7' -Deadline ([datetime]::UtcNow.AddSeconds(5)) -FactsProvider {param($p)[pscustomobject]@{count=2}}}catch{$message=$_.Exception.Message}
+        if($message-cne'More than one native dialog is open in the installed application.'){throw 'Two dialogs were not refused.'}
+        $bad=$good.PSObject.Copy();$bad.defaultId=6
+        $message='';try{$null=Wait-UpdateConfirmation -ProcessId 1 -Version '9.8.7' -Deadline ([datetime]::UtcNow.AddMilliseconds(400)) -FactsProvider {param($p)$bad}.GetNewClosure()}catch{$message=$_.Exception.Message}
+        if($message-cne'The native update confirmation did not match before its deadline: defaultButton(actual=6).'){throw ('A Yes-default box was not refused: '+$message)}
+      `,
+    );
+    const root = `target/in-app-update-test-${randomUUID()}`;
+    mkdirSync(root, { recursive: true });
+    try {
+      writeFileSync(`${root}/expected.txt`, expected, 'utf8');
+      const result = spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', source], { encoding: 'utf8', timeout: 30_000, env: { ...process.env, EXPECTED_CONFIRMATION_PATH: `${root}/expected.txt` } });
+      expect(result.status, result.stderr || result.stdout).toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('requires the automatic relaunch whenever an Explorer shell window exists and labels the verifier launch', () => {
@@ -391,7 +471,7 @@ public sealed class InAppRecordingHandler : HttpMessageHandler {
     expect(script).not.toContain('Invoke-InstalledPublisherUiProof');
     expect(script.match(/= New-HostedPublisherUiNotAttemptedEvidence -Path/g)).toHaveLength(2);
     expect(script.match(/Assert-HostedPublisherUiEvidence -Value \$/g)).toHaveLength(2);
-    expect(script).toContain('schemaVersion = 4');
+    expect(script).toContain('schemaVersion = 5');
     expect(script).toContain("mode = 'hosted-noninteractive'");
     expect(script).toContain("reason = 'github-hosted-noninteractive-session'");
     expect(script).toContain("publisherUiMode = 'hosted-noninteractive'; publisherUiAttempted = $false");
@@ -483,7 +563,7 @@ public sealed class InAppRecordingHandler : HttpMessageHandler {
     expect(script).toContain('releaseMetadataVerified = $true; releaseMetadataAuthenticated = $true; publicLatestManifestVerified = $true; publicLatestManifestAuthenticated = $false');
     expect(script).toContain("release metadata is read from the GitHub API with the job''s read-only token; latest.json, the installers and the signature are downloaded unauthenticated");
     expect(script).toContain('updater setup exit is recorded as verified only when an updater setup process was observed');
-    expect(script.match(/Invoke-GitHubReleaseApi -Path "/g)).toHaveLength(2);
+    expect(script.match(/Invoke-GitHubReleaseApi -Path "/g)).toHaveLength(3);
     expect(script).toContain('$null = Invoke-PublicDownload -Uri $script:UpdatePins.LatestManifestUrl');
   });
 
