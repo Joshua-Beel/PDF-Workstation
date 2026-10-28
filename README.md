@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Text replacement and selected-text highlights now pass the same two-reader copy-permission check as search and copy (SM3).
 - In-app update test file gets a 60 s per-test timeout, so pwsh start-up on a busy CI runner no longer trips the 5 s default (SM0; test only).
 - Text search, selection, copy and OCR now also need PDFium's own copy permission (`/P` bit 5), so a file whose readers pick different trailers cannot bypass a restriction (SM3).
 - OCR save-in-parts review fixes: Discard after some parts are saved asks first and names them, a paused job lists saved parts, crash recovery after a cross-volume copy, no junction following, free-space check before each new part (SM4).
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - Large-document OCR, step 3 (source build): documents over 32 pages get a background searchable OCR copy (up to 10,000 pages) with a progress panel, Pause, Cancel and Resume; not in any release (SM4).
 - Large-document OCR, step 2: job engine with a bounded worker pool, retry-then-degrade per page, a five-in-a-row breaker, pause, cancel and resume; not wired to the app yet (SM4).
 - Large-document OCR, step 1: a streaming, resumable searchable-PDF writer (lossless images, journal, final check from disk); not wired to the app yet (SM4; no user-visible change).
-- Debug builds only: `SMACROBAT_TEST_DATA_DIR=<absolute folder>` puts recovery records, the update-attempt note and the WebView2 profile under that folder instead of the user profile; compiled out of release (SM5).

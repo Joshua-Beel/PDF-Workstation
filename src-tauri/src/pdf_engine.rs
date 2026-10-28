@@ -160,10 +160,12 @@ impl InProcessEngine {
     }
 }
 
-/// Bit 5 (0x10), the bit lopdf's `COPYABLE` reads, is copy/extract in every standard handler revision (R2-R6), so
-/// the revision (`FPDF_GetSecurityHandlerRevision`) does not change the rule: without an `/Encrypt` dictionary
-/// (revision -1) or when the owner password unlocked the file PDFium reports every bit; otherwise the bits are
-/// the `/P` of the `/Encrypt` dictionary PDFium resolved. Bit 10 (accessibility extraction, R3+) is not enough.
+/// `/P` bits are numbered from 1 (PDF 32000-1 table 22), so bit 5 is mask 0x10 and bit 10 is mask 0x200.
+/// Bit 5 (0x10, copy or extract text and graphics), the bit lopdf's `COPYABLE` reads, has that meaning in every
+/// standard handler revision (R2-R6), so the revision (`FPDF_GetSecurityHandlerRevision`) does not change the rule:
+/// without an `/Encrypt` dictionary (revision -1) or when the owner password unlocked the file PDFium reports every
+/// bit; otherwise the bits are the `/P` of the `/Encrypt` dictionary PDFium resolved. Bit 10 (0x200, extraction for
+/// accessibility, R3+), which pdfium-render's `can_extract_text_and_graphics` reads, is not enough.
 pub(crate) fn extraction_bits_allow(bits: u64) -> bool { bits & 0x10 != 0 }
 
 impl PdfEngine for InProcessEngine {
