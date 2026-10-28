@@ -84,9 +84,9 @@ function Invoke-GitHubJson {
 
 function Get-ExactReleaseAsset {
     param($Release,[uint64]$Id,[string]$Name,[uint64]$Bytes,[string]$Sha256,[string]$ExpectedDownloadSegment)
-    $matches=@($Release.assets|Where-Object{[uint64]$_.id -eq $Id})
-    if($matches.Count -ne 1){throw 'Draft asset id is absent or ambiguous.'}
-    $asset=$matches[0]
+    $assetMatches=@($Release.assets|Where-Object{[uint64]$_.id -eq $Id})
+    if($assetMatches.Count -ne 1){throw 'Draft asset id is absent or ambiguous.'}
+    $asset=$assetMatches[0]
     $uri=[Uri][string]$asset.browser_download_url
     $prefix="/$script:Repository/releases/download/";$suffix='/'+[Uri]::EscapeDataString($Name);$path=$uri.AbsolutePath
     if(-not $path.StartsWith($prefix,[StringComparison]::Ordinal)-or-not $path.EndsWith($suffix,[StringComparison]::Ordinal)){throw 'Draft asset metadata does not match its exact receipt.'}
@@ -324,9 +324,9 @@ function Assert-DefaultInventory {
 function Get-UniqueExtractedFile {
     param([object[]]$Files,[string]$Suffix,[string]$Kind)
     $shape=$Suffix.Replace('\','/')
-    $matches=@($Files|Where-Object{$value=$_.FullName.Replace('\','/');$value.Equals($shape,[StringComparison]::OrdinalIgnoreCase)-or $value.EndsWith('/'+$shape,[StringComparison]::OrdinalIgnoreCase)})
-    if($matches.Count -ne 1){throw "$Kind is absent or ambiguous."}
-    return $matches[0]
+    $fileMatches=@($Files|Where-Object{$value=$_.FullName.Replace('\','/');$value.Equals($shape,[StringComparison]::OrdinalIgnoreCase)-or $value.EndsWith('/'+$shape,[StringComparison]::OrdinalIgnoreCase)})
+    if($fileMatches.Count -ne 1){throw "$Kind is absent or ambiguous."}
+    return $fileMatches[0]
 }
 
 if($TargetVersion -cnotmatch '^\d+\.\d+\.\d+$'-or $TargetTag -cne "v$TargetVersion"-or $WorkflowSourceRevision -cnotmatch '^[a-f0-9]{40}$'-or $TargetSourceRevision -cnotmatch '^[a-f0-9]{40}$'-or [string]::IsNullOrWhiteSpace($ExpectedPublisher)){throw 'Draft identity inputs are malformed.'}

@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Release scripts: the PDFium preparation and Step 1 draft verifier no longer assign PowerShell's automatic `$matches`; an AST test now covers both (SM6; scripts and test only).
 - Security: hostile-nesting test fixed (debug parse of 100 levels needs ~1.95 MiB on lopdf's rayon threads); it now runs on a private pool, a quarter of the 2 MiB production stack in release (SM7; test only).
 - Security: save-copy reference scrub confirmed bounded; lopdf 0.45 refuses objects nested over 100 levels, now pinned by a hostile-nesting regression test on a 512 KiB stack (SM7; test only).
 - OCR hardening: Tesseract now starts in a private per-job temp directory (removed afterwards), not the install folder; OCR timing tests made deterministic; unused OCR licence build env vars dropped (SM4; no version change).
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - Docs: `docs/releases.md` in-app update section names the current receipt schema (v3) for the false publisher-UI claims (SM6; review P3).
 - In-app update check: the receipt also records the shell-window probe taken at the end of the relaunch wait (`updater.shellWindowAtRelaunch`) (SM6; review P3).
 - In-app update check: the two GitHub API release-metadata reads use the job's read-only token (API host only, no redirects, removed from the environment first); public downloads stay unauthenticated (SM6).
-- Save-copy prune: regression test that an indirect destination to a kept page survives (SM2); README recent changes trimmed to 15 lines (SM0). Full entries in [docs/changelog.md](docs/changelog.md).

@@ -116,6 +116,23 @@ describe('default draft verification workflow', () => {
     expect(result.status, result.stderr || result.stdout).toBe(0);
   });
 
+  it('assigns no PowerShell automatic or read-only variable in the PDFium preparation or draft verifier', () => {
+    const check = String.raw`
+      $ErrorActionPreference='Stop'
+      $forbidden=@('_','args','error','event','eventargs','eventsubscriber','executioncontext','false','foreach','home','host','input','iscoreclr','islinux','ismacos','iswindows','lastexitcode','matches','myinvocation','nestedpromptlevel','ofs','pid','psboundparameters','pscmdlet','pscommandpath','psculture','psdebugcontext','psedition','psitem','psscriptroot','psuiculture','psversiontable','pwd','sender','shellid','stacktrace','switch','this','true')
+      foreach($path in @('./scripts/prepare-default-draft-pdfium.ps1','./scripts/verify-default-draft.ps1')){
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path),[ref]$tokens,[ref]$errors);if($errors.Count){throw ('parse '+$path)}
+        $assigned=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.AssignmentStatementAst]-and$node.Left-is[Management.Automation.Language.VariableExpressionAst]},$true)|ForEach-Object{$_.Left.VariablePath.UserPath.ToLowerInvariant()})
+        $hits=@($assigned|Where-Object{$forbidden-contains$_}|Sort-Object -Unique)
+        if($hits.Count){throw ('Automatic or read-only variable assignment in '+$path+': '+($hits-join', '))}
+      }
+      Write-Output PASS
+    `;
+    const result = runPowerShell(check);
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(result.stdout).toContain('PASS');
+  });
+
   it('executes the real metadata and extraction inventory guards against missing, extra, OCR, collision, and traversal-shaped cases', () => {
     const check = String.raw`
       $ErrorActionPreference='Stop';Set-StrictMode -Version Latest

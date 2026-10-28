@@ -22,8 +22,8 @@ public static class PdfiumBoundedProcess {
 function Assert-PdfiumReleaseMetadata {
  param($Metadata)
  if([string]$Metadata.tag_name-cne'chromium/7881'-or[bool]$Metadata.draft-or[bool]$Metadata.prerelease-or[string]::IsNullOrWhiteSpace([string]$Metadata.published_at)){throw 'Pinned PDFium release identity changed.'}
- $matches=@($Metadata.assets|Where-Object{[uint64]$_.id-eq$assetId})
- if($matches.Count-ne1-or[string]$matches[0].name-cne$assetName-or[uint64]$matches[0].size-ne$assetBytes-or[string]$matches[0].state-cne'uploaded'-or[string]$matches[0].digest-cne('sha256:'+$assetSha256.ToLowerInvariant())-or[string]$matches[0].browser_download_url-cne$downloadUrl){throw 'Pinned PDFium release metadata changed.'}
+ $assetMatches=@($Metadata.assets|Where-Object{[uint64]$_.id-eq$assetId})
+ if($assetMatches.Count-ne1-or[string]$assetMatches[0].name-cne$assetName-or[uint64]$assetMatches[0].size-ne$assetBytes-or[string]$assetMatches[0].state-cne'uploaded'-or[string]$assetMatches[0].digest-cne('sha256:'+$assetSha256.ToLowerInvariant())-or[string]$assetMatches[0].browser_download_url-cne$downloadUrl){throw 'Pinned PDFium release metadata changed.'}
 }
 
 function ConvertFrom-PdfiumTarListing {
