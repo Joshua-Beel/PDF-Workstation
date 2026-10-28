@@ -44,6 +44,31 @@ pub fn is_supported_word_text(text: &str) -> bool {
     count > 0
 }
 
+/// The reopened-page check for a searchable copy (SM7 ruling, 2026-10-28).
+/// PDFium extracts in its own layout order, regroups rows and turns a
+/// line-end hyphen into U+0002, so the page text is compared as a multiset of
+/// characters against the characters of the page's recognised words (no
+/// separators). From the extraction exactly U+0020, CR and LF are dropped and
+/// U+0002 counts as `-`; any other character below U+0020, U+FFFD or U+FFFE
+/// fails the page. A page without words must extract to whitespace only.
+/// The saved bytes are separately required to equal the canonical rebuild.
+pub fn extraction_has_the_word_characters(extracted: &str, word_characters: &str) -> bool {
+    let mut found = Vec::new();
+    for character in extracted.chars() {
+        match character {
+            ' ' | '\r' | '\n' => {}
+            '\u{2}' => found.push('-'),
+            '\u{FFFD}' | '\u{FFFE}' => return false,
+            other if u32::from(other) < 0x20 => return false,
+            other => found.push(other),
+        }
+    }
+    let mut expected = word_characters.chars().collect::<Vec<_>>();
+    found.sort_unstable();
+    expected.sort_unstable();
+    found == expected
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchableWord {
     pub x: f64,

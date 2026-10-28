@@ -322,3 +322,55 @@ fn touching_and_overlapping_words_extract_as_separate_words_on_their_lines() {
     assert_eq!(words_only(&extracted), words_only(&parsed.extracted_text), "{extracted:?}");
     assert_eq!(extracted.lines().count(), 3, "{extracted:?}");
 }
+
+#[test]
+fn extraction_check_compares_character_multisets() {
+    use searchable_pdf::extraction_has_the_word_characters as check;
+    // Shaped like real scans: PDFium reorders interleaved rows and reports a
+    // line-end hyphen as U+0002.
+    let words = ["infor-", "mation", "of", "A.", "B.", "SAMPLE,", "3/8"].concat();
+    assert!(check("infor\u{2}mation of\r\nA.SAMPLE, B. 3/8", &words));
+    assert!(check("3/8 B.\r\nSAMPLE,A. of mation infor-", &words));
+    assert!(!check("infor\u{2}mation of\r\nA.SAMPLE, B. 3/8x", &words), "extra character");
+    assert!(!check("infor\u{2}mation of\r\nA.SAMPLE, B. 38", &words), "missing character");
+    assert!(!check("infor\u{2}mation of\r\nA.SAMPLE, B. 3/9", &words), "substituted character");
+    for bad in ["\u{1}", "\u{FFFD}", "\u{FFFE}", "\t", "\u{0}"] {
+        assert!(!check(&format!("infor-mation of A.SAMPLE, B. 3/8{bad}"), &words), "{bad:?}");
+    }
+    assert!(check("", ""));
+    assert!(check(" \r\n \r\n", ""), "an empty page extracts to whitespace only");
+    assert!(!check("x", ""));
+    assert!(!check("\u{a0}", ""), "only U+0020, CR and LF are dropped");
+}
+
+#[test]
+fn a_hyphenated_two_line_page_passes_the_extraction_check() {
+    const HEADER: &str =
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext";
+    let tsv = [
+        HEADER,
+        "1\t1\t0\t0\t0\t0\t0\t0\t1000\t500\t-1\t",
+        "2\t1\t1\t0\t0\t0\t50\t40\t900\t200\t-1\t",
+        "3\t1\t1\t1\t0\t0\t50\t40\t900\t200\t-1\t",
+        "4\t1\t1\t1\t1\t0\t60\t50\t880\t50\t-1\t",
+        "5\t1\t1\t1\t1\t1\t100\t55\t180\t40\t90\tthe",
+        "5\t1\t1\t1\t1\t2\t300\t55\t60\t40\t90\ttest",
+        "5\t1\t1\t1\t1\t3\t380\t55\t200\t40\t90\tinfor-",
+        "4\t1\t1\t1\t2\t0\t60\t120\t880\t50\t-1\t",
+        "5\t1\t1\t1\t2\t1\t100\t125\t120\t40\t90\tmation",
+        "5\t1\t1\t1\t2\t2\t240\t125\t200\t40\t90\tsheet.",
+    ].join("\n");
+    let parsed = parse_tesseract_tsv(tsv.as_bytes(), 1000, 500).unwrap();
+    let words = map_words_to_display(&parsed, 480.0, 240.0).unwrap().into_iter()
+        .map(|word| SearchableWord { x: word.x, y: word.y, width: word.width, height: word.height, text: word.text })
+        .collect::<Vec<_>>();
+    let bytes = write_searchable_pdf(&[SearchableRasterPage {
+        page_width: 480.0, page_height: 240.0, image_width: 4, image_height: 2, rgb: vec![255; 24], words,
+    }]).unwrap();
+    let document = pdfium().load_pdf_from_byte_vec(bytes, None).unwrap();
+    let extracted = document.pages().get(0).unwrap().text().unwrap().all();
+    let characters = parsed.words.iter().map(|word| word.text.as_str()).collect::<String>();
+    assert!(searchable_pdf::extraction_has_the_word_characters(&extracted, &characters), "{extracted:?}");
+    assert!(!searchable_pdf::extraction_has_the_word_characters(&extracted, &format!("{characters}x")));
+    assert!(!searchable_pdf::extraction_has_the_word_characters(&extracted, &characters.replacen('m', "n", 1)));
+}
