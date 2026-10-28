@@ -175,6 +175,20 @@ describe('engine identity', () => {
       expect(report.total.cer).toBeCloseTo(1 / 11);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
+  it('scores text the app path already recognised, read from a text folder', async () => {
+    const dir = scratch();
+    try {
+      mkdirSync(join(dir, 'app'));
+      writeFileSync(join(dir, 'a.pgm'), Buffer.concat([Buffer.from('P5\n1 1\n255\n'), Buffer.from([0])]));
+      writeFileSync(join(dir, 'a.txt'), 'hello world\n');
+      writeFileSync(join(dir, 'app', 'a.ocr.txt'), 'hello wurld\n');
+      writeFileSync(join(dir, 'm.json'), JSON.stringify({ schemaVersion: 1, entries: [{ id: 'a', image: 'a.pgm', truth: 'a.txt' }] }));
+      const report = await runManifest(join(dir, 'm.json'), {} as never, { textDir: join(dir, 'app'), recognize: async () => { throw new Error('the engine must not run'); } });
+      expect(report.results[0].charEdits).toBe(1);
+      rmSync(join(dir, 'app', 'a.ocr.txt'));
+      await expect(runManifest(join(dir, 'm.json'), {} as never, { textDir: join(dir, 'app') })).rejects.toThrow();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
 });
 
 describe('synthetic generator spec', () => {

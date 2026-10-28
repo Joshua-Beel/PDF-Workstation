@@ -20,6 +20,7 @@ use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
 use crate::child_job::{
     self, ChildCommand, ChildSystemError, JobLimits, OutputBounds, TerminalReason, EXIT_CANCELLED,
 };
+use crate::ocr_preprocess::{preprocess_p6, PreprocessOptions, Skew};
 
 pub(crate) const OCR_INPUT_LIMIT: usize = 16 * 1024 * 1024;
 pub(crate) const OCR_STDOUT_LIMIT: usize = 1024 * 1024;
@@ -130,10 +131,13 @@ pub(crate) struct OcrExecutableIdentity {
     pub(crate) sha256: [u8; 32],
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(crate) struct OcrProcessOutput {
     pub(crate) text: String,
     pub(crate) peak_job_commit_bytes: usize,
+    /// The rotation applied to the recognition image; TSV boxes are in that
+    /// image and go back to page pixels with `ocr_preprocess::map_words_to_page`.
+    pub(crate) skew: Skew,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -297,24 +301,52 @@ impl OcrProcessRunner {
         )
     }
 
+    /// Text or TSV output with a chosen clean-up, for accuracy comparisons.
+    #[cfg(test)]
+    pub(crate) fn recognize_p6_with_preprocess(
+        &self,
+        input: &[u8],
+        preprocess: PreprocessOptions,
+        tsv: bool,
+    ) -> Result<OcrProcessOutput, OcrProcessError> {
+        let cancellation = OcrCancellation::default();
+        let operation = OcrOperation::try_begin(&cancellation)?;
+        let profile = if tsv { OcrOutputProfile::Tsv } else { OcrOutputProfile::Text };
+        let result = self.recognize_inner_admitted(input, RunOptions { preprocess, ..RunOptions::production() }, profile, &operation);
+        operation.finish(result)
+    }
+
     fn recognize_inner_admitted(
         &self,
         input: &[u8],
-        options: RunOptions<'_>,
+        mut options: RunOptions<'_>,
         output_profile: OcrOutputProfile,
         operation: &OcrOperation,
     ) -> Result<OcrProcessOutput, OcrProcessError> {
         let cancellation = &operation.cancellation;
         cancellation.ensure_runnable()?;
         validate_p6(input)?;
-        run_child(
+        let started = std::time::Instant::now();
+        // Clean-up is an improvement, not a requirement: if it cannot run (for
+        // example memory is short), the page is recognised as rendered.
+        let (recognition, skew) = match preprocess_p6(input, options.preprocess, &|| cancellation.is_cancelled()) {
+            Ok(prepared) => (std::borrow::Cow::Owned(prepared.p6), prepared.skew),
+            Err(_) if cancellation.is_cancelled() => return Err(OcrProcessError::Cancelled),
+            Err(_) => (std::borrow::Cow::Borrowed(input), Skew::NONE),
+        };
+        cancellation.ensure_runnable()?;
+        options.timeout = options.timeout.checked_sub(started.elapsed()).filter(|left| !left.is_zero())
+            .ok_or(OcrProcessError::TimedOut)?;
+        let mut output = run_child(
             &self.engine_path,
             &self.tessdata_dir,
-            input,
+            &recognition,
             cancellation,
             options,
             output_profile,
-        )
+        )?;
+        output.skew = skew;
+        Ok(output)
     }
 }
 
@@ -328,11 +360,12 @@ struct RunOptions<'a> {
     after_resume: Option<&'a dyn Fn()>,
     before_finish: Option<&'a dyn Fn()>,
     background: bool,
+    preprocess: PreprocessOptions,
 }
 
 impl RunOptions<'_> {
     fn production() -> Self {
-        Self { timeout: OCR_TIMEOUT, before_resume: None, after_resume: None, before_finish: None, background: false }
+        Self { timeout: OCR_TIMEOUT, before_resume: None, after_resume: None, before_finish: None, background: false, preprocess: PreprocessOptions::PRODUCTION }
     }
 }
 
@@ -699,7 +732,7 @@ fn run_child(
     if cancellation.is_cancelled() {
         return Err(OcrProcessError::Cancelled);
     }
-    Ok(OcrProcessOutput { text: stdout, peak_job_commit_bytes })
+    Ok(OcrProcessOutput { text: stdout, peak_job_commit_bytes, skew: Skew::NONE })
 }
 
 /// Best effort: a child that keeps normal priority still works, only less politely.
@@ -1028,7 +1061,7 @@ fn main() {
         let result = suspended.runner.recognize_with_options(
             TEST_P6,
             &cancellation,
-            RunOptions { timeout: Duration::from_secs(120), before_resume: Some(&hook), after_resume: None, before_finish: None, background: false },
+            RunOptions { timeout: Duration::from_secs(120), before_resume: Some(&hook), after_resume: None, before_finish: None, background: false, preprocess: PreprocessOptions::PRODUCTION },
         );
         assert_eq!(result, Err(OcrProcessError::Cancelled));
         assert!(!suspended.directory.join("child.pid").exists());
@@ -1077,6 +1110,7 @@ fn main() {
                     after_resume: None,
                     before_finish: Some(&before_finish),
                     background: false,
+                    preprocess: PreprocessOptions::PRODUCTION,
                 },
             )
         });
@@ -1230,7 +1264,7 @@ fn main() {
         let result = timed.runner.recognize_with_options(
             TEST_P6,
             &OcrCancellation::default(),
-            RunOptions { timeout: Duration::from_millis(200), before_resume: None, after_resume: Some(&published), before_finish: None, background: false },
+            RunOptions { timeout: Duration::from_millis(200), before_resume: None, after_resume: Some(&published), before_finish: None, background: false, preprocess: PreprocessOptions::PRODUCTION },
         );
         assert_eq!(result, Err(OcrProcessError::TimedOut));
         assert_process_reaped(wait_for_pid(&timed.directory));
@@ -1246,7 +1280,7 @@ fn main() {
             let _ = unwound.runner.recognize_with_options(
                 TEST_P6,
                 &OcrCancellation::default(),
-                RunOptions { timeout: Duration::from_secs(120), before_resume: None, after_resume: Some(&after_resume), before_finish: None, background: false },
+                RunOptions { timeout: Duration::from_secs(120), before_resume: None, after_resume: Some(&after_resume), before_finish: None, background: false, preprocess: PreprocessOptions::PRODUCTION },
             );
         }));
         assert!(caught.is_err());
