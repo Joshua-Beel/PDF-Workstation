@@ -21,6 +21,7 @@ mod page_labels;
 mod page_label_edit;
 mod bookmark_destinations;
 mod outline_edit;
+mod named_dests;
 mod image_pdf;
 #[cfg(windows)]
 mod image_edit;

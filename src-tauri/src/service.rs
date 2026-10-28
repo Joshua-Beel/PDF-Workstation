@@ -2181,6 +2181,9 @@ mod outline_edit_tests;
 #[cfg(test)]
 #[path = "page_label_edit_service_tests.rs"]
 mod page_label_edit_service_tests;
+#[cfg(test)]
+#[path = "structural_refs_tests.rs"]
+mod structural_refs_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2390,7 +2393,10 @@ mod tests {
         assert_eq!(original.labels[8].label, "bb");
         assert!(original.labels.iter().enumerate().all(|(page, label)| label.page == page));
 
-        assert!(call(&service, |reply| Request::Edit(info.id, PageEdit::Move { from: 8, to: 0 }, reply)).err().unwrap().contains("page labels"));
+        info = call(&service, |reply| Request::Edit(info.id, PageEdit::Move { from: 8, to: 0 }, reply)).unwrap();
+        let moved = call(&service, |reply| Request::PageLabels(info.id, info.revision, reply)).unwrap();
+        assert_eq!((moved.labels[0].label.as_str(), moved.labels[1].label.as_str(), moved.labels[8].label.as_str()), ("bb", "1", "BB"), "a moved page keeps its label");
+        info = call(&service, |reply| Request::Edit(info.id, PageEdit::Undo, reply)).unwrap();
         info = call(&service, |reply| Request::Edit(info.id, PageEdit::Rotate { pages: vec![8], clockwise: true }, reply)).unwrap();
         assert!(call(&service, |reply| Request::PageLabels(info.id, 0, reply)).unwrap_err().contains("changed"));
         let rotated = call(&service, |reply| Request::PageLabels(info.id, info.revision, reply)).unwrap();
@@ -4424,7 +4430,9 @@ mod tests {
         assert!((labels.pages[0].width - 1.0).abs() < 0.001);
         let after_labels = call(&service, |reply| Request::PageLabels(labels.id, labels.revision, reply)).unwrap();
         assert_eq!(after_labels.labels, before_labels.labels); assert_eq!(std::fs::read(&label_path).unwrap(), label_source);
-        assert!(call(&service, |reply| Request::Edit(labels.id, PageEdit::Move { from: 0, to: 1 }, reply)).err().unwrap().contains("page labels"));
+        let moved = call(&service, |reply| Request::Edit(labels.id, PageEdit::Move { from: 0, to: 1 }, reply)).unwrap();
+        let moved_labels = call(&service, |reply| Request::PageLabels(moved.id, moved.revision, reply)).unwrap();
+        assert_eq!((moved_labels.labels[0].label.as_str(), moved_labels.labels[1].label.as_str()), (before_labels.labels[1].label.as_str(), before_labels.labels[0].label.as_str()), "a moved page keeps its label");
         call(&service, |reply| Request::Close(labels.id, reply)).unwrap();
 
         for (fixture, count) in [("resources/welcome.pdf", 6usize), ("../test-corpus/synthetic-scan-98.pdf", 98), ("../test-corpus/synthetic-text-1500.pdf", 1500)] {

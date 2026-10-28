@@ -385,12 +385,27 @@ impl EditSession {
         let original: Vec<_> = document.get_pages().values().copied().collect();
         if plan.iter().any(|p| p.source >= original.len()) { return Err("Source page mapping is invalid.".into()); }
         let structural = plan.len() != original.len() || plan.iter().enumerate().any(|(i, p)| p.source != i);
-        check_supported(&document, structural, plan.len() < original.len())?;
-        if let Some(entries) = self.outline.pending() {
+        let removal = plan.len() < original.len();
+        check_supported(&document, structural, removal)?;
+        // Removing pages rewrites the source outline too: bookmarks (and named destinations) whose target page
+        // is not kept are dropped, children promoted. The outline is read before the names are pruned.
+        let source_outline = match self.outline.pending() {
+            None if removal && document.catalog().map_err(|e| e.to_string())?.has(b"Outlines") => Some(crate::outline_edit::read(&document)?),
+            _ => None,
+        };
+        if removal {
+            let kept: HashSet<ObjectId> = plan.iter().map(|spec| original[spec.source]).collect();
+            crate::named_dests::prune(&mut document, &original.iter().copied().filter(|id| !kept.contains(id)).collect())?;
+        }
+        if let Some(entries) = self.outline.pending().or(source_outline.as_deref()) {
             let kept: HashSet<usize> = plan.iter().map(|spec| spec.source).collect();
             crate::outline_edit::write(&mut document, entries, &|source| kept.contains(&source).then(|| original.get(source).copied()).flatten())?;
         }
-        if let Some(ranges) = self.labels.pending() {
+        let source_labels = match self.labels.pending() {
+            None if structural && document.catalog().map_err(|e| e.to_string())?.has(b"PageLabels") => Some(crate::page_labels::read_ranges(&document, original.len())?),
+            _ => None,
+        };
+        if let Some(ranges) = self.labels.pending().or(source_labels.as_deref()) {
             let output = crate::page_label_edit::output_ranges(ranges, original.len(), &plan)?;
             crate::page_label_edit::write(&mut document, &output)?;
         }
@@ -533,11 +548,20 @@ fn check_supported(document: &Document, structural: bool, removal: bool) -> Resu
     if catalog.has(b"Perms") || document.objects.values().any(|object| object.as_dict().is_ok_and(|dict| dict.has(b"ByteRange") || dict.get(b"Type").is_ok_and(|value| value.as_name().is_ok_and(|name| name == b"Sig")))) {
         return Err("Signed or certified PDFs cannot be edited in this build; signatures must remain intact.".into());
     }
-    if structural && [b"AcroForm".as_slice(), b"StructTreeRoot", b"PageLabels", b"Threads"].iter().any(|key| catalog.has(key)) {
-        return Err("Reordering/extraction/deletion of forms, tagged PDFs, page labels, or article threads is not supported yet. Rotation is available.".into());
+    if structural && [b"AcroForm".as_slice(), b"StructTreeRoot", b"Threads"].iter().any(|key| catalog.has(key)) {
+        return Err("Reordering/extraction/deletion of forms, tagged PDFs, or article threads is not supported yet. Rotation is available.".into());
     }
-    if removal && ([b"Outlines".as_slice(), b"Dests", b"Names", b"OpenAction"].iter().any(|key| catalog.has(key)) || (document.get_pages().values().any(|id| document.get_dictionary(*id).is_ok_and(|page| page.has(b"Annots"))) && crate::comments::read(document).is_err())) {
-        return Err("Deleting/extracting pages with bookmarks, destinations, attachments, actions, or annotations is not supported yet. This avoids losing or breaking their references.".into());
+    let other_names = match catalog.get(b"Names") {
+        Ok(names) => crate::named_dests::names_besides_dests(document, names),
+        Err(_) => false,
+    };
+    if removal && (catalog.has(b"OpenAction") || other_names || (document.get_pages().values().any(|id| document.get_dictionary(*id).is_ok_and(|page| page.has(b"Annots"))) && crate::comments::read(document).is_err())) {
+        return Err("Deleting/extracting pages with attachments, scripts, open actions, or annotations is not supported yet. This avoids losing or breaking their references.".into());
+    }
+    if structural && catalog.has(b"PageLabels") { crate::page_labels::read_ranges(document, document.get_pages().len())?; }
+    if removal {
+        if catalog.has(b"Outlines") { crate::outline_edit::read(document)?; }
+        crate::named_dests::read(document)?;
     }
     Ok(())
 }

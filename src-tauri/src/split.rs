@@ -280,10 +280,12 @@ mod tests {
             assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 0);
         };
         check(b"not a PDF".to_vec());
-        for key in [b"Perms".as_slice(), b"AcroForm", b"StructTreeRoot", b"PageLabels", b"Threads", b"Outlines", b"Dests", b"Names", b"OpenAction"] {
+        for key in [b"Perms".as_slice(), b"AcroForm", b"StructTreeRoot", b"PageLabels", b"Threads", b"OpenAction"] {
             let mut document = Document::load_mem(&sample()).unwrap(); document.catalog_mut().unwrap().set(key, dictionary! {});
             let mut bytes = Vec::new(); document.save_to(&mut bytes).unwrap(); check(bytes);
         }
+        let mut document = Document::load_mem(&sample()).unwrap(); document.catalog_mut().unwrap().set("Names", dictionary! { "EmbeddedFiles" => dictionary! {} });
+        let mut bytes = Vec::new(); document.save_to(&mut bytes).unwrap(); check(bytes);
         let mut document = Document::load_mem(&sample()).unwrap();
         document.add_object(dictionary! { "Type" => "Sig", "ByteRange" => vec![0.into(), 1.into(), 2.into(), 3.into()] });
         let mut bytes = Vec::new(); document.save_to(&mut bytes).unwrap(); check(bytes);

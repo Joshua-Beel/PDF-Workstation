@@ -134,13 +134,12 @@ fn new_bookmarks_follow_page_moves_and_a_deleted_page_takes_its_bookmark_with_it
 }
 
 #[test]
-fn an_existing_outline_still_blocks_page_deletion_and_follows_page_moves() {
+fn an_existing_outline_follows_page_moves() {
+    // Page deletion with an existing outline is covered in `structural_refs_tests.rs` (SM2).
     let service = service(); let folder = tempfile::tempdir().unwrap();
     let (info, _, _) = outlined(folder.path(), "guarded.pdf", &service);
     let start = view(&service, &info);
     let renamed = edit(&service, &info, start.view.version, BookmarkOp::Rename { uid: uid(&start, "C"), title: "Closing".into() }).unwrap();
-    let error = direct(&service, |reply| Request::Edit(info.id, PageEdit::Delete { pages: vec![1] }, reply)).err().unwrap();
-    assert!(error.contains("bookmarks"), "{error}");
     let moved = direct(&service, |reply| Request::Edit(info.id, PageEdit::Move { from: 0, to: 2 }, reply)).unwrap();
     assert!(moved.dirty);
     let after = direct(&service, |reply| Request::BookmarkEdit(info.id, moved.revision, None, reply)).unwrap();

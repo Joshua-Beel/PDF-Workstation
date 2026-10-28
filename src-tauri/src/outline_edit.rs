@@ -125,10 +125,13 @@ fn pdf_text(value: &str) -> Object {
     }
 }
 
-fn destination_page(document: &Document, dict: &lopdf::Dictionary, pages: &HashMap<ObjectId, usize>) -> Option<usize> {
+fn destination_page(document: &Document, dict: &lopdf::Dictionary, pages: &HashMap<ObjectId, usize>, named: &HashMap<Vec<u8>, Option<ObjectId>>) -> Option<usize> {
     let array_page = |object: &Object| -> Option<usize> {
         let (_, object) = document.dereference(object).ok()?;
-        match object.as_array().ok()?.first()? { Object::Reference(id) => pages.get(id).copied(), _ => None }
+        match object {
+            Object::Name(name) | Object::String(name, _) => pages.get(&(*named.get(name)?)?).copied(),
+            _ => match object.as_array().ok()?.first()? { Object::Reference(id) => pages.get(id).copied(), _ => None },
+        }
     };
     if let Ok(dest) = dict.get(b"Dest") { return array_page(dest); }
     let (_, action) = document.dereference(dict.get(b"A").ok()?).ok()?;
@@ -138,7 +141,7 @@ fn destination_page(document: &Document, dict: &lopdf::Dictionary, pages: &HashM
 }
 
 /// The catalog and every page-tree node and page: objects the outline must never alias.
-fn protected_ids(document: &Document) -> HashSet<ObjectId> {
+pub(crate) fn protected_ids(document: &Document) -> HashSet<ObjectId> {
     let mut ids = HashSet::new();
     if let Ok(Object::Reference(root)) = document.trailer.get(b"Root") { ids.insert(*root); }
     ids.extend(document.get_pages().values().copied());
@@ -169,6 +172,7 @@ pub fn read(document: &Document) -> Result<Vec<Entry>, String> {
     if root_id.is_some_and(|id| protected.contains(&id)) { return Err("The bookmark list points at the page tree or catalog, so the bookmarks cannot be edited safely.".into()); }
     if let Ok(kind) = root.get(b"Type") { if kind.as_name().ok() != Some(b"Outlines".as_slice()) { return Err("The bookmark list has an unexpected type, so the bookmarks cannot be edited safely.".into()); } }
     let pages: HashMap<ObjectId, usize> = document.get_pages().values().enumerate().map(|(index, id)| (*id, index)).collect();
+    let named = crate::named_dests::read(document).map(|named| named.targets(document)).unwrap_or_default();
     let mut entries: Vec<Entry> = Vec::new();
     let mut seen = HashSet::new();
     let mut bytes = 0usize;
@@ -193,7 +197,7 @@ pub fn read(document: &Document) -> Result<Vec<Entry>, String> {
         bytes = bytes.saturating_add(title.len());
         if bytes > MAX_TOTAL_TITLE_BYTES { return Err("Bookmarks contain too much text.".into()); }
         let count = dict.get(b"Count").ok().and_then(|value| document.dereference(value).ok()).and_then(|(_, value)| value.as_i64().ok()).unwrap_or(0);
-        entries.push(Entry { uid: entries.len() as u32, origin: Some(id), title, renamed: false, depth, open: count > 0, source_page: destination_page(document, dict, &pages) });
+        entries.push(Entry { uid: entries.len() as u32, origin: Some(id), title, renamed: false, depth, open: count > 0, source_page: destination_page(document, dict, &pages, &named) });
         if first.is_some() { stack.push(first); parents.push(Some(id)); }
     }
     refuse_aliased_items(document, &seen, root_id)?;
@@ -234,8 +238,9 @@ fn refuse_aliased_items(document: &Document, items: &HashSet<ObjectId>, root_id:
 }
 
 /// Writes the entries as the document's outline. `page_object` maps a source page index to its page object,
-/// or `None` when that page is not in the output; a bookmark added in this session whose page is not in the
-/// output is left out and its children move up one level (an existing bookmark is never dropped this way).
+/// or `None` when that page is not in the output. A bookmark whose page is not in the output is left out and
+/// its children move up one level; an existing bookmark whose destination did not resolve to a source page
+/// (an external action, an unknown name) is kept.
 pub fn write(document: &mut Document, entries: &[Entry], page_object: &dyn Fn(usize) -> Option<ObjectId>) -> Result<(), String> {
     valid_structure(entries)?;
     struct Kept<'a> { entry: &'a Entry, depth: usize, page: Option<ObjectId> }
@@ -244,7 +249,7 @@ pub fn write(document: &mut Document, entries: &[Entry], page_object: &dyn Fn(us
     for entry in entries {
         while skipped.last().is_some_and(|depth| *depth >= entry.depth) { skipped.pop(); }
         let page = entry.source_page.and_then(page_object);
-        if entry.origin.is_none() && page.is_none() { skipped.push(entry.depth); continue; }
+        if page.is_none() && (entry.origin.is_none() || entry.source_page.is_some()) { skipped.push(entry.depth); continue; }
         kept.push(Kept { entry, depth: entry.depth - skipped.len(), page });
     }
     let existing_root = match document.catalog().map_err(|error| error.to_string())?.get(b"Outlines") {

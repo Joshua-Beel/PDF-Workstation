@@ -109,8 +109,15 @@ fn existing_labels_are_preserved_when_untouched_and_a_range_edit_changes_only_it
     let error = direct(&service, |reply| Request::Edit(info.id, PageEdit::Move { from: 0, to: 2 }, reply)).err().unwrap();
     assert_eq!(error, crate::page_label_edit::PENDING_REFUSAL);
     let fresh = open_bytes(&service, folder.path(), "labels-again.pdf", FIXTURE);
-    let error = direct(&service, |reply| Request::Edit(fresh.id, PageEdit::Move { from: 0, to: 2 }, reply)).err().unwrap();
-    assert!(error.contains("page labels"), "structural edits on documents that already have labels stay refused: {error}");
+    let moved = direct(&service, |reply| Request::Edit(fresh.id, PageEdit::Move { from: 0, to: 2 }, reply)).unwrap();
+    let deleted = direct(&service, |reply| Request::Edit(moved.id, PageEdit::Delete { pages: vec![3, 10] }, reply)).unwrap();
+    let mut expected = original.clone(); let first = expected.remove(0); expected.insert(2, first); expected.remove(10); expected.remove(3);
+    assert_eq!(app_labels(&service, &deleted), expected, "moved and kept pages keep their own labels (SM2)");
+    let copy = folder.path().join("reshaped.pdf");
+    save(&service, &deleted, None, copy.clone()).unwrap();
+    assert_eq!(lopdf_labels(&copy), expected);
+    let reopened = direct(&service, |reply| Request::Open(copy, reply)).map(ReplyLease::accept).unwrap();
+    assert_eq!(pdfium_labels(&service, &reopened), expected);
 }
 
 #[test]
