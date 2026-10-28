@@ -64,4 +64,11 @@ describe('native annotate dialog verifier', () => {
     expect(script).toContain("-Filter '*.smacrec'");
     expect(script).toContain('.EndsWith(\'.smacrec\'');
   });
+
+  it('expects the Open dialog title that main.rs sets', () => {
+    const script = readFileSync(path, 'utf8');
+    const mainRs = readFileSync('src-tauri/src/main.rs', 'utf8');
+    expect(mainRs).toMatch(/fn open_document[\s\S]{0,400}set_title\("Open a PDF"\)\.add_filter\("PDF documents", &\["pdf"\]\)\.pick_file\(\)/);
+    expect(script).toContain("Test-NativeDialogShell 'open' $dialog 'Open a PDF' $null 'PDF documents'");
+  });
 });

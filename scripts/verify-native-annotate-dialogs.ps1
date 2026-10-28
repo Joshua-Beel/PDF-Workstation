@@ -738,7 +738,7 @@ function Invoke-Run {
             $before = Get-AppState $outDir
             Open-Menu-Item $script:OpenItem
             $dialog = Wait-NativeDialog
-            Test-NativeDialogShell 'open' $dialog 'Open' $null 'PDF documents' | Out-Null
+            Test-NativeDialogShell 'open' $dialog 'Open a PDF' $null 'PDF documents' | Out-Null
             Stop-NativeDialog $dialog
             Assert-StateUnchanged 'open' $before (Get-AppState $outDir)
         }
