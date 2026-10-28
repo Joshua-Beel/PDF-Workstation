@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { cancelLargeOcr, dismissLargeOcr, largeOcrStatus, pauseLargeOcr, relocateLargeOcr, resumeLargeOcr, type LargeOcrJob, type LargeOcrPageReport, type LargeOcrPauseReason, type LargeOcrStatus } from './bridge';
+import { cancelLargeOcr, dismissLargeOcr, largeOcrStatus, pauseLargeOcr, relocateLargeOcr, resumeLargeOcr, saveLargeOcrInParts, type LargeOcrJob, type LargeOcrPageReport, type LargeOcrPart, type LargeOcrPauseReason, type LargeOcrStatus } from './bridge';
 import s from './LargeOcrPanel.module.css';
 
 export type LargeOcrApi = {
@@ -9,9 +9,20 @@ export type LargeOcrApi = {
   resume: (documentId: number, revision: number) => Promise<LargeOcrStatus>;
   dismiss: () => Promise<LargeOcrStatus>;
   relocate: (documentId: number | null, revision: number | null) => Promise<LargeOcrStatus | null>;
+  saveInParts: (documentId: number | null, revision: number | null) => Promise<LargeOcrStatus>;
 };
 
-const defaultApi: LargeOcrApi = { status: () => largeOcrStatus(), pause: () => pauseLargeOcr(), cancel: () => cancelLargeOcr(), resume: (documentId, revision) => resumeLargeOcr(documentId, revision), dismiss: () => dismissLargeOcr(), relocate: (documentId, revision) => relocateLargeOcr(documentId, revision) };
+const defaultApi: LargeOcrApi = { status: () => largeOcrStatus(), pause: () => pauseLargeOcr(), cancel: () => cancelLargeOcr(), resume: (documentId, revision) => resumeLargeOcr(documentId, revision), dismiss: () => dismissLargeOcr(), relocate: (documentId, revision) => relocateLargeOcr(documentId, revision), saveInParts: (documentId, revision) => saveLargeOcrInParts(documentId, revision) };
+
+export function fileName(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
+}
+
+export function partRange(part: LargeOcrPart): string {
+  const first = part.firstPage + 1;
+  const last = part.firstPage + part.pages;
+  return first === last ? `page ${first.toLocaleString()}` : `pages ${first.toLocaleString()}–${last.toLocaleString()}`;
+}
 
 const issueText: Record<LargeOcrPageReport['issue'], string> = {
   none: 'reduced resolution',
@@ -36,7 +47,7 @@ export function pauseText(reason: LargeOcrPauseReason | null, job: LargeOcrJob):
   if (!reason || reason.kind === 'user') return job.interrupted
     ? `OCR of ${job.sourceName} stopped at ${at} when PDF Workstation closed. Open the same document to resume.`
     : `Paused at ${at}. Progress is saved; you can resume now or after restarting PDF Workstation.`;
-  if (reason.kind === 'sizeLimit') return `OCR paused at ${at}: the copy would be larger than 1 GiB, the largest file PDF Workstation can open. Saving in parts is not available yet; discard the progress or OCR a smaller document.`;
+  if (reason.kind === 'sizeLimit') return `OCR paused at ${at}: the copy would be larger than 1 GiB, the largest file PDF Workstation can open. Save in parts continues into more files of up to 1 GiB each, named "(part 1 of N)" and so on.`;
   if (reason.kind === 'engineFailing') return `OCR paused at ${at}: ${reason.message}. Resume tries again from the next page.`;
   if (reason.kind === 'document') return `OCR paused at ${at}: ${reason.message} Undo the change or reopen the document, then resume.`;
   if (reason.kind === 'disk') return `OCR paused at ${at}: the copy could not be written (${reason.message}). Free some space, then resume.`;
@@ -86,10 +97,19 @@ export default function LargeOcrPanel({ document, refresh, openCopy, api = defau
       <p>Searchable OCR · <strong>{job.sourceName}</strong> — {progress.state === 'finalising' ? 'Checking the copy…' : <>{done}{progress.secondsLeft !== null && <> · {timeLeft(progress.secondsLeft)}</>}</>}</p>
       <progress max={progress.pageCount} value={progress.pagesDone} aria-label="Searchable OCR progress" />
       {progress.issues > 0 && <p>{progress.issues} page{progress.issues === 1 ? '' : 's'} could not be fully read so far.</p>}
-      {progress.sizeWarning && <p role="alert">The copy is on course to be larger than 1 GiB, the largest file PDF Workstation can open. OCR will pause if it reaches that size.</p>}
+      {progress.sizeWarning && !progress.inParts && <div className={s.actions}><span role="alert">The copy is on course to be larger than 1 GiB, the largest file PDF Workstation can open. OCR will pause if it reaches that size, or you can save it in parts of up to 1 GiB each.</span><button onClick={() => void act(() => api.saveInParts(null, null))}>Save in parts</button></div>}
+      {progress.inParts && <p>Saving in parts of up to 1 GiB each{progress.part > 1 ? `; writing part ${progress.part}` : ' if needed'}.</p>}
       {confirming
         ? <div className={s.actions}><span>Cancel OCR? The {progress.pagesDone.toLocaleString()} finished pages will be discarded and no file will be saved. The source document is unchanged.</span><button onClick={() => setConfirming(false)}>Keep running</button><button onClick={() => { setConfirming(false); void act(api.cancel); }}>Cancel OCR</button></div>
         : <div className={s.actions}><button onClick={() => void act(api.pause)}>Pause</button><button onClick={() => setConfirming(true)}>Cancel</button></div>}
+    </>;
+  } else if (progress.state === 'published' && job.parts.length > 0) {
+    body = <>
+      <p>Saved in {job.parts.length} parts ({progress.pageCount.toLocaleString()} pages):</p>
+      <ul className={s.parts}>{job.parts.map(part => <li key={part.path}><strong>{fileName(part.path)}</strong> — {partRange(part)}</li>)}</ul>
+      {unreadable.length > 0 && <p>{(progress.pageCount - unreadable.length).toLocaleString()} of {progress.pageCount.toLocaleString()} pages have searchable text. Not read: {reportText(unreadable)}.</p>}
+      {reduced.length > 0 && <p>Rendered at reduced resolution: {reportText(reduced)}.</p>}
+      <div className={s.actions}>{job.parts.map((part, index) => <button key={part.path} onClick={() => openCopy(part.path)}>Open part {index + 1}</button>)}<button onClick={() => void act(api.dismiss)}>Close</button></div>
     </>;
   } else if (progress.state === 'published') {
     body = <>
@@ -100,10 +120,19 @@ export default function LargeOcrPanel({ document, refresh, openCopy, api = defau
     </>;
   } else if (progress.state === 'cancelled') {
     body = <><p>OCR cancelled. No file was saved; the source document is unchanged.</p><div className={s.actions}><button onClick={() => void act(api.dismiss)}>Close</button></div></>;
+  } else if (job.pauseReason?.kind === 'sizeLimit') {
+    body = <>
+      <p>{pauseText(job.pauseReason, job)}</p>
+      <p>The parts will be saved next to <strong>{job.destination}</strong>.</p>
+      <div className={s.actions}>
+        <button disabled={!document} title={document ? undefined : 'Open the document this OCR job was started from.'} onClick={() => document && void act(() => api.saveInParts(document.id, document.revision))}>Save in parts</button>
+        <button onClick={() => void act(api.cancel)}>Discard progress</button>
+      </div>
+    </>;
   } else {
     body = <>
       <p>{pauseText(job.pauseReason, job)}</p>
-      <p>The copy will be saved as <strong>{job.destination}</strong>.</p>
+      <p>{progress.inParts ? <>The copy is being saved in parts next to <strong>{job.destination}</strong>.</> : <>The copy will be saved as <strong>{job.destination}</strong>.</>}</p>
       <div className={s.actions}>
         <button disabled={!document} title={document ? undefined : 'Open the document this OCR job was started from.'} onClick={() => document && void act(() => api.resume(document.id, document.revision))}>Resume</button>
         <button onClick={() => void act(async () => (await api.relocate(document?.id ?? null, document?.revision ?? null)) ?? await api.status())}>Save elsewhere…</button>

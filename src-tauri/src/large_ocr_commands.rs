@@ -82,6 +82,8 @@ pub(crate) struct LargeOcrJobStatus {
     pub(crate) report: Vec<PageReport>,
     /// Paused by an earlier app session (not by this one).
     pub(crate) interrupted: bool,
+    /// The saved parts and their page ranges, when the copy was saved in parts.
+    pub(crate) parts: Vec<crate::large_ocr_parts::PublishedPart>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -131,7 +133,7 @@ fn sweep(root: &Path) {
         if !named || !metadata.is_dir() || metadata.file_type().is_symlink() { continue; }
         use crate::searchable_pdf_stream::ManifestState;
         match crate::searchable_pdf_stream::inspect_manifest(&path) {
-            ManifestState::Valid(manifest) => crate::searchable_pdf_stream::remove_stale_publish_temp(&path, &manifest),
+            ManifestState::Valid(manifest) => remove_stale_publish_temps(&path, &manifest),
             ManifestState::Missing | ManifestState::Corrupt => {
                 let old = metadata.modified().ok().and_then(|modified| modified.elapsed().ok()).is_some_and(|age| age > STALE_FOLDER_AGE);
                 if old { let _ = std::fs::remove_dir_all(&path); }
@@ -195,18 +197,44 @@ impl LargeOcrJobs {
             destination: destination.to_string_lossy().into_owned(), dpi: crate::ocr::OCR_DPI, language: "eng".into(),
             engine_identity: option_env!("PDF_WORKSTATION_OCR_ENGINE_SHA256").unwrap_or("unknown").into(),
         };
-        self.launch(self.inner.root.join(name), JobStart::New(manifest.clone()), &manifest, document_id, revision, source)
+        self.launch(self.inner.root.join(name), JobStart::New(manifest.clone()), &manifest, document_id, revision, source, false)
     }
 
-    /// Resumes the saved job if the open document is the one it was started from.
-    pub(crate) fn resume(&self, document_id: u64, revision: u64, source: OcrJobSource) -> Result<LargeOcrStatus, String> {
+    /// Resumes the saved job if the open document is the one it was started
+    /// from. `in_parts` lets it continue into further files at the size cap.
+    pub(crate) fn resume(&self, document_id: u64, revision: u64, source: OcrJobSource, in_parts: bool) -> Result<LargeOcrStatus, String> {
         if self.running() { return Err("OCR is already running.".into()); }
         let (directory, manifest) = self.interrupted_job().ok_or("There is no saved OCR progress to resume.")?;
-        self.validate_destination(Path::new(&manifest.destination)).map_err(|error| format!("{error} Use Save elsewhere to choose another location."))?;
+        let destination = Path::new(&manifest.destination);
+        let app_data = self.inner.root.parent().unwrap_or(&self.inner.root);
+        let checked = if in_parts || crate::large_ocr_parts::has_parts(&directory) { validate_destination_folder(destination, app_data) } else { validate_destination(destination, app_data) };
+        checked.map_err(|error| format!("{error} Use Save elsewhere to choose another location."))?;
         if manifest.source_identity != source.identity || manifest.page_count != source.page_count {
             return Err("The document has changed since OCR started, so the saved progress can't be used.".into());
         }
-        self.launch(directory, JobStart::Resume, &manifest, document_id, revision, source)
+        self.launch(directory, JobStart::Resume, &manifest, document_id, revision, source, in_parts)
+    }
+
+    /// "Save in parts": a running job continues into further files when it
+    /// reaches the size cap; a paused job resumes that way (it needs the
+    /// source document unless every page is already done).
+    pub(crate) fn save_in_parts(&self, document: Option<(u64, u64, OcrJobSource)>) -> Result<LargeOcrStatus, String> {
+        {
+            let active = self.inner.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(job) = active.as_ref() {
+                let mut status = job.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                if status.running {
+                    job.control.save_in_parts();
+                    status.progress.in_parts = true;
+                    status.progress.size_warning = false;
+                    drop(status);
+                    drop(active);
+                    return Ok(self.status());
+                }
+            }
+        }
+        let (document_id, revision, source) = document.ok_or("Open the document this OCR job was started from, then choose Save in parts again.")?;
+        self.resume(document_id, revision, source, true)
     }
 
     /// Changes where the saved job will be published, then resumes it. When
@@ -216,8 +244,11 @@ impl LargeOcrJobs {
         let (directory, manifest) = self.interrupted_job().ok_or("There is no saved OCR progress to resume.")?;
         let app_data = self.inner.root.parent().unwrap_or(&self.inner.root);
         let (manifest, document_id, revision, source) = prepare_relocation(app_data, &directory, &manifest, &destination, document)?;
-        self.launch(directory, JobStart::Resume, &manifest, document_id, revision, source)
+        let in_parts = crate::large_ocr_parts::has_parts(&directory);
+        self.launch(directory, JobStart::Resume, &manifest, document_id, revision, source, in_parts)
     }
+
+    pub(crate) fn is_running(&self) -> bool { self.running() }
 
     /// The saved job's destination, for the Save elsewhere dialog.
     pub(crate) fn saved_destination(&self) -> Option<PathBuf> { self.interrupted_job().map(|(_, manifest)| PathBuf::from(manifest.destination)) }
@@ -256,8 +287,10 @@ impl LargeOcrJobs {
         if finished { *active = None; }
     }
 
-    fn launch(&self, directory: PathBuf, start: JobStart, manifest: &JobManifest, document_id: u64, revision: u64, source: OcrJobSource) -> Result<LargeOcrStatus, String> {
+    #[allow(clippy::too_many_arguments)]
+    fn launch(&self, directory: PathBuf, start: JobStart, manifest: &JobManifest, document_id: u64, revision: u64, source: OcrJobSource, in_parts: bool) -> Result<LargeOcrStatus, String> {
         let control = JobControl::default();
+        if in_parts { control.save_in_parts(); }
         let operation = Arc::new(OcrOperation::try_begin(control.cancellation()).map_err(|error| match error {
             OcrProcessError::Busy if self.running() => "OCR is already running.".to_owned(),
             OcrProcessError::Busy => "OCR is still busy: a page OCR or a previous page render is still finishing. Try again in a moment.".to_owned(),
@@ -268,8 +301,8 @@ impl LargeOcrJobs {
         let status = Arc::new(Mutex::new(LargeOcrJobStatus {
             job: directory.file_name().unwrap_or_default().to_string_lossy().into_owned(),
             source_name: manifest.source_name.clone(), destination: manifest.destination.clone(), running: true,
-            progress: JobProgress { state: JobState::Preparing, pages_done: 0, page_count: manifest.page_count, workers, issues: 0, bytes_written: 0, projected_bytes: None, size_warning: false, seconds_left: None },
-            pause_reason: None, report: Vec::new(), interrupted: false,
+            progress: JobProgress { state: JobState::Preparing, pages_done: 0, page_count: manifest.page_count, workers, issues: 0, bytes_written: 0, projected_bytes: None, size_warning: false, seconds_left: None, in_parts, part: 1 },
+            pause_reason: None, report: Vec::new(), interrupted: false, parts: Vec::new(),
         }));
         let page_source: Arc<dyn PageSource> = Arc::new(InProcessSource {
             service: self.inner.service.clone(), document_id, revision, sizes: source.page_sizes, operation: operation.clone(), render_slot: Mutex::new(()),
@@ -279,6 +312,7 @@ impl LargeOcrJobs {
         let settings = JobSettings {
             directory: directory.clone(), start, workers,
             commit: Box::new(move || commit_token.commit().map_err(|error| error.to_string())),
+            size_cap: crate::searchable_pdf_stream::MAX_STREAM_OUTPUT_BYTES,
         };
         let sink_status = status.clone();
         let progress: crate::large_ocr_job::ProgressSink = Arc::new(move |progress: &JobProgress| {
@@ -310,31 +344,50 @@ impl LargeOcrJobs {
 /// has to redo a page pauses instead of rendering another document. A
 /// temporary copy left next to the old destination is removed first.
 fn prepare_relocation(app_data: &Path, directory: &Path, manifest: &JobManifest, destination: &Path, document: Option<(u64, u64, OcrJobSource)>) -> Result<(JobManifest, u64, u64, OcrJobSource), String> {
-    validate_destination(destination, app_data)?;
-    let all_done = crate::searchable_pdf_stream::saved_pages(directory) == manifest.page_count;
+    if crate::large_ocr_parts::any_published(directory) {
+        return Err("Some parts are already saved next to the original destination, so the rest must be saved there too. Move or rename the file that is in the way, then resume.".into());
+    }
+    if crate::large_ocr_parts::has_parts(directory) { validate_destination_folder(destination, app_data)?; } else { validate_destination(destination, app_data)?; }
+    let all_done = crate::large_ocr_parts::saved_progress(directory, manifest) == manifest.page_count;
     let (document_id, revision, source) = match document {
         Some((document_id, revision, source)) if manifest.source_identity == source.identity && manifest.page_count == source.page_count => (document_id, revision, source),
         _ if all_done => (0, 0, OcrJobSource { page_count: manifest.page_count, page_sizes: Vec::new(), identity: manifest.source_identity.clone(), suggested_name: String::new(), source_name: manifest.source_name.clone() }),
         Some(_) => return Err("The document has changed since OCR started, so the saved progress can't be used.".into()),
         None => return Err("Open the document this OCR job was started from, then choose Save elsewhere again.".into()),
     };
-    crate::searchable_pdf_stream::remove_stale_publish_temp(directory, manifest);
+    remove_stale_publish_temps(directory, manifest);
     let manifest = crate::searchable_pdf_stream::set_destination(directory, &destination.to_string_lossy()).map_err(|error| error.to_string())?;
     Ok((manifest, document_id, revision, source))
 }
 
 fn discard(directory: &Path) {
-    if let Ok(manifest) = crate::searchable_pdf_stream::read_manifest(directory) { crate::searchable_pdf_stream::remove_stale_publish_temp(directory, &manifest); }
+    if let Ok(manifest) = crate::searchable_pdf_stream::read_manifest(directory) { remove_stale_publish_temps(directory, &manifest); }
     let _ = std::fs::remove_dir_all(directory);
 }
 
+/// Removes temporary copies left by an interrupted cross-volume publish of the
+/// copy or of any of its parts (each part folder keeps its own marker).
+fn remove_stale_publish_temps(directory: &Path, manifest: &JobManifest) {
+    for folder in crate::large_ocr_parts::part_directories(directory) {
+        crate::searchable_pdf_stream::remove_stale_publish_temp(&folder, manifest);
+    }
+}
+
 pub(crate) fn validate_destination(destination: &Path, app_data: &Path) -> Result<(), String> {
+    validate_destination_folder(destination, app_data)?;
+    if destination.exists() { return Err("That file already exists. Choose a new filename; Save a Copy never overwrites an existing file.".into()); }
+    Ok(())
+}
+
+/// The destination checks except "does not exist yet": a copy saved in parts
+/// never writes the chosen name itself, only `<name> (part i of N).pdf`,
+/// whose names are checked when the parts are published.
+pub(crate) fn validate_destination_folder(destination: &Path, app_data: &Path) -> Result<(), String> {
     if !destination.is_absolute() { return Err("Choose a full path for the OCR copy.".into()); }
     if !destination.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("pdf")) { return Err("The output filename must end in .pdf.".into()); }
     let parent = destination.parent().filter(|parent| parent.is_dir()).ok_or("The folder for the OCR copy does not exist.")?;
     let canonical_inside = std::fs::canonicalize(parent).ok().zip(std::fs::canonicalize(app_data).ok()).is_some_and(|(parent, app_data)| parent.starts_with(app_data));
     if parent.starts_with(app_data) || canonical_inside { return Err("Choose a folder outside PDF Workstation's app data for the OCR copy.".into()); }
-    if destination.exists() { return Err("That file already exists. Choose a new filename; Save a Copy never overwrites an existing file.".into()); }
     Ok(())
 }
 
@@ -344,7 +397,12 @@ fn apply_outcome(status: &Mutex<LargeOcrJobStatus>, outcome: std::thread::Result
     let mut status = status.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     status.running = false;
     match outcome {
-        Ok(JobOutcome::Published { report, .. }) => { status.progress.state = JobState::Published; status.report = report; }
+        Ok(JobOutcome::Published { report, parts, .. }) => {
+            status.progress.state = JobState::Published;
+            status.progress.in_parts = !parts.is_empty();
+            status.report = report;
+            status.parts = parts;
+        }
         Ok(JobOutcome::Paused { reason, next_page, report }) => {
             status.progress.state = JobState::Paused;
             status.progress.pages_done = next_page;
@@ -360,12 +418,16 @@ fn apply_outcome(status: &Mutex<LargeOcrJobStatus>, outcome: std::thread::Result
 }
 
 fn interrupted_status(directory: &Path, manifest: &JobManifest) -> LargeOcrJobStatus {
-    let pages_done = crate::searchable_pdf_stream::saved_pages(directory);
+    let pages_done = crate::large_ocr_parts::saved_progress(directory, manifest);
+    let parts = crate::large_ocr_parts::load_state(directory, manifest).ok().flatten();
     LargeOcrJobStatus {
         job: directory.file_name().unwrap_or_default().to_string_lossy().into_owned(),
         source_name: manifest.source_name.clone(), destination: manifest.destination.clone(), running: false,
-        progress: JobProgress { state: JobState::Paused, pages_done, page_count: manifest.page_count, workers: 0, issues: 0, bytes_written: 0, projected_bytes: None, size_warning: false, seconds_left: None },
-        pause_reason: Some(PauseReason::User), report: Vec::new(), interrupted: true,
+        progress: JobProgress {
+            state: JobState::Paused, pages_done, page_count: manifest.page_count, workers: 0, issues: 0, bytes_written: 0, projected_bytes: None, size_warning: false, seconds_left: None,
+            in_parts: parts.is_some(), part: parts.map_or(1, |state| state.closed.len() as u32 + 1),
+        },
+        pause_reason: Some(PauseReason::User), report: Vec::new(), interrupted: true, parts: Vec::new(),
     }
 }
 
@@ -410,8 +472,8 @@ mod tests {
     fn a_panic_in_the_job_thread_ends_as_a_pause_not_a_running_job() {
         let status = Mutex::new(LargeOcrJobStatus {
             job: "a".repeat(24), source_name: "big.pdf".into(), destination: "E:/x.pdf".into(), running: true,
-            progress: JobProgress { state: JobState::Running, pages_done: 3, page_count: 9, workers: 1, issues: 0, bytes_written: 0, projected_bytes: None, size_warning: false, seconds_left: None },
-            pause_reason: None, report: Vec::new(), interrupted: false,
+            progress: JobProgress { state: JobState::Running, pages_done: 3, page_count: 9, workers: 1, issues: 0, bytes_written: 0, projected_bytes: None, size_warning: false, seconds_left: None, in_parts: false, part: 1 },
+            pause_reason: None, report: Vec::new(), interrupted: false, parts: Vec::new(),
         });
         let outcome = std::panic::catch_unwind(|| -> JobOutcome { panic!("simulated job bug") });
         apply_outcome(&status, outcome);
@@ -499,6 +561,34 @@ mod tests {
         assert_eq!((document_id, stand_in.page_sizes.len()), (0, 0), "all pages done: another open document is never used");
     }
 
+    #[test]
+    fn a_copy_in_parts_ignores_its_base_name_and_stays_put_once_a_part_is_saved() {
+        use crate::searchable_pdf_stream::PartialWriter;
+        let folder = tempfile::tempdir().unwrap();
+        let app_data = folder.path().join("appdata");
+        let directory = app_data.join("ocr-jobs").join("a".repeat(24));
+        std::fs::create_dir_all(directory.parent().unwrap()).unwrap();
+        let base = folder.path().join("copy.pdf");
+        std::fs::write(&base, b"an unrelated file with the chosen name").unwrap();
+        assert!(validate_destination(&base, &app_data).is_err());
+        assert!(validate_destination_folder(&base, &app_data).is_ok(), "parts never write the chosen name itself");
+        let manifest = crate::searchable_pdf_stream::tests::manifest(3, &base);
+        let mut writer = PartialWriter::create(&directory, manifest.clone()).unwrap();
+        writer.append(&crate::searchable_pdf_stream::tests::synthetic_page(0)).unwrap();
+        writer.checkpoint().unwrap();
+        drop(writer);
+        std::fs::write(directory.join(crate::large_ocr_parts::PARTS_FILE), br#"{"format":1,"closed":[1],"published":0,"publishing":null}"#).unwrap();
+        let source = OcrJobSource { page_count: 3, page_sizes: vec![(612.0, 792.0); 3], identity: manifest.source_identity.clone(), suggested_name: String::new(), source_name: "s.pdf".into() };
+        let elsewhere = folder.path().join("elsewhere.pdf");
+        assert!(prepare_relocation(&app_data, &directory, &manifest, &elsewhere, Some((5, 1, source.clone()))).is_ok());
+        std::fs::write(directory.join(crate::large_ocr_parts::PARTS_FILE), br#"{"format":1,"closed":[1],"published":1,"publishing":null}"#).unwrap();
+        let refused = prepare_relocation(&app_data, &directory, &manifest, &folder.path().join("third.pdf"), Some((5, 1, source))).unwrap_err();
+        assert!(refused.contains("already saved"), "{refused}");
+        let interrupted = interrupted_status(&directory, &crate::searchable_pdf_stream::read_manifest(&directory).unwrap());
+        assert!(interrupted.progress.in_parts);
+        assert_eq!((interrupted.progress.part, interrupted.progress.pages_done), (2, 1));
+    }
+
     /// End to end with the real engine and the in-process renderer. Needs
     /// `PDF_WORKSTATION_OCR_SETUP_ROOT`; `SM4_REAL_PAGES` sets the page count.
     #[test]
@@ -526,7 +616,7 @@ mod tests {
         };
         let workers = automatic_workers();
         let token = control.cancellation().clone();
-        let settings = JobSettings { directory: folder.path().join("job"), start: JobStart::New(manifest), workers, commit: Box::new(move || token.commit().map_err(|error| error.to_string())) };
+        let settings = JobSettings { directory: folder.path().join("job"), start: JobStart::New(manifest), workers, commit: Box::new(move || token.commit().map_err(|error| error.to_string())), size_cap: crate::searchable_pdf_stream::MAX_STREAM_OUTPUT_BYTES };
         let page_source = Arc::new(InProcessSource { service: service.clone(), document_id: request.document_id, revision: request.revision, sizes: source.page_sizes, operation: operation.clone(), render_slot: Mutex::new(()) });
         let recognizer = Arc::new(TesseractRecognizer { runner, operation: operation.clone() });
         let started = std::time::Instant::now();

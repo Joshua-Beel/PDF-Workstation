@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Large-document OCR (source build): a copy that would pass 1 GiB can be saved in parts, `<name> (part 1 of N).pdf`, each at most 1 GiB, checked from disk and never overwriting; unit-tested with a small size limit only (SM4).
 - Release scripts: the `WEBDRIVER_ERROR_DIAG` sanitizer now redacts forward-slash and mixed-slash Windows paths, UNC paths and paths containing spaces to the end of the token, with negative controls and a planted-offender control for the backslash-quote scan (SM6; test/script only).
 - Large-document OCR review round 2: deterministic pause test, safer startup cleanup, Save elsewhere clears the old temp copy and never uses another document (SM4).
 - Large-document OCR review fixes: crash-safe after finalize, panics degrade one page instead of hanging, Save elsewhere, bounded final check, stale-folder cleanup (SM4).
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - OCR hardening follow-up: the stale OCR work-directory sweep runs once per process, and a test now proves it deletes a matching directory older than 24 h while sparing fresh and foreign-named ones (SM4; no version change).
 - In-app update check now starts from published, publisher-signed 0.3.1 (not 0.2.0) and answers its native install confirmation: No keeps 0.3.1, then Yes installs; record schema 5. Tests only until the next release (SM6).
 - Workflows: every `actions/*` step moved off Node 20 to Node 24 releases (checkout 7.0.1, upload-artifact 7.0.2, download-artifact 7.0.0, setup-node 7.1.0, setup-dotnet 6.0.0, cache 6.1.0), SHA-pinned; a test now allows only these pins (SM6).
-- Release scripts: the PDFium preparation and Step 1 draft verifier no longer assign PowerShell's automatic `$matches`; an AST test now covers both (SM6; scripts and test only).

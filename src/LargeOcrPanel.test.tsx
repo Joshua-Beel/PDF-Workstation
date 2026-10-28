@@ -1,17 +1,18 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, expect, it, vi } from 'vitest';
-import LargeOcrPanel, { pauseText, timeLeft, type LargeOcrApi } from './LargeOcrPanel';
+import LargeOcrPanel, { fileName, partRange, pauseText, timeLeft, type LargeOcrApi } from './LargeOcrPanel';
 import type { LargeOcrJob, LargeOcrStatus } from './bridge';
 
 const job = (overrides: Partial<LargeOcrJob> = {}, progress: Partial<LargeOcrJob['progress']> = {}): LargeOcrJob => ({
-  job: 'abc', sourceName: 'big.pdf', destination: 'E:/out/big-searchable.pdf', running: true, pauseReason: null, report: [], interrupted: false,
-  progress: { state: 'running', pagesDone: 411, pageCount: 1000, workers: 4, issues: 0, bytesWritten: 1, projectedBytes: null, sizeWarning: false, secondsLeft: 300, ...progress },
+  job: 'abc', sourceName: 'big.pdf', destination: 'E:/out/big-searchable.pdf', running: true, pauseReason: null, report: [], interrupted: false, parts: [],
+  progress: { state: 'running', pagesDone: 411, pageCount: 1000, workers: 4, issues: 0, bytesWritten: 1, projectedBytes: null, sizeWarning: false, secondsLeft: 300, inParts: false, part: 1, ...progress },
   ...overrides,
 });
 const status = (value: LargeOcrJob | null): LargeOcrStatus => ({ available: true, reason: null, maxPages: 10_000, job: value });
 const api = (current: LargeOcrStatus): LargeOcrApi & { [key: string]: ReturnType<typeof vi.fn> } => ({
   status: vi.fn().mockResolvedValue(current), pause: vi.fn().mockResolvedValue(current), cancel: vi.fn().mockResolvedValue(status(null)),
   resume: vi.fn().mockResolvedValue(current), dismiss: vi.fn().mockResolvedValue(status(null)), relocate: vi.fn().mockResolvedValue(null),
+  saveInParts: vi.fn().mockResolvedValue(current),
 });
 const flatten = (node: unknown): string => typeof node === 'string' ? node : Array.isArray(node) ? node.map(flatten).join('') : node && typeof node === 'object' && 'children' in node ? flatten((node as { children: unknown }).children) : '';
 const text = (ui: ReactTestRenderer) => flatten(ui.toJSON());
@@ -45,9 +46,48 @@ it('shows progress, pauses, and asks before cancelling', async () => {
   expect(calls.cancel).toHaveBeenCalledOnce();
 });
 
-it('warns about a projected size over 1 GiB', async () => {
-  const { ui } = await mount(api(status(job({}, { sizeWarning: true }))));
+it('warns about a projected size over 1 GiB and offers to save in parts while running', async () => {
+  const calls = api(status(job({}, { sizeWarning: true })));
+  const { ui } = await mount(calls);
   expect(text(ui)).toContain('larger than 1 GiB');
+  await act(async () => { button(ui, 'Save in parts').props.onClick(); });
+  expect(calls.saveInParts).toHaveBeenCalledWith(null, null);
+});
+
+it('says when a running job is saving in parts', async () => {
+  const { ui } = await mount(api(status(job({}, { inParts: true, part: 3 }))));
+  expect(text(ui)).toContain('Saving in parts of up to 1 GiB each; writing part 3.');
+  expect(ui.root.findAllByType('button').map(item => item.children.join(''))).not.toContain('Save in parts');
+});
+
+it('offers Save in parts when paused at the size cap, with the open document', async () => {
+  const paused = job({ running: false, pauseReason: { kind: 'sizeLimit' } }, { state: 'paused', pagesDone: 3021, pageCount: 9000 });
+  const calls = api(status(paused));
+  const { ui } = await mount(calls);
+  expect(text(ui)).toContain('page 3,021 of 9,000');
+  expect(text(ui)).toContain('(part 1 of N)');
+  expect(ui.root.findAllByType('button').map(item => item.children.join(''))).toEqual(['Save in parts', 'Discard progress']);
+  await act(async () => { button(ui, 'Save in parts').props.onClick(); });
+  expect(calls.saveInParts).toHaveBeenCalledWith(3, 9);
+  const { ui: closed } = await mount(api(status(paused)), null);
+  expect(button(closed, 'Save in parts').props.disabled).toBe(true);
+});
+
+it('lists each saved part with its page range and opens any part', async () => {
+  const saved = job({ running: false, parts: [
+    { path: 'E:\\out\\big (part 1 of 3).pdf', firstPage: 0, pages: 412, bytes: 1_000 },
+    { path: 'E:\\out\\big (part 2 of 3).pdf', firstPage: 412, pages: 405, bytes: 1_000 },
+    { path: 'E:\\out\\big (part 3 of 3).pdf', firstPage: 817, pages: 1, bytes: 1_000 },
+  ] }, { state: 'published', pagesDone: 818, pageCount: 818, inParts: true, part: 3 });
+  const { ui, openCopy } = await mount(api(status(saved)));
+  expect(text(ui)).toContain('Saved in 3 parts (818 pages)');
+  expect(text(ui)).toContain('big (part 1 of 3).pdf — pages 1–412');
+  expect(text(ui)).toContain('big (part 2 of 3).pdf — pages 413–817');
+  expect(text(ui)).toContain('big (part 3 of 3).pdf — page 818');
+  await act(async () => { button(ui, 'Open part 2').props.onClick(); });
+  expect(openCopy).toHaveBeenCalledWith('E:\\out\\big (part 2 of 3).pdf');
+  expect(fileName('E:/a/b.pdf')).toBe('b.pdf');
+  expect(partRange({ path: '', firstPage: 9, pages: 2, bytes: 0 })).toBe('pages 10–11');
 });
 
 it('resumes a paused job with the open document and offers discard', async () => {

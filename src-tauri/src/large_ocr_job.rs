@@ -19,18 +19,19 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+use crate::large_ocr_parts::{Opened, Output, PublishedPart};
 use crate::ocr_process::OcrCancellation;
 use crate::searchable_ocr::{map_words_to_display, parse_tesseract_tsv};
 use crate::searchable_pdf::SearchableWord;
 use crate::searchable_pdf_stream::{
-    encode_image, placeholder_image, publish_noclobber, JobManifest, PageIssue, PageOutcome, PartialWriter, StreamError,
-    StreamPage, MAX_STREAM_OUTPUT_BYTES,
+    encode_image, placeholder_image, publish_noclobber, JobManifest, PageIssue, PageOutcome, StreamError, StreamPage,
+    MAX_STREAM_OUTPUT_BYTES,
 };
 
 pub(crate) const MAX_JOB_WORKERS: usize = 4;
@@ -64,7 +65,7 @@ pub(crate) enum PauseReason {
     Document(String),
     /// Writing failed (for example the disk is full).
     Disk(String),
-    /// The copy would pass 1 GiB.
+    /// The copy would pass 1 GiB (and saving in parts was not chosen).
     SizeLimit,
     /// The finished copy failed its final check, or could not be published.
     Publish(String),
@@ -98,14 +99,18 @@ const REQUEST_CANCEL: u8 = 2;
 pub(crate) struct JobControl {
     cancellation: OcrCancellation,
     request: Arc<AtomicU8>,
+    in_parts: Arc<AtomicBool>,
 }
 
 impl Default for JobControl {
-    fn default() -> Self { Self { cancellation: OcrCancellation::default(), request: Arc::new(AtomicU8::new(REQUEST_RUN)) } }
+    fn default() -> Self { Self { cancellation: OcrCancellation::default(), request: Arc::new(AtomicU8::new(REQUEST_RUN)), in_parts: Arc::new(AtomicBool::new(false)) } }
 }
 
 impl JobControl {
     pub(crate) fn cancellation(&self) -> &OcrCancellation { &self.cancellation }
+    /// Lets the job continue into further files instead of pausing at the size cap.
+    pub(crate) fn save_in_parts(&self) { self.in_parts.store(true, Ordering::Release); }
+    pub(crate) fn may_split(&self) -> bool { self.in_parts.load(Ordering::Acquire) }
     /// Stops the job and keeps its progress. Running engine processes are killed.
     pub(crate) fn pause(&self) {
         let _ = self.request.compare_exchange(REQUEST_RUN, REQUEST_PAUSE, Ordering::AcqRel, Ordering::Acquire);
@@ -134,9 +139,13 @@ pub(crate) struct JobProgress {
     pub(crate) bytes_written: u64,
     /// Estimated final size after the first pages, or `None` before that.
     pub(crate) projected_bytes: Option<u64>,
-    /// True when the projected size is over 1 GiB.
+    /// True when the projected size is over 1 GiB and the copy is not being saved in parts.
     pub(crate) size_warning: bool,
     pub(crate) seconds_left: Option<u64>,
+    /// Saving in parts was chosen, or has started.
+    pub(crate) in_parts: bool,
+    /// The part being written (1 for a single copy).
+    pub(crate) part: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -151,7 +160,8 @@ pub(crate) struct PageReport {
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum JobOutcome {
-    Published { path: PathBuf, pages: u32, bytes: u64, report: Vec<PageReport> },
+    /// `parts` is empty for a single copy; otherwise `path` is part 1.
+    Published { path: PathBuf, pages: u32, bytes: u64, report: Vec<PageReport>, parts: Vec<PublishedPart> },
     Paused { reason: PauseReason, next_page: u32, report: Vec<PageReport> },
     Cancelled,
 }
@@ -165,9 +175,12 @@ pub(crate) struct JobSettings {
     pub(crate) directory: PathBuf,
     pub(crate) start: JobStart,
     pub(crate) workers: usize,
-    /// Runs immediately before the finished copy is moved into place; an
-    /// error (cancelled, paused) stops the publish.
+    /// Runs immediately before the finished copy (or its first part) is moved
+    /// into place; an error (cancelled, paused) stops the publish.
     pub(crate) commit: Box<dyn FnOnce() -> Result<(), String> + Send>,
+    /// The largest file the job may write: `MAX_STREAM_OUTPUT_BYTES` in the
+    /// app, smaller in tests.
+    pub(crate) size_cap: u64,
 }
 
 pub(crate) type ProgressSink = Arc<dyn Fn(&JobProgress) + Send + Sync>;
@@ -271,10 +284,12 @@ impl Drop for KeepAwake {
     fn drop(&mut self) { unsafe { SetThreadExecutionState(ES_CONTINUOUS) }; }
 }
 
-fn report_of(writer_records: &[crate::searchable_pdf_stream::PageRecord]) -> Vec<PageReport> {
+/// The pages worth reporting; `first_page` turns a part's page index into the
+/// source page index.
+pub(crate) fn report_of(writer_records: &[crate::searchable_pdf_stream::PageRecord], first_page: u32) -> Vec<PageReport> {
     writer_records.iter()
         .filter(|record| record.outcome != PageOutcome::Text || record.reduced_resolution || record.dropped_words > 0)
-        .map(|record| PageReport { page: record.page, outcome: record.outcome, issue: record.issue, reduced_resolution: record.reduced_resolution, dropped_words: record.dropped_words })
+        .map(|record| PageReport { page: first_page + record.page, outcome: record.outcome, issue: record.issue, reduced_resolution: record.reduced_resolution, dropped_words: record.dropped_words })
         .collect()
 }
 
@@ -298,11 +313,21 @@ pub(crate) fn run_job(
     let _awake = KeepAwake::new();
     let directory = settings.directory.clone();
     let workers = settings.workers.clamp(1, MAX_JOB_WORKERS);
-    let mut writer = match match settings.start {
-        JobStart::New(manifest) => PartialWriter::create(&directory, manifest),
-        JobStart::Resume => PartialWriter::resume(&directory),
-    } {
-        Ok(writer) => writer,
+    let size_cap = settings.size_cap.min(MAX_STREAM_OUTPUT_BYTES);
+    let opened = match settings.start {
+        JobStart::New(manifest) => Output::create(&directory, manifest, size_cap).map(Opened::Output),
+        JobStart::Resume => Output::resume(&directory, size_cap),
+    };
+    let mut writer = match opened {
+        Ok(Opened::Output(output)) => output,
+        Ok(Opened::AlreadyPublished { parts, report }) => {
+            let _ = std::fs::remove_dir_all(&directory);
+            let pages = parts.iter().map(|part| part.pages).sum();
+            let bytes = parts.iter().map(|part| part.bytes).sum();
+            let path = parts.first().map(|part| PathBuf::from(&part.path)).unwrap_or_default();
+            progress(&JobProgress { state: JobState::Published, pages_done: pages, page_count: pages, workers, issues: report.len() as u32, bytes_written: bytes, projected_bytes: Some(bytes), size_warning: false, seconds_left: Some(0), in_parts: true, part: parts.len() as u32 });
+            return JobOutcome::Published { path, pages, bytes, report, parts };
+        }
         Err(error) => {
             return JobOutcome::Paused { reason: match error { StreamError::Io(message) => PauseReason::Disk(message), other => PauseReason::Publish(other.to_string()) }, next_page: 0, report: Vec::new() };
         }
@@ -312,7 +337,8 @@ pub(crate) fn run_job(
     let first_page = writer.next_page();
     let started = Instant::now();
     let mut last_progress: Option<Instant> = None;
-    let send_progress = |state: JobState, writer: &PartialWriter, force: bool, last: &mut Option<Instant>| {
+    let progress_control = control.clone();
+    let send_progress = |state: JobState, writer: &Output, force: bool, last: &mut Option<Instant>| {
         if !force && last.is_some_and(|at| at.elapsed() < PROGRESS_INTERVAL) { return; }
         *last = Some(Instant::now());
         let done = writer.next_page();
@@ -322,10 +348,12 @@ pub(crate) fn run_job(
             let per_page = started.elapsed().as_secs_f64() / f64::from(written_now);
             (per_page * f64::from(page_count - done)).round() as u64
         });
+        let in_parts = writer.in_parts() || progress_control.may_split();
         progress(&JobProgress {
-            state, pages_done: done, page_count, workers, issues: report_of(writer.records()).len() as u32,
+            state, pages_done: done, page_count, workers, issues: writer.report().len() as u32,
             bytes_written: writer.bytes_written(), projected_bytes: projected,
-            size_warning: projected.is_some_and(|bytes| bytes > MAX_STREAM_OUTPUT_BYTES), seconds_left,
+            size_warning: !in_parts && projected.is_some_and(|bytes| bytes > size_cap), seconds_left,
+            in_parts, part: writer.part(),
         });
     };
     send_progress(JobState::Running, &writer, true, &mut last_progress);
@@ -362,7 +390,7 @@ pub(crate) fn run_job(
         match result {
             WorkResult::Page(page, live) => {
                 let failed = page.outcome != PageOutcome::Text;
-                if let Err(error) = writer.append(&page) {
+                if let Err(error) = writer.append(&page, control.may_split()) {
                     stop_reason = Some(pause_for(error));
                     break;
                 }
@@ -406,30 +434,48 @@ pub(crate) fn run_job(
     if control.requested() == REQUEST_CANCEL {
         drop(writer);
         let _ = std::fs::remove_dir_all(&directory);
-        progress(&JobProgress { state: JobState::Cancelled, pages_done: 0, page_count, workers, issues: 0, bytes_written: 0, projected_bytes: None, size_warning: false, seconds_left: None });
+        progress(&JobProgress { state: JobState::Cancelled, pages_done: 0, page_count, workers, issues: 0, bytes_written: 0, projected_bytes: None, size_warning: false, seconds_left: None, in_parts: false, part: 1 });
         return JobOutcome::Cancelled;
     }
     if let Some(reason) = stop_reason {
         let checkpoint = writer.checkpoint();
         let reason = match (reason, checkpoint) { (PauseReason::User, Err(error)) => pause_for(error), (reason, _) => reason };
         send_progress(JobState::Paused, &writer, true, &mut last_progress);
-        return JobOutcome::Paused { reason, next_page: writer.next_page(), report: report_of(writer.records()) };
+        return JobOutcome::Paused { reason, next_page: writer.next_page(), report: writer.report() };
     }
 
     send_progress(JobState::Finalising, &writer, true, &mut last_progress);
-    let finished = match writer.finalize() {
+    if writer.in_parts() {
+        return match writer.publish_parts(settings.commit) {
+            Ok((parts, report)) => {
+                let _ = std::fs::remove_dir_all(&directory);
+                let bytes = parts.iter().map(|part| part.bytes).sum();
+                progress(&JobProgress { state: JobState::Published, pages_done: page_count, page_count, workers, issues: report.len() as u32, bytes_written: bytes, projected_bytes: Some(bytes), size_warning: false, seconds_left: Some(0), in_parts: true, part: parts.len() as u32 });
+                JobOutcome::Published { path: parts.first().map(|part| PathBuf::from(&part.path)).unwrap_or_default(), pages: page_count, bytes, report, parts }
+            }
+            Err((error, report)) => {
+                if control.requested() == REQUEST_CANCEL && !crate::large_ocr_parts::any_published(&directory) {
+                    let _ = std::fs::remove_dir_all(&directory);
+                    return JobOutcome::Cancelled;
+                }
+                let reason = match error { StreamError::NotCommitted(_) => PauseReason::User, StreamError::Io(message) => PauseReason::Disk(message), other => PauseReason::Publish(other.to_string()) };
+                JobOutcome::Paused { reason, next_page: page_count, report }
+            }
+        };
+    }
+    let finished = match writer.finalize_single() {
         Ok(finished) => finished,
         Err(error) => {
-            let resumed = PartialWriter::resume(&directory).map(|writer| (writer.next_page(), report_of(writer.records()))).unwrap_or((0, Vec::new()));
+            let resumed = crate::searchable_pdf_stream::PartialWriter::resume(&directory).map(|writer| (writer.next_page(), report_of(writer.records(), 0))).unwrap_or((0, Vec::new()));
             return JobOutcome::Paused { reason: pause_for(error), next_page: resumed.0, report: resumed.1 };
         }
     };
-    let report = report_of(&finished.records);
+    let report = report_of(&finished.records, 0);
     match publish_noclobber(&finished.path, &destination, settings.commit) {
         Ok(()) => {
             let _ = std::fs::remove_dir_all(&directory);
-            progress(&JobProgress { state: JobState::Published, pages_done: page_count, page_count, workers, issues: report.len() as u32, bytes_written: finished.bytes, projected_bytes: Some(finished.bytes), size_warning: false, seconds_left: Some(0) });
-            JobOutcome::Published { path: destination, pages: page_count, bytes: finished.bytes, report }
+            progress(&JobProgress { state: JobState::Published, pages_done: page_count, page_count, workers, issues: report.len() as u32, bytes_written: finished.bytes, projected_bytes: Some(finished.bytes), size_warning: false, seconds_left: Some(0), in_parts: false, part: 1 });
+            JobOutcome::Published { path: destination, pages: page_count, bytes: finished.bytes, report, parts: Vec::new() }
         }
         Err(error) => {
             let _ = crate::searchable_pdf_stream::reopen_for_resume(&finished.path);
@@ -577,6 +623,7 @@ pub(crate) fn unfinished_jobs(root: &Path) -> Vec<(PathBuf, JobManifest)> {
 pub(crate) mod tests {
     use super::*;
     use crate::searchable_pdf_stream::tests::manifest;
+    use crate::searchable_pdf_stream::PartialWriter;
     use std::sync::atomic::{AtomicU32, AtomicUsize};
 
     /// Synthetic pages: a 200 x 260 pixel raster (gray, bilevel or colour by
@@ -693,6 +740,7 @@ pub(crate) mod tests {
             start: if resume { JobStart::Resume } else { JobStart::New(manifest(pages, destination)) },
             workers,
             commit: Box::new(|| Ok(())),
+            size_cap: MAX_STREAM_OUTPUT_BYTES,
         }
     }
 
@@ -957,6 +1005,196 @@ pub(crate) mod tests {
         // The coordinator notices the pause within its 100 ms wait, then waits
         // at most STOP_WAIT for the stuck worker; 400 ms covers scheduling.
         assert!(waited >= STOP_WAIT && waited < STOP_WAIT + Duration::from_millis(400), "{waited:?}");
+    }
+
+    const SPLIT_PAGES: u32 = 60;
+    /// The 60 synthetic pages make a copy of about 86 KB, so this cap splits
+    /// it into several parts.
+    const SPLIT_CAP: u64 = 25_000;
+
+    fn split_settings(directory: &Path, destination: &Path, resume: bool) -> JobSettings {
+        let mut job = settings(directory, SPLIT_PAGES, destination, 2, resume);
+        job.size_cap = SPLIT_CAP;
+        job
+    }
+
+    fn in_parts() -> JobControl {
+        let control = JobControl::default();
+        control.save_in_parts();
+        control
+    }
+
+    fn run_in_parts(directory: &Path, destination: &Path, resume: bool) -> JobOutcome {
+        run_job(split_settings(directory, destination, resume), Arc::new(FakeSource::new()), Arc::new(FakeEngine::new()), in_parts(), silent())
+    }
+
+    fn published_parts(outcome: JobOutcome) -> Vec<PublishedPart> {
+        let JobOutcome::Published { parts, pages, .. } = outcome else { panic!("{outcome:?}") };
+        assert_eq!(pages, SPLIT_PAGES);
+        parts
+    }
+
+    fn contents(parts: &[PublishedPart]) -> Vec<Vec<u8>> { parts.iter().map(|part| std::fs::read(&part.path).unwrap()).collect() }
+
+    /// A clean run in parts, kept for byte comparisons.
+    fn clean_parts(folder: &Path) -> (Vec<PublishedPart>, Vec<Vec<u8>>) {
+        let parts = published_parts(run_in_parts(&folder.join("clean-job"), &folder.join("clean.pdf"), false));
+        let bytes = contents(&parts);
+        (parts, bytes)
+    }
+
+    #[test]
+    fn a_small_cap_saves_valid_parts_with_page_ranges_and_text() {
+        let _pdfium = crate::ocr_process::test_lock();
+        let _serial = JOB_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let folder = tempfile::tempdir().unwrap();
+        let destination = folder.path().join("big scan.pdf");
+        let directory = folder.path().join("job");
+        let mut source = FakeSource::new();
+        source.fail_render = vec![33];
+        let outcome = run_job(split_settings(&directory, &destination, false), Arc::new(source), Arc::new(FakeEngine::new()), in_parts(), silent());
+        let JobOutcome::Published { parts, report, bytes, path, .. } = outcome else { panic!("{outcome:?}") };
+        let count = parts.len();
+        eprintln!("bytes {bytes} parts: {:?}", parts.iter().map(|part| (part.first_page, part.pages, part.bytes)).collect::<Vec<_>>());
+        assert!(count >= 3, "{count} parts");
+        assert_eq!(path, folder.path().join(format!("big scan (part 1 of {count}).pdf")));
+        assert!(!destination.exists(), "the chosen name itself is not written");
+        assert!(!directory.exists(), "the job folder is removed after publishing");
+        assert_eq!(bytes, parts.iter().map(|part| part.bytes).sum::<u64>());
+        assert!(report.iter().any(|entry| entry.page == 33 && entry.outcome == PageOutcome::Placeholder), "report pages are source pages: {report:?}");
+        let service = crate::service::PdfService::start(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/pdfium/bin/pdfium.dll"));
+        let mut next = 0;
+        for (index, part) in parts.iter().enumerate() {
+            assert_eq!(part.path, folder.path().join(format!("big scan (part {} of {count}).pdf", index + 1)).to_string_lossy());
+            assert_eq!(part.first_page, next, "parts are contiguous");
+            next += part.pages;
+            let file = std::fs::read(&part.path).unwrap();
+            assert_eq!(file.len() as u64, part.bytes);
+            assert!(part.bytes <= SPLIT_CAP, "part {} is {} bytes", index + 1, part.bytes);
+            assert_eq!(lopdf::Document::load_mem(&file).unwrap().get_pages().len(), part.pages as usize);
+            let opened = tauri::async_runtime::block_on(service.open(PathBuf::from(&part.path))).unwrap();
+            let request = opened.ocr_request(0);
+            for local in [0, part.pages - 1] {
+                let source_page = part.first_page + local;
+                let text = tauri::async_runtime::block_on(service.text(request.document_id, local as u16, request.revision)).unwrap();
+                if source_page == 33 { assert!(!text.contains("Page34"), "{text:?}"); continue; }
+                assert!(text.contains(&format!("Page{}", source_page + 1)), "part {} page {local}: {text:?}", index + 1);
+            }
+            tauri::async_runtime::block_on(service.close(request.document_id)).unwrap();
+        }
+        assert_eq!(next, SPLIT_PAGES);
+    }
+
+    #[test]
+    fn the_cap_pauses_a_single_copy_and_save_in_parts_continues_it() {
+        let _serial = JOB_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let folder = tempfile::tempdir().unwrap();
+        let (clean, clean_bytes) = clean_parts(folder.path());
+        for part in &clean { std::fs::remove_file(&part.path).unwrap(); }
+        let destination = folder.path().join("clean.pdf");
+        let directory = folder.path().join("job");
+        let outcome = run_job(split_settings(&directory, &destination, false), Arc::new(FakeSource::new()), Arc::new(FakeEngine::new()), JobControl::default(), silent());
+        let JobOutcome::Paused { reason: PauseReason::SizeLimit, next_page, .. } = outcome else { panic!("{outcome:?}") };
+        assert_eq!(next_page, clean[0].pages, "the single copy stops where part 1 ends");
+        assert!(!directory.join(crate::large_ocr_parts::PARTS_FILE).exists());
+        let resumed = published_parts(run_in_parts(&directory, &destination, true));
+        assert_eq!(resumed, clean);
+        assert!(contents(&resumed) == clean_bytes);
+    }
+
+    #[test]
+    fn a_crash_mid_part_two_resumes_to_identical_parts() {
+        let _serial = JOB_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let folder = tempfile::tempdir().unwrap();
+        let (clean, clean_bytes) = clean_parts(folder.path());
+        for part in &clean { std::fs::remove_file(&part.path).unwrap(); }
+        let destination = folder.path().join("clean.pdf");
+        let directory = folder.path().join("job");
+        let part_two = clean[1].first_page..clean[1].first_page + clean[1].pages;
+        let target = part_two.start + clean[1].pages / 2;
+        let mut engine = FakeEngine::new();
+        engine.delay = Duration::from_millis(2);
+        engine.hang_after_calls = Some(target + 1);
+        let engine = Arc::new(engine);
+        let control = in_parts();
+        let watcher = when_calls_reach(engine.clone(), target, { let control = control.clone(); move || control.pause() });
+        let outcome = run_job(split_settings(&directory, &destination, false), Arc::new(FakeSource::new()), engine, control, silent());
+        watcher.join().unwrap();
+        let JobOutcome::Paused { reason: PauseReason::User, next_page, .. } = outcome else { panic!("{outcome:?}") };
+        assert!(part_two.contains(&next_page) && next_page > part_two.start, "paused at {next_page}, part 2 is {part_two:?}");
+        assert!(directory.join(crate::large_ocr_parts::PARTS_FILE).exists() && directory.join("part-2").is_dir());
+        // A power loss: the last journal record of part 2 is torn.
+        let journal = directory.join("part-2").join(crate::searchable_pdf_stream::JOURNAL_FILE);
+        let length = std::fs::metadata(&journal).unwrap().len();
+        std::fs::OpenOptions::new().write(true).open(&journal).unwrap().set_len(length - 3).unwrap();
+        assert_eq!(crate::large_ocr_parts::saved_progress(&directory, &crate::searchable_pdf_stream::read_manifest(&directory).unwrap()), next_page - 1);
+        let resumed = published_parts(run_in_parts(&directory, &destination, true));
+        assert_eq!(resumed, clean);
+        assert!(contents(&resumed) == clean_bytes, "resumed parts differ from the uninterrupted run");
+    }
+
+    #[test]
+    fn existing_part_names_are_never_overwritten() {
+        let _serial = JOB_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let folder = tempfile::tempdir().unwrap();
+        let (clean, clean_bytes) = clean_parts(folder.path());
+        for part in &clean { std::fs::remove_file(&part.path).unwrap(); }
+        let destination = folder.path().join("clean.pdf");
+        let names = clean.iter().map(|part| PathBuf::from(&part.path)).collect::<Vec<_>>();
+
+        // A name taken before publishing: nothing is published.
+        let directory = folder.path().join("job-a");
+        std::fs::write(&names[1], b"someone else's part 2").unwrap();
+        let outcome = run_in_parts(&directory, &destination, false);
+        let JobOutcome::Paused { reason: PauseReason::Publish(message), next_page, .. } = outcome else { panic!("{outcome:?}") };
+        assert_eq!(next_page, SPLIT_PAGES);
+        assert!(message.contains("already exists"), "{message}");
+        assert!(!names[0].exists(), "no part is published while a name is taken");
+        assert_eq!(std::fs::read(&names[1]).unwrap(), b"someone else's part 2");
+        std::fs::remove_file(&names[1]).unwrap();
+        assert!(contents(&published_parts(run_in_parts(&directory, &destination, true))) == clean_bytes);
+        for name in &names { std::fs::remove_file(name).unwrap(); }
+
+        // A name taken between the check and the move: part 1 is saved, part 2 is not, and resume finishes the set.
+        let directory = folder.path().join("job-b");
+        let blocker = names[1].clone();
+        let mut job = split_settings(&directory, &destination, false);
+        job.commit = Box::new(move || { std::fs::write(&blocker, b"raced").unwrap(); Ok(()) });
+        let outcome = run_job(job, Arc::new(FakeSource::new()), Arc::new(FakeEngine::new()), in_parts(), silent());
+        assert!(matches!(outcome, JobOutcome::Paused { reason: PauseReason::Publish(_), next_page: SPLIT_PAGES, .. }), "{outcome:?}");
+        assert!(std::fs::read(&names[0]).unwrap() == clean_bytes[0]);
+        assert_eq!(std::fs::read(&names[1]).unwrap(), b"raced");
+        assert!(crate::large_ocr_parts::any_published(&directory));
+        std::fs::remove_file(&names[1]).unwrap();
+        let resumed = published_parts(run_in_parts(&directory, &destination, true));
+        assert_eq!(resumed, clean);
+        assert!(contents(&resumed) == clean_bytes);
+    }
+
+    #[test]
+    fn every_part_is_checked_from_disk_before_any_is_published() {
+        let _serial = JOB_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let folder = tempfile::tempdir().unwrap();
+        let destination = folder.path().join("out.pdf");
+        let directory = folder.path().join("job");
+        let mut job = split_settings(&directory, &destination, false);
+        job.commit = Box::new(|| Err("OCR was paused".into()));
+        let outcome = run_job(job, Arc::new(FakeSource::new()), Arc::new(FakeEngine::new()), in_parts(), silent());
+        assert!(matches!(outcome, JobOutcome::Paused { reason: PauseReason::User, next_page: SPLIT_PAGES, .. }), "{outcome:?}");
+        let part_two = directory.join("part-2");
+        let records = crate::searchable_pdf_stream::saved_records(&part_two);
+        let part_file = part_two.join(crate::searchable_pdf_stream::PART_FILE);
+        let mut bytes = std::fs::read(&part_file).unwrap();
+        assert!(bytes.starts_with(b"%PDW-PARTIAL"), "a refused publish turns the checked parts back into partial copies");
+        let image = records[0].end_offset() as usize;
+        let at = image + bytes[image..].windows(7).position(|window| window == b"stream\n").unwrap() + 7 + 10;
+        bytes[at] ^= 0x40;
+        std::fs::write(&part_file, bytes).unwrap();
+        let outcome = run_in_parts(&directory, &destination, true);
+        let JobOutcome::Paused { reason: PauseReason::Publish(message), .. } = outcome else { panic!("{outcome:?}") };
+        assert!(message.contains("final check"), "{message}");
+        let published = std::fs::read_dir(folder.path()).unwrap().flatten().filter(|entry| entry.file_name().to_string_lossy().ends_with(".pdf")).count();
+        assert_eq!(published, 0, "nothing is published when any part fails its check");
     }
 
     #[test]

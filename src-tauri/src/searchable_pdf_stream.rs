@@ -259,6 +259,21 @@ fn page_dimension(value: f32) -> Result<String, StreamError> {
     Ok(format!("{value}"))
 }
 
+/// An upper bound on what `finalize_pages(pages)` writes after the pages: the
+/// font (its fixed objects, 2 bytes of CIDToGIDMap and at most about 20 bytes
+/// of /ToUnicode per character, never more when compressed), the page-tree
+/// nodes (object references of at most 12 bytes), the catalog, an xref of 20
+/// bytes per object and the trailer.
+pub(crate) fn tail_upper_bound(pages: u32, characters: usize) -> u64 {
+    static FONT_FIXED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let font_fixed = *FONT_FIXED.get_or_init(|| font_objects(&[]).map(|objects| objects.iter().map(|(_, body)| body.len() as u64).sum()).unwrap_or(64 * 1024));
+    let nodes = u64::from(node_count(pages));
+    let font = font_fixed + 26 * characters as u64 + 1024;
+    let tree = nodes * (u64::from(TREE_FAN_OUT) * 12 + 128) + nodes * 12 + 256;
+    let xref = 20 * (u64::from(FIRST_PAGE_OBJECT) + 3 * u64::from(pages) + nodes) + 512;
+    font + tree + xref
+}
+
 fn page_object(page: u32) -> u32 { FIRST_PAGE_OBJECT + 3 * page }
 fn node_count(page_count: u32) -> u32 { page_count.div_ceil(TREE_FAN_OUT) }
 fn node_object(page_count: u32, node: u32) -> u32 { FIRST_PAGE_OBJECT + 3 * page_count + node }
@@ -276,6 +291,11 @@ pub(crate) struct PartialWriter {
     last_sync: std::time::Instant,
     sync_interval: std::time::Duration,
     poisoned: bool,
+    /// The largest finished file this writer may produce.
+    size_cap: u64,
+    /// What `put` may reach now: while pages are appended, the cap minus room
+    /// for the font, page tree and xref, so finalising always fits.
+    put_limit: u64,
     #[cfg(test)]
     pub(crate) fail_write_at: Option<u64>,
 }
@@ -298,6 +318,7 @@ impl PartialWriter {
             directory: directory.to_path_buf(), manifest, part: BufWriter::with_capacity(1 << 20, part), journal,
             position: PARTIAL_HEADER.len() as u64, records: Vec::new(), characters: Vec::new(), ids: HashMap::new(),
             pending: Vec::new(), last_sync: std::time::Instant::now(), sync_interval: SYNC_INTERVAL, poisoned: false,
+            size_cap: MAX_STREAM_OUTPUT_BYTES, put_limit: MAX_STREAM_OUTPUT_BYTES,
             #[cfg(test)] fail_write_at: None,
         })
     }
@@ -359,8 +380,15 @@ impl PartialWriter {
         Ok(Self {
             directory: directory.to_path_buf(), manifest, part: BufWriter::with_capacity(1 << 20, part), journal, position, records,
             characters, ids, pending: Vec::new(), last_sync: std::time::Instant::now(), sync_interval: SYNC_INTERVAL, poisoned: false,
+            size_cap: MAX_STREAM_OUTPUT_BYTES, put_limit: MAX_STREAM_OUTPUT_BYTES,
             #[cfg(test)] fail_write_at: None,
         })
+    }
+
+    /// Lowers the largest file this writer may produce (never above 1 GiB).
+    pub(crate) fn set_size_cap(&mut self, cap: u64) {
+        self.size_cap = cap.min(MAX_STREAM_OUTPUT_BYTES);
+        self.put_limit = self.size_cap;
     }
 
     pub(crate) fn manifest(&self) -> &JobManifest { &self.manifest }
@@ -393,7 +421,7 @@ impl PartialWriter {
 
     fn put(&mut self, bytes: &[u8]) -> Result<(), StreamError> {
         let next = self.position.checked_add(bytes.len() as u64).ok_or(StreamError::SizeLimit)?;
-        if next > MAX_STREAM_OUTPUT_BYTES { return Err(StreamError::SizeLimit); }
+        if next > self.put_limit.min(MAX_STREAM_OUTPUT_BYTES) { return Err(StreamError::SizeLimit); }
         #[cfg(test)]
         if self.fail_write_at.is_some_and(|limit| next > limit) { return Err(StreamError::Io("There is not enough space on the disk. (test fault)".into())); }
         self.part.write_all(bytes).map_err(io)?;
@@ -451,6 +479,7 @@ impl PartialWriter {
             }
             kept.push(word);
         }
+        self.put_limit = self.size_cap.saturating_sub(tail_upper_bound(index + 1, self.characters.len()));
         let image_id = page_object(index);
         let image_offset = self.position;
         let image = &page.image;
@@ -517,10 +546,21 @@ impl PartialWriter {
     /// Writes the font, page tree, catalog, xref and trailer, switches the
     /// header to `%PDF`, then checks every page from disk. Returns the path of
     /// the finished (still private) file.
-    pub(crate) fn finalize(mut self) -> Result<FinishedCopy, StreamError> {
+    pub(crate) fn finalize(self) -> Result<FinishedCopy, StreamError> {
+        let pages = self.manifest.page_count;
+        self.finalize_pages(pages)
+    }
+
+    /// Finalises a copy of the first `pages` pages, which must be exactly the
+    /// pages written. With fewer pages than the job's page count (one part of
+    /// a copy saved in parts) the object numbers stay as planned for the full
+    /// count, and the xref lists only the objects that exist, in two
+    /// subsections. With every page the bytes equal `finalize`'s.
+    pub(crate) fn finalize_pages(mut self, pages: u32) -> Result<FinishedCopy, StreamError> {
         let page_count = self.manifest.page_count;
-        if self.next_page() != page_count { return Err(StreamError::Invalid("The OCR job is not complete.".into())); }
+        if pages == 0 || pages > page_count || self.next_page() != pages { return Err(StreamError::Invalid("The OCR job is not complete.".into())); }
         self.checkpoint()?;
+        self.put_limit = self.size_cap;
         let mut offsets = vec![0_u64; (FIRST_PAGE_OBJECT + 3 * page_count + node_count(page_count)) as usize];
         for record in &self.records {
             let id = page_object(record.page) as usize;
@@ -533,23 +573,32 @@ impl PartialWriter {
             offsets[id as usize] = self.position;
             self.put(&body)?;
         }
-        for node in 0..node_count(page_count) {
+        for node in 0..node_count(pages) {
             let first = node * TREE_FAN_OUT;
-            let last = (first + TREE_FAN_OUT).min(page_count);
+            let last = (first + TREE_FAN_OUT).min(pages);
             let kids = (first..last).map(|page| format!("{} 0 R", page_object(page) + 2)).collect::<Vec<_>>().join(" ");
             let id = node_object(page_count, node);
             offsets[id as usize] = self.position;
             self.put(format!("{id} 0 obj\n<< /Type /Pages /Parent 2 0 R /Count {} /Kids [{kids}] >>\nendobj\n", last - first).as_bytes())?;
         }
-        let kids = (0..node_count(page_count)).map(|node| format!("{} 0 R", node_object(page_count, node))).collect::<Vec<_>>().join(" ");
+        let kids = (0..node_count(pages)).map(|node| format!("{} 0 R", node_object(page_count, node))).collect::<Vec<_>>().join(" ");
         offsets[2] = self.position;
-        self.put(format!("2 0 obj\n<< /Type /Pages /Count {page_count} /Kids [{kids}] >>\nendobj\n").as_bytes())?;
+        self.put(format!("2 0 obj\n<< /Type /Pages /Count {pages} /Kids [{kids}] >>\nendobj\n").as_bytes())?;
         offsets[1] = self.position;
         self.put(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")?;
         let xref_offset = self.position;
-        let mut xref = format!("xref\n0 {}\n0000000000 65535 f\r\n", offsets.len());
-        for offset in &offsets[1..] { xref.push_str(&format!("{offset:010} 00000 n\r\n")); }
-        xref.push_str(&format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n", offsets.len()));
+        let pages_end = (FIRST_PAGE_OBJECT + 3 * pages) as usize;
+        let nodes_start = node_object(page_count, 0) as usize;
+        let size = nodes_start + node_count(pages) as usize;
+        let sections = if pages_end == nodes_start { vec![(0, size)] } else { vec![(0, pages_end), (nodes_start, size)] };
+        let mut xref = String::from("xref\n");
+        for (start, end) in sections {
+            xref.push_str(&format!("{start} {}\n", end - start));
+            for id in start..end {
+                if id == 0 { xref.push_str("0000000000 65535 f\r\n"); } else { xref.push_str(&format!("{:010} 00000 n\r\n", offsets[id])); }
+            }
+        }
+        xref.push_str(&format!("trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"));
         self.put(xref.as_bytes())?;
         self.part.flush().map_err(io)?;
         let file = self.part.get_mut();
@@ -636,16 +685,27 @@ pub(crate) fn read_manifest(directory: &Path) -> Result<JobManifest, StreamError
 
 /// How many pages a job folder has saved, read only (nothing is truncated).
 pub(crate) fn saved_pages(directory: &Path) -> u32 {
-    let Ok(file) = File::open(directory.join(JOURNAL_FILE)) else { return 0 };
+    saved_records(directory).len() as u32
+}
+
+/// The page records a job folder has saved, in order, read only.
+pub(crate) fn saved_records(directory: &Path) -> Vec<PageRecord> {
+    let Ok(file) = File::open(directory.join(JOURNAL_FILE)) else { return Vec::new() };
     let mut bytes = Vec::new();
-    if file.take(u64::from(MAX_STREAM_PAGES) * (RECORD_MAX_PAYLOAD as u64 + 16)).read_to_end(&mut bytes).is_err() { return 0; }
-    let (mut cursor, mut pages) = (0_usize, 0_u32);
+    if file.take(u64::from(MAX_STREAM_PAGES) * (RECORD_MAX_PAYLOAD as u64 + 16)).read_to_end(&mut bytes).is_err() { return Vec::new(); }
+    let mut cursor = 0_usize;
+    let mut records = Vec::new();
     while let Some((record, used)) = parse_record(&bytes[cursor..]) {
-        if record.page != pages { break; }
-        pages += 1;
+        if record.page != records.len() as u32 { break; }
+        records.push(record);
         cursor += used;
     }
-    pages
+    records
+}
+
+impl PageRecord {
+    /// Where this page's bytes end in the partial copy.
+    pub(crate) fn end_offset(&self) -> u64 { self.end_offset }
 }
 
 fn encode_record(record: &PageRecord) -> Vec<u8> {
@@ -1183,6 +1243,32 @@ pub(crate) mod tests {
             for word in expected { assert!(text.contains(&word.text), "page {index}: {text:?} lacks {:?}", word.text); }
         }
         tauri::async_runtime::block_on(service.close(opened.ocr_request(0).document_id)).unwrap();
+    }
+
+    #[test]
+    fn a_small_cap_stops_appends_with_room_left_to_finalise_fewer_pages() {
+        let folder = tempfile::tempdir().unwrap();
+        let cap = 60_000;
+        let mut writer = PartialWriter::create(&folder.path().join("job"), manifest(500, Path::new("E:/unused.pdf"))).unwrap();
+        writer.set_size_cap(cap);
+        let mut index = 0;
+        loop {
+            match writer.append(&synthetic_page(index)) {
+                Ok(_) => index += 1,
+                Err(StreamError::SizeLimit) => break,
+                Err(error) => panic!("{error}"),
+            }
+        }
+        assert!(index > 10 && index < 500, "{index} pages fit");
+        assert_eq!(writer.next_page(), index, "the page that did not fit left nothing behind");
+        let finished = writer.finalize_pages(index).unwrap();
+        assert!(finished.bytes <= cap, "{} > {cap}", finished.bytes);
+        let bytes = std::fs::read(&finished.path).unwrap();
+        assert_eq!(bytes.len() as u64, finished.bytes);
+        let document = lopdf::Document::load_mem(&bytes).unwrap();
+        assert_eq!(document.get_pages().len(), index as usize);
+        let size = format!("trailer\n<< /Size {} /Root", FIRST_PAGE_OBJECT + 3 * 500 + index.div_ceil(TREE_FAN_OUT));
+        assert!(find(&bytes, size.as_bytes()).is_some(), "object numbers stay as planned for 500 pages");
     }
 
     #[test]
