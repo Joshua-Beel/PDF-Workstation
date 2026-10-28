@@ -630,6 +630,7 @@ fn choice_field(document:&Document,form:&Dictionary,field:&Dictionary,id:ObjectI
 impl FormDocument {
     pub fn parse(session: &EditSession) -> Result<Self, String> {
         if session.source.len() > MAX_SOURCE { return Err("Form filling is limited to source PDFs of 64 MiB.".into()); }
+        session.overlay_guard()?;
         if session.plan.iter().enumerate().any(|(index, page)| page.source != index || page.turns != 0 || page.crop.is_some() || !page.notes.is_empty()) { return Err("Form filling requires the original page plan. Open a fresh copy before filling fields.".into()); }
         let document = Document::load_mem_with_options(&session.source, LoadOptions::with_max_decompressed_size(MAX_TEXT)).map_err(|_| "The PDF cannot be parsed within the form-loading limits.")?;
         if document.is_encrypted() || document.encryption_state.is_some() { return Err("Encrypted PDFs cannot be filled in this build.".into()); }

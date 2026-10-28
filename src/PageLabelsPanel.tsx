@@ -12,6 +12,7 @@ const STYLES: { value: PageLabelStyle | 'none'; text: string }[] = [
   { value: 'alpha_upper', text: 'Letters uppercase (A, B, C)' },
   { value: 'none', text: 'No number (prefix only)' },
 ];
+const MAX_PREFIX_CHARS = 255;
 const shown = (label: string) => label.length === 0 ? '(blank)' : label;
 export const describeRange = (range: PageLabelRange) => {
   const pages = range.start_page === range.end_page ? `Page ${range.start_page + 1}` : `Pages ${range.start_page + 1} to ${range.end_page + 1}`;
@@ -21,7 +22,7 @@ export const describeRange = (range: PageLabelRange) => {
 
 type Form = { start: string; style: PageLabelStyle | 'none'; prefix: string; first: string };
 
-export default function PageLabelsPanel({ document, page = 0, close, onDocument, onChanged }: { document: DocumentInfo; page?: number; close: () => void; onDocument?: (info: DocumentInfo) => void; onChanged?: () => void }) {
+export default function PageLabelsPanel({ document, page = 0, close, onDocument, onChanged, onPending }: { document: DocumentInfo; page?: number; close: () => void; onDocument?: (info: DocumentInfo) => void; onChanged?: () => void; onPending?: (pending: boolean) => void }) {
   const [edit, setEdit] = useState<PageLabelEditResult | null>(null);
   const [error, setError] = useState('');
   const [status, setStatus] = useState('');
@@ -29,27 +30,37 @@ export default function PageLabelsPanel({ document, page = 0, close, onDocument,
   const [form, setForm] = useState<Form>({ start: String(page + 1), style: 'decimal', prefix: '', first: '1' });
   const working = useRef(false);
   const mounted = useRef(true);
+  const refocusAfterDelete = useRef(false);
+  const rangeList = useRef<HTMLUListElement | null>(null);
+  const startInput = useRef<HTMLInputElement | null>(null);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
 
   useEffect(() => {
     let disposed = false;
     editPageLabels(document.id, document.revision, null).then(result => {
       if (disposed) return;
-      setEdit(result); setError(result.view.editable ? '' : result.view.reason ?? 'These page labels cannot be edited.');
+      setEdit(result); onPending?.(result.view.changed); setError(result.view.editable ? '' : result.view.reason ?? 'These page labels cannot be edited.');
     }).catch(reason => { if (!disposed) setError(String(reason)); });
     return () => { disposed = true; };
   }, [document.id, document.revision]);
 
-  const run = useCallback(async (op: PageLabelOp, message: string) => {
+  const run = useCallback(async (op: PageLabelOp, message: string, refocus = false) => {
     if (!edit || working.current) return;
     working.current = true; setBusy(true); setStatus(''); setError('');
     try {
       const result = await editPageLabels(document.id, document.revision, { version: edit.view.version, op });
       if (!mounted.current) return;
-      setEdit(result); onDocument?.(result.document); onChanged?.(); setStatus(message);
+      if (refocus) refocusAfterDelete.current = true;
+      setEdit(result); onPending?.(result.view.changed); onDocument?.(result.document); onChanged?.(); setStatus(message);
     } catch (reason) { if (mounted.current) setError(String(reason)); }
     finally { working.current = false; if (mounted.current) setBusy(false); }
-  }, [edit, document.id, document.revision, onDocument, onChanged]);
+  }, [edit, document.id, document.revision, onDocument, onChanged, onPending]);
+
+  useEffect(() => {
+    if (!refocusAfterDelete.current) return;
+    refocusAfterDelete.current = false;
+    (rangeList.current?.querySelector<HTMLButtonElement>('button:not(:disabled)') ?? startInput.current)?.focus();
+  }, [edit]);
 
   const pages = document.pages.length;
   const submit = (event: FormEvent) => {
@@ -75,17 +86,17 @@ export default function PageLabelsPanel({ document, page = 0, close, onDocument,
     {editable && <>
       <p className={e.note} role="note">Label changes stay in this open document until you save a copy. They are not part of recovery points, and the original file is never changed. Navigation still uses the physical page numbers.</p>
       {!ranges.length && <p>This document has no page labels. Pages are labelled 1, 2, 3 and so on.</p>}
-      <ul className={e.ranges} aria-label="Page label ranges">{ranges.map(range => <li key={range.start_page}>
+      <ul ref={rangeList} className={e.ranges} aria-label="Page label ranges">{ranges.map(range => <li key={range.start_page}>
         <p>{describeRange(range)}</p>
         <div className={e.rowActions}>
           <button type="button" disabled={busy} aria-label={`Edit the range starting at page ${range.start_page + 1}`} onClick={() => load(range)}>Edit</button>
-          <button type="button" disabled={busy} aria-label={`Delete the range starting at page ${range.start_page + 1}`} onClick={() => void run({ kind: 'delete', start_page: range.start_page }, range.start_page === 0 ? 'Reset the first pages to plain numbers.' : `Removed the range that started at page ${range.start_page + 1}.`)}>Delete</button>
+          <button type="button" disabled={busy} aria-label={`Delete the range starting at page ${range.start_page + 1}`} onClick={() => void run({ kind: 'delete', start_page: range.start_page }, range.start_page === 0 ? 'Reset the first pages to plain numbers.' : `Removed the range that started at page ${range.start_page + 1}.`, true)}>Delete</button>
         </div>
       </li>)}</ul>
       <form className={e.form} aria-label="Label pages" onSubmit={submit}>
-        <label>Start at page<input type="number" min={1} max={pages} value={form.start} onChange={event => setForm({ ...form, start: event.target.value })} /></label>
+        <label>Start at page<input ref={startInput} type="number" min={1} max={pages} value={form.start} onChange={event => setForm({ ...form, start: event.target.value })} /></label>
         <label>Numbering<select value={form.style} onChange={event => setForm({ ...form, style: event.target.value as Form['style'] })}>{STYLES.map(style => <option key={style.value} value={style.value}>{style.text}</option>)}</select></label>
-        <label>Prefix (optional)<input type="text" value={form.prefix} onChange={event => setForm({ ...form, prefix: event.target.value })} /></label>
+        <label>Prefix (optional)<input type="text" maxLength={MAX_PREFIX_CHARS} value={form.prefix} onChange={event => setForm({ ...form, prefix: event.target.value })} /></label>
         <label>First number<input type="number" min={1} disabled={form.style === 'none'} value={form.first} onChange={event => setForm({ ...form, first: event.target.value })} /></label>
         <p className={e.note}>The labels apply from this page until the next range starts.</p>
         <div className={s.actions}><button type="submit" disabled={busy}>{replacing ? 'Replace range' : 'Add range'}</button></div>

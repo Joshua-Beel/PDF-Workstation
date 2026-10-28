@@ -157,6 +157,11 @@ impl EditSession {
     pub fn dirty(&self) -> bool { self.plan != self.saved }
     /// Unsaved page edits, bookmark edits or page-label edits. The last two are not part of the page plan or of recovery points.
     pub fn unsaved(&self) -> bool { self.dirty() || self.outline.changed() || self.labels.changed() }
+    pub fn overlay_pending(&self) -> bool { self.outline.changed() || self.labels.changed() }
+    /// Copies built from the source bytes cannot carry bookmark or page-label overlay edits, so they refuse while any are pending.
+    pub fn overlay_guard(&self) -> Result<(), String> {
+        if self.overlay_pending() { Err("Save a copy with your bookmark and page-label edits first, or discard them.".into()) } else { Ok(()) }
+    }
     pub fn discard_outline_and_labels(&mut self) { self.outline.discard(); self.labels.discard(); }
     fn load_labels(&mut self) {
         if self.labels.loaded() { return; }

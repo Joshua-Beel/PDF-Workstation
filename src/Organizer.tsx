@@ -36,7 +36,7 @@ function Thumbnail({ document, index }: { document: DocumentInfo; index: number 
   return <div ref={element} className={s.thumbnail} style={{ aspectRatio: `${size.width}/${size.height}` }}>{url ? <img src={url} alt={`Page ${index + 1} preview`} draggable={false} /> : <span>{error ? 'Preview unavailable' : 'Loading…'}</span>}</div>;
 }
 
-export default function Organizer({ document, currentPage = 0, pageLabels = null, busy, edit, save, split, crop, resetCrop = async () => {}, insert = () => {}, replace = () => {}, close }: { document: DocumentInfo; currentPage?: number; pageLabels?: DocumentPageLabels | null; busy: boolean; edit: (action: PageEdit) => Promise<boolean>; save: (pages?: number[]) => Promise<void>; split: (pagesPerFile: number) => Promise<SplitOutput | null>; crop: (target: { id: number; revision: number; pages: number[] }, insets: CropInsets) => Promise<void>; resetCrop?: (target: { id: number; revision: number; pages: number[] }) => Promise<void>; insert?: () => void; replace?: (pages: number[]) => void; close: () => void }) {
+export default function Organizer({ document, currentPage = 0, pageLabels = null, labelEditsPending = false, busy, edit, save, split, crop, resetCrop = async () => {}, insert = () => {}, replace = () => {}, close }: { document: DocumentInfo; currentPage?: number; pageLabels?: DocumentPageLabels | null; labelEditsPending?: boolean; busy: boolean; edit: (action: PageEdit) => Promise<boolean>; save: (pages?: number[]) => Promise<void>; split: (pagesPerFile: number) => Promise<SplitOutput | null>; crop: (target: { id: number; revision: number; pages: number[] }, insets: CropInsets) => Promise<void>; resetCrop?: (target: { id: number; revision: number; pages: number[] }) => Promise<void>; insert?: () => void; replace?: (pages: number[]) => void; close: () => void }) {
   const [selected, setSelected] = useState<number[]>(() => [clampPage(currentPage, document.pages.length)]);
   const [range, setRange] = useState(() => String(clampPage(currentPage, document.pages.length) + 1));
   const [destination, setDestination] = useState('');
@@ -57,6 +57,7 @@ export default function Organizer({ document, currentPage = 0, pageLabels = null
     if (selected.length > 0 && !bounded.length) { setSelected([fallback]); setRange(String(fallback + 1)); }
     else if (bounded.length !== selected.length) setSelected(bounded);
   }, [document.pages.length, selected]);
+  const labelHold = labelEditsPending ? 'Unavailable while page-label edits are pending. Save a copy or discard the label edits first.' : undefined;
   const modalOpen = confirmDelete || splitOpen || cropTarget !== null;
   useLayoutEffect(() => {
     if (modalOpen && !modalWasOpen.current) modalReturnFocus.current = lastWorkspaceFocus.current;
@@ -109,13 +110,13 @@ export default function Organizer({ document, currentPage = 0, pageLabels = null
       <span className={s.separator} />
       <button aria-label="Rotate selected pages counterclockwise" disabled={busy || !count} onClick={() => void edit({ kind: 'rotate', pages: selected, clockwise: false })}><RotateCcw size={17} /></button>
       <button aria-label="Rotate selected pages clockwise" disabled={busy || !count} onClick={() => void edit({ kind: 'rotate', pages: selected, clockwise: true })}><RotateCw size={17} /></button>
-      <button disabled={busy || !count || count === document.pages.length} onClick={() => setConfirmDelete(true)}><Trash2 size={16} /> Delete</button>
+      <button title={labelHold} disabled={busy || labelEditsPending || !count || count === document.pages.length} onClick={() => setConfirmDelete(true)}><Trash2 size={16} /> Delete</button>
       <button disabled={busy || !count} onClick={() => void save(selected)}><ArrowDownToLine size={16} /> Extract</button>
       <span className={s.separator} />
-      <button aria-label="Move selected page earlier" disabled={busy || count !== 1 || selected[0] === 0} onClick={() => { const to = selected[0] - 1; void edit({ kind: 'move', from: selected[0], to }).then(ok => { if (ok) setSelected([to]); }); }}><ArrowLeft size={17} /></button>
-      <button aria-label="Move selected page later" disabled={busy || count !== 1 || selected[0] === document.pages.length - 1} onClick={() => { const to = selected[0] + 1; void edit({ kind: 'move', from: selected[0], to }).then(ok => { if (ok) setSelected([to]); }); }}><ArrowRight size={17} /></button>
-      <label>Move to page <input aria-label="Destination page position" inputMode="numeric" placeholder={`1-${document.pages.length}`} value={destination} disabled={busy || count !== 1} onChange={event => setDestination(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void moveTo(); } }} /></label>
-      <button disabled={busy || count !== 1} onClick={() => void moveTo()}>Move</button>
+      <button aria-label="Move selected page earlier" title={labelHold} disabled={busy || labelEditsPending || count !== 1 || selected[0] === 0} onClick={() => { const to = selected[0] - 1; void edit({ kind: 'move', from: selected[0], to }).then(ok => { if (ok) setSelected([to]); }); }}><ArrowLeft size={17} /></button>
+      <button aria-label="Move selected page later" title={labelHold} disabled={busy || labelEditsPending || count !== 1 || selected[0] === document.pages.length - 1} onClick={() => { const to = selected[0] + 1; void edit({ kind: 'move', from: selected[0], to }).then(ok => { if (ok) setSelected([to]); }); }}><ArrowRight size={17} /></button>
+      <label>Move to page <input aria-label="Destination page position" inputMode="numeric" placeholder={`1-${document.pages.length}`} value={destination} title={labelHold} disabled={busy || labelEditsPending || count !== 1} onChange={event => setDestination(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void moveTo(); } }} /></label>
+      <button title={labelHold} disabled={busy || labelEditsPending || count !== 1} onClick={() => void moveTo()}>Move</button>
       <button aria-label="Undo page edit" disabled={busy || !document.can_undo} onClick={() => void change({ kind: 'undo' })}><Undo2 size={17} /></button>
       <button aria-label="Redo page edit" disabled={busy || !document.can_redo} onClick={() => void change({ kind: 'redo' })}><Redo2 size={17} /></button>
       <button disabled={busy} onClick={insert}><Files size={16} /> Insert pages</button>

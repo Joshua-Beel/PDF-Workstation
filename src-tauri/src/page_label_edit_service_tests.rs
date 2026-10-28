@@ -241,3 +241,65 @@ fn stale_versions_stale_revisions_and_failed_edits_change_nothing() {
     let undone = edit(&service, &info, first.view.version, LabelOp::Undo).unwrap();
     assert!(!undone.view.changed && !undone.document.dirty, "undoing every label edit leaves the document clean");
 }
+
+fn with_pending_label(service: &PdfService, folder: &Path, name: &str) -> DocumentInfo {
+    let info = plain(service, folder, name);
+    let start = view(service, &info);
+    edit(service, &info, start.view.version, set(0, Some(Style::RomanLower), "", 1)).unwrap();
+    info
+}
+const OVERLAY_REFUSAL: &str = "Save a copy with your bookmark and page-label edits first, or discard them.";
+fn rect() -> Vec<crate::raster_redaction::RasterRedactionRect> { vec![crate::raster_redaction::RasterRedactionRect { x: 0.1, y: 0.1, width: 0.2, height: 0.2 }] }
+
+#[test]
+fn form_fill_refuses_while_label_edits_are_pending() {
+    let service = service(); let folder = tempfile::tempdir().unwrap();
+    let info = with_pending_label(&service, folder.path(), "form.pdf");
+    let error = direct(&service, |reply| Request::CheckFormCopy(info.id, info.revision, Vec::new(), reply)).unwrap_err();
+    assert_eq!(error, OVERLAY_REFUSAL);
+    let error = direct(&service, |reply| Request::FillFormCopy(info.id, info.revision, Vec::new(), folder.path().join("form-copy.pdf"), reply)).err().unwrap();
+    assert_eq!(error, OVERLAY_REFUSAL);
+}
+
+#[test]
+fn redaction_refuses_while_label_edits_are_pending() {
+    let service = service(); let folder = tempfile::tempdir().unwrap();
+    let info = with_pending_label(&service, folder.path(), "redact.pdf");
+    let error = direct(&service, |reply| Request::PreflightRasterRedaction(info.id, info.revision, 0, rect(), reply)).err().unwrap();
+    assert_eq!(error, OVERLAY_REFUSAL);
+    let target = folder.path().join("redacted.pdf");
+    let error = direct(&service, |reply| Request::RasterRedact(info.id, info.revision, 0, rect(), target.clone(), reply)).err().unwrap();
+    assert_eq!(error, OVERLAY_REFUSAL);
+    assert!(!target.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn searchable_ocr_and_its_large_document_start_refuse_while_label_edits_are_pending() {
+    let service = service(); let folder = tempfile::tempdir().unwrap();
+    let info = with_pending_label(&service, folder.path(), "ocr.pdf");
+    let error = direct(&service, |reply| Request::PreflightSearchableOcr(info.id, info.revision, reply)).err().unwrap();
+    assert_eq!(error, OVERLAY_REFUSAL);
+    let error = direct(&service, |reply| Request::OcrJobSource(info.id, info.revision, reply)).err().unwrap();
+    assert_eq!(error, OVERLAY_REFUSAL);
+}
+
+#[cfg(windows)]
+#[test]
+fn image_and_text_replacement_refuse_while_label_edits_are_pending() {
+    let service = service(); let folder = tempfile::tempdir().unwrap();
+    let info = with_pending_label(&service, folder.path(), "replace.pdf");
+    let error = direct(&service, |reply| Request::InspectImageReplacement(info.id, info.revision, 0, reply)).err().unwrap();
+    assert_eq!(error, OVERLAY_REFUSAL);
+    let error = direct(&service, |reply| Request::InspectTextReplacement(info.id, info.revision, 0, reply)).err().unwrap();
+    assert_eq!(error, OVERLAY_REFUSAL);
+}
+
+#[test]
+fn discarding_the_overlay_edits_lifts_the_refusal() {
+    let service = service(); let folder = tempfile::tempdir().unwrap();
+    let info = with_pending_label(&service, folder.path(), "lifted.pdf");
+    direct(&service, |reply| Request::DiscardRecovery(info.id, info.revision, reply)).unwrap();
+    let outcome = direct(&service, |reply| Request::PreflightRasterRedaction(info.id, info.revision, 0, rect(), reply));
+    assert!(outcome.is_ok(), "{outcome:?}");
+}

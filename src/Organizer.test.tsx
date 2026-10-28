@@ -175,3 +175,19 @@ it('keeps an intentionally empty selection after Ctrl+click or a successful dele
   expect(ui.root.findAllByType('button').find(button => button.children.includes(' Crop'))!.props.disabled).toBe(true);
   act(() => ui.unmount());
 });
+
+it('disables move and delete with an explanation while page-label edits are pending', () => {
+  let ui!: ReactTestRenderer;
+  act(() => { ui = create(<Organizer document={document} labelEditsPending busy={false} edit={vi.fn()} save={vi.fn()} split={vi.fn()} crop={vi.fn()} close={vi.fn()} />); });
+  for (const label of ['Move selected page later', 'Destination page position']) {
+    const control = ui.root.findByProps({ 'aria-label': label });
+    expect(control.props.disabled).toBe(true);
+    expect(control.props.title).toContain('page-label edits are pending');
+  }
+  const textOf = (node: any): string => typeof node === 'string' ? node : node.children.map(textOf).join('');
+  const named = (name: string) => ui.root.findAll(item => item.type === 'button' && textOf(item).trim() === name);
+  expect(named('Delete')[0].props.disabled).toBe(true);
+  expect(named('Move')[0].props.disabled).toBe(true);
+  expect(ui.root.findByProps({ 'aria-label': 'Rotate selected pages clockwise' }).props.disabled).toBe(false);
+  act(() => ui.unmount());
+});

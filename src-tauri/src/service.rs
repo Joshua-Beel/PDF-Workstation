@@ -642,6 +642,7 @@ impl PdfService {
                             if session.revision != revision { return Err("Document changed. Start searchable OCR again.".into()); }
                             if !document.is_unprotected() { return Err("Searchable OCR of encrypted or restricted PDFs is not supported in this build.".into()); }
                             session.page_image_export_guard()?;
+                            session.overlay_guard()?;
                             text_extraction_permission(session, &**document)?;
                             let count = session.plan.len();
                             if count == 0 || count > crate::searchable_pdf_stream::MAX_STREAM_PAGES as usize { return Err("Searchable OCR supports 1 to 10,000 current pages.".into()); }
@@ -1812,6 +1813,7 @@ fn checked_raster_redaction_request(
         return Err("Redaction of encrypted or restricted PDFs is not supported in this build.".into());
     }
     session.page_image_export_guard()?;
+    session.overlay_guard()?;
     if session.plan.is_empty() || session.plan.len() > 4_096 { return Err("Raster redaction supports 1 to 4,096 current pages.".into()); }
     if usize::from(selected_page) >= session.plan.len() { return Err("Redaction page is out of range.".into()); }
     let mut pages = Vec::with_capacity(session.plan.len());
@@ -2020,6 +2022,7 @@ fn checked_searchable_ocr_request(session: &EditSession, document: &EngineDoc<'_
     if session.revision != revision { return Err("Document changed. Start searchable OCR again.".into()); }
     if !document.is_unprotected() { return Err("Searchable OCR of encrypted or restricted PDFs is not supported in this build.".into()); }
     session.page_image_export_guard()?;
+    session.overlay_guard()?;
     text_extraction_permission(session, document)?;
     if session.plan.is_empty() || session.plan.len() > crate::searchable_ocr_job::MAX_DOCUMENT_PAGES { return Err("Searchable OCR supports 1 to 32 current pages.".into()); }
     let mut pixels = 0_u64;
@@ -2037,6 +2040,7 @@ fn checked_image_replacement(session: &EditSession, document: &EngineDoc<'_>, re
     if session.revision != revision { return Err("Document changed. Inspect the image again.".into()); }
     if !document.is_unprotected() { return Err("Image replacement does not support encrypted or restricted PDFs.".into()); }
     session.page_image_export_guard()?;
+    session.overlay_guard()?;
     if session.plan.len() != document.page_count() || session.plan.iter().enumerate().any(|(index, spec)| spec.source != index || spec.turns != 0 || spec.crop.is_some() || !spec.notes.is_empty()) {
         return Err("Image replacement requires the original unedited page order, geometry, and annotations.".into());
     }
@@ -2061,7 +2065,7 @@ fn text_replacement_geometry(document:&EngineDoc<'_>,id:u64,revision:u64,page:u1
 
 #[cfg(windows)]
 pub(crate) fn checked_text_replacement(session:&EditSession,document:&EngineDoc<'_>,id:u64,revision:u64,page:u16)->Result<TextReplacementInspection,String>{
-    if session.revision!=revision{return Err("Document changed. Inspect the text again.".into())}if !document.is_unprotected(){return Err("Text replacement does not support encrypted or restricted PDFs.".into())}text_extraction_permission(session,document)?;session.page_image_export_guard()?;
+    if session.revision!=revision{return Err("Document changed. Inspect the text again.".into())}if !document.is_unprotected(){return Err("Text replacement does not support encrypted or restricted PDFs.".into())}text_extraction_permission(session,document)?;session.page_image_export_guard()?;session.overlay_guard()?;
     if session.plan.len()!=document.page_count()||session.plan.iter().enumerate().any(|(i,s)|s.source!=i||s.turns!=0||s.crop.is_some()||!s.notes.is_empty()){return Err("Text replacement requires the original unedited page order, geometry, and annotations.".into())}if usize::from(page)>=session.plan.len(){return Err("Text replacement page is out of range.".into())}let target=crate::text_edit::inspect_text_run(&session.source,u32::from(page)+1)?;text_replacement_geometry(document,id,revision,page,target)
 }
 

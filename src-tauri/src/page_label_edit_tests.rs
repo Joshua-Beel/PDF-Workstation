@@ -276,3 +276,14 @@ fn view_reports_each_range_with_its_first_and_last_label() {
     let summary: Vec<_> = view.ranges.iter().map(|range| (range.start_page, range.end_page, range.first_label.as_str(), range.last_label.as_str())).collect();
     assert_eq!(summary, [(0, 2, "i", "iii"), (3, 5, "A-10", "A-12")]);
 }
+
+#[test]
+fn writing_refuses_an_existing_prefix_that_outgrows_the_limit_once_re_encoded() {
+    let mut document = sample();
+    let near_limit = Range { start: 0, prefix: "\u{e9}".repeat(500), style: Some(Style::Decimal), first: 1 };
+    assert!(encode_prefix(&near_limit.prefix).len() > crate::page_labels::MAX_PREFIX_BYTES && near_limit.prefix.chars().count() <= 512);
+    let error = write(&mut document, &[near_limit]).unwrap_err();
+    assert!(error.contains("once written") && error.contains("512"), "{error}");
+    assert!(document.catalog().unwrap().get(b"PageLabels").is_err(), "nothing is written on refusal");
+    write(&mut document, &[Range { start: 0, prefix: "\u{e9}".repeat(250), style: Some(Style::Decimal), first: 1 }]).unwrap();
+}

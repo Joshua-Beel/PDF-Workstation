@@ -117,3 +117,22 @@ it('reports a failed edit and keeps the earlier ranges', async () => {
   expect(ui.root.findByProps({ role: 'alert' }).children.join('')).toContain('out of range');
   expect(text(ui)).toContain('Pages 1 to 8: labels 1 to 8');
 });
+
+it('limits the prefix field to what the backend accepts and reports pending state', async () => {
+  const onPending = vi.fn();
+  const ui = await mount(result([], { changed: true }), { onPending });
+  expect(onPending).toHaveBeenCalledWith(true);
+  const prefix = ui.root.findByType('form').findAll(item => item.type === 'input' && item.props.type === 'text')[0];
+  expect(prefix.props.maxLength).toBe(255);
+});
+
+it('returns focus into the panel after deleting a range', async () => {
+  const focused: string[] = [];
+  const nodeMock = (name: string) => ({ focus: () => { focused.push(name); }, querySelector: () => ({ focus: () => { focused.push('first remaining button'); } }) });
+  vi.mocked(editPageLabels).mockResolvedValueOnce(result([range(0, 3), range(4, 7)], { changed: true }));
+  let ui!: ReactTestRenderer;
+  await act(async () => { ui = create(<PageLabelsPanel document={document()} page={2} close={() => {}} />, { createNodeMock: element => nodeMock(String(element.type)) }); });
+  vi.mocked(editPageLabels).mockResolvedValueOnce(result([range(0, 7)], { version: 1, changed: true }));
+  await act(async () => { button(ui, 'Delete the range starting at page 5').props.onClick(); });
+  expect(focused).toEqual(['first remaining button']);
+});

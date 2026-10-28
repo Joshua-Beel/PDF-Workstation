@@ -142,7 +142,11 @@ pub fn write(document: &mut Document, ranges: &[Range]) -> Result<(), String> {
     for range in ranges {
         let mut value = Dictionary::new();
         if let Some(style) = range.style { value.set("S", Object::Name(style_name(style).as_bytes().to_vec())); }
-        if !range.prefix.is_empty() { value.set("P", Object::string_literal(encode_prefix(&range.prefix))); }
+        if !range.prefix.is_empty() {
+            let encoded = encode_prefix(&range.prefix);
+            if encoded.len() > MAX_PREFIX_BYTES { return Err(format!("The page-label prefix starting \"{}\" would be {} bytes once written, over the {MAX_PREFIX_BYTES}-byte limit. Shorten it.", range.prefix.chars().take(20).collect::<String>(), encoded.len())); }
+            value.set("P", Object::string_literal(encoded));
+        }
         if range.style.is_some() && range.first != 1 { value.set("St", Object::Integer(i64::try_from(range.first).map_err(|_| "A page-label start number is too large.")?)); }
         nums.push(Object::Integer(i64::try_from(range.start).map_err(|_| "A page-label start page is too large.")?));
         nums.push(Object::Dictionary(value));
