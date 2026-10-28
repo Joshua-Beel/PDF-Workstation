@@ -506,7 +506,10 @@ fn a_refused_encrypted_file_keeps_its_copy_permission() {
 }
 
 /// A one-page file encrypted with the empty user password and owner password "owner" (RC4 128, revision 3).
-fn encrypted_page(permissions: lopdf::Permissions) -> Vec<u8> {
+pub(crate) fn encrypted_page(permissions: lopdf::Permissions) -> Vec<u8> { encrypted_page_with("", permissions) }
+
+/// `encrypted_page` with the given user password.
+fn encrypted_page_with(user_password: &str, permissions: lopdf::Permissions) -> Vec<u8> {
     use lopdf::{dictionary, EncryptionState, EncryptionVersion};
     let mut document = Document::with_version("1.7");
     let pages = document.new_object_id();
@@ -515,10 +518,29 @@ fn encrypted_page(permissions: lopdf::Permissions) -> Vec<u8> {
     let root = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
     document.trailer.set("Root", root);
     document.trailer.set("ID", vec![Object::string_literal("pdfium-perm-id"), Object::string_literal("pdfium-perm-id")]);
-    let state = EncryptionState::try_from(EncryptionVersion::V2 { document: &document, owner_password: "owner", user_password: "", key_length: 128, permissions }).unwrap();
+    let state = EncryptionState::try_from(EncryptionVersion::V2 { document: &document, owner_password: "owner", user_password, key_length: 128, permissions }).unwrap();
     document.encrypt(&state).unwrap();
     let mut bytes = Vec::new();
     document.save_to(&mut bytes).unwrap();
+    bytes
+}
+
+/// The reverse disagreement. lopdf writes the trailer as a cross-reference stream; its `/Encrypt` key is renamed
+/// (same length) so PDFium's trailer names no security handler, and the encrypted trailer survives only in a comment
+/// after a `startxref` past the end. lopdf's rebuild takes the newest `trailer` text it can parse (the comment) and
+/// decrypts; PDFium skips comments and sees no security handler.
+fn commented_encrypt_trailer(permissions: lopdf::Permissions) -> Vec<u8> {
+    let mut bytes = encrypted_page(permissions);
+    let reference = |bytes: &[u8], key: &[u8]| {
+        let at = bytes.windows(key.len()).position(|window| window == key).unwrap();
+        let end = at + key.len() + bytes[at + key.len()..].windows(2).position(|window| window == b" R").unwrap() + 2;
+        (at, String::from_utf8(bytes[at..end].to_vec()).unwrap())
+    };
+    let (encrypt_at, encrypt) = reference(&bytes, b"/Encrypt");
+    let (_, root) = reference(&bytes, b"/Root");
+    bytes[encrypt_at + 7] = b'q';
+    let past_end = bytes.len() + 4096;
+    bytes.extend_from_slice(format!("\n%trailer <<{root}{encrypt}/ID[(pdfium-perm-id)(pdfium-perm-id)]>>\nstartxref\n{past_end}\n%%EOF\n").as_bytes());
     bytes
 }
 
@@ -538,7 +560,7 @@ fn trailer_disagreement(permissions: lopdf::Permissions) -> Vec<u8> {
 /// binds PDFium only once per process.
 #[test]
 fn text_extraction_needs_lopdf_and_pdfium_to_agree() {
-    use crate::pdf_engine::{EngineDocument, InProcessEngine, PdfEngine};
+    use crate::pdf_engine::{EngineDocument, PdfEngine};
     const CHILD: &str = "SM3_PDFIUM_PERMISSION_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -548,7 +570,7 @@ fn text_extraction_needs_lopdf_and_pdfium_to_agree() {
         return;
     }
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let engine = InProcessEngine::bind(root.join("resources/pdfium/bin/pdfium.dll")).unwrap();
+    let engine = crate::pdf_helper::SelectedEngine::bind(root.join("resources/pdfium/bin/pdfium.dll")).unwrap();
     let denied_message = Err::<(), String>("This PDF does not allow text and graphics extraction.".into());
     let gate = |bytes: &[u8], password: Option<&str>| {
         let document = engine.load_from_vec(bytes.to_vec(), password).unwrap();
@@ -569,6 +591,25 @@ fn text_extraction_needs_lopdf_and_pdfium_to_agree() {
     assert_eq!(gate(&disagreeing, None), (Ok(()), false, false, denied_message.clone()), "PDFium decrypts and denies, so the gate denies");
     let disagreeing_allowed = trailer_disagreement(lopdf::Permissions::all());
     assert_eq!(gate(&disagreeing_allowed, None), (Ok(()), false, true, Ok(())), "both allow although they disagree on encryption");
+
+    // Owner password on a copy-denied file with a user password: both readers lift the restriction; the user
+    // password keeps it in both.
+    let protected = encrypted_page_with("user", lopdf::Permissions::all() - lopdf::Permissions::COPYABLE);
+    assert_eq!(gate(&protected, Some("owner")), (Ok(()), false, true, Ok(())), "owner password: both allow");
+    assert_eq!(gate(&protected, Some("user")), (denied_message.clone(), false, false, denied_message.clone()), "user password: both deny");
+    // With an empty user password lopdf has already decrypted and dropped `/Encrypt`, so its owner check fails and it
+    // keeps denying while PDFium allows; the gate denies. The app never asks for a password on such a file (PDFium
+    // opens it without one), so this path is reached only here.
+    assert_eq!(gate(&denied, Some("owner")), (denied_message.clone(), false, true, denied_message.clone()), "empty user password, owner: lopdf still denies");
+
+    // PDFium sees no security handler and allows; lopdf decrypts and denies. Text replacement, which checked only
+    // PDFium's protection, now refuses too (its reply carries the run's text).
+    let reverse = commented_encrypt_trailer(lopdf::Permissions::all() - lopdf::Permissions::COPYABLE);
+    assert!(crate::pdf_load::load(&reverse).unwrap().encryption_state.is_some(), "lopdf decrypts");
+    assert_eq!(gate(&reverse, None), (denied_message.clone(), true, true, denied_message.clone()), "lopdf denies, so the gate denies");
+    let document = engine.load_from_vec(reverse.clone(), None).unwrap();
+    let session = crate::editor::EditSession::opened(reverse.clone(), crate::pdf_load::load_for_open(&reverse).unwrap(), document.page_count(), None);
+    assert_eq!(crate::service::checked_text_replacement(&session, &document, 1, 0, 0).map(|_| ()), denied_message.clone(), "text replacement is gated");
     println!("pdfium-permission-ok");
 }
 

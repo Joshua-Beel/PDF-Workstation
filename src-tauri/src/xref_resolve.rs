@@ -420,4 +420,4 @@ pub(crate) fn reconcile_with_reason(document: &mut Document, source: &[u8]) -> R
 
 #[cfg(test)]
 #[path = "xref_resolve_tests.rs"]
-mod tests;
+pub(crate) mod tests;

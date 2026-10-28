@@ -753,6 +753,12 @@ fn remote_engine_matches_in_process_engine_on_the_fixtures() {
     let invalid = std::fs::read(root().join("../test-corpus/invalid.pdf")).unwrap();
     let (left, right) = (local.load_from_vec(invalid.clone(), None).map(|_| ()).unwrap_err(), remote.load_from_vec(invalid, None).map(|_| ()).unwrap_err());
     same("invalid.pdf load error".into(), format!("{left} {}", left.is_password()), format!("{right} {}", right.is_password()));
+    for (allowed, permissions) in [(false, lopdf::Permissions::all() - lopdf::Permissions::COPYABLE), (true, lopdf::Permissions::all())] {
+        let bytes = crate::xref_resolve::tests::encrypted_page(permissions);
+        let (left, right) = (local.load_from_vec(bytes.clone(), None).unwrap(), remote.load_from_slice(&bytes, None).unwrap());
+        assert_eq!((left.is_unprotected(), left.text_extraction_allowed()), (false, allowed), "generated encrypted fixture, copy allowed: {allowed}");
+        same(format!("encrypted, copy allowed {allowed}, permission"), format!("{} {}", left.is_unprotected(), left.text_extraction_allowed()), format!("{} {}", right.is_unprotected(), right.text_extraction_allowed()));
+    }
     for path in files {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         let bytes = std::fs::read(&path).unwrap();

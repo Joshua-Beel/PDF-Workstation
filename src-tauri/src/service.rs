@@ -1157,6 +1157,7 @@ impl PdfService {
                                 CommentMutation::UpdateHighlight(id, contents) => session.proposed_highlight(None, Some(&id), contents.as_deref(), false)?,
                                 CommentMutation::DeleteHighlight(id) => session.proposed_highlight(None, Some(&id), None, true)?,
                                 CommentMutation::CreateTextHighlight(page, start, end, contents) => {
+                                    text_extraction_permission(session, &**document)?;
                                     let spec = session.plan.get(page as usize).ok_or("Page is out of range")?;
                                     let quads = document.text_geometry_with_source(PageTarget::Planned(spec), id, page, revision)?.highlight_bounds(start, end)?;
                                     session.proposed_text_highlight(page as usize, quads, contents.as_deref())?
@@ -1980,8 +1981,8 @@ fn text_replacement_geometry(document:&EngineDoc<'_>,id:u64,revision:u64,page:u1
 }
 
 #[cfg(windows)]
-fn checked_text_replacement(session:&EditSession,document:&EngineDoc<'_>,id:u64,revision:u64,page:u16)->Result<TextReplacementInspection,String>{
-    if session.revision!=revision{return Err("Document changed. Inspect the text again.".into())}if !document.is_unprotected(){return Err("Text replacement does not support encrypted or restricted PDFs.".into())}session.page_image_export_guard()?;
+pub(crate) fn checked_text_replacement(session:&EditSession,document:&EngineDoc<'_>,id:u64,revision:u64,page:u16)->Result<TextReplacementInspection,String>{
+    if session.revision!=revision{return Err("Document changed. Inspect the text again.".into())}if !document.is_unprotected(){return Err("Text replacement does not support encrypted or restricted PDFs.".into())}text_extraction_permission(session,document)?;session.page_image_export_guard()?;
     if session.plan.len()!=document.page_count()||session.plan.iter().enumerate().any(|(i,s)|s.source!=i||s.turns!=0||s.crop.is_some()||!s.notes.is_empty()){return Err("Text replacement requires the original unedited page order, geometry, and annotations.".into())}if usize::from(page)>=session.plan.len(){return Err("Text replacement page is out of range.".into())}let target=crate::text_edit::inspect_text_run(&session.source,u32::from(page)+1)?;text_replacement_geometry(document,id,revision,page,target)
 }
 
