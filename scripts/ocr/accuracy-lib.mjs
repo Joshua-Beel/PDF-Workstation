@@ -4,7 +4,7 @@ import { lstat, readFile, stat } from 'node:fs/promises';
 import { dirname, extname, isAbsolute, join, resolve, sep } from 'node:path';
 import { inflateSync } from 'node:zlib';
 
-export const OCR_ARGS = ['stdin', 'stdout', '--tessdata-dir', '<tessdata>', '-l', 'eng', '--oem', '1', '--psm', '6', '--dpi', '150', '--loglevel', 'ERROR'];
+export const OCR_ARGS = ['stdin', 'stdout', '--tessdata-dir', '<tessdata>', '-l', 'eng', '--oem', '1', '--psm', '3', '--dpi', '150', '--loglevel', 'ERROR'];
 export const OCR_DPI = 150;
 export const OCR_INPUT_LIMIT = 16 * 1024 * 1024;
 export const OCR_MAX_EDGE = 16384;
@@ -384,7 +384,9 @@ export async function runManifest(manifestPath, engine, hooks = {}) {
     const truth = await readFile(truthPath, 'utf8');
     const image = resampleToDpi(decodeImage(imagePath, await readFile(imagePath)), entry.sourceDpi);
     const started = Date.now();
-    const text = await (hooks.recognize ?? recognize)(engine, toP6(image));
+    const text = hooks.textDir
+      ? await readFile(resolveInside(hooks.textDir, `${entry.image.replace(/^.*[\\/]/, '').replace(/\.[^.]*$/, '')}.ocr.txt`), 'utf8')
+      : await (hooks.recognize ?? recognize)(engine, toP6(image));
     results.push({ id: entry.id, note: entry.note, sourceDpi: entry.sourceDpi, ocrWidth: image.width, ocrHeight: image.height, ms: Date.now() - started, ...scoreText(truth, text), text: hooks.keepText ? text : undefined });
   }
   return { scope: manifest.scope, results, total: aggregate(results) };

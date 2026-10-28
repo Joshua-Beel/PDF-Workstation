@@ -59,6 +59,9 @@ mod child_job;
 #[allow(dead_code)]
 mod ocr_process;
 #[cfg(windows)]
+#[allow(dead_code)]
+mod ocr_preprocess;
+#[cfg(windows)]
 #[cfg_attr(not(ocr_opt_in), allow(dead_code))]
 mod ocr;
 #[cfg(windows)]

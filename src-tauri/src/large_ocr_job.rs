@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::large_ocr_parts::{Opened, Output, PublishedPart};
+use crate::ocr_preprocess::{map_words_to_page, Skew};
 use crate::ocr_process::OcrCancellation;
 use crate::searchable_ocr::{map_words_to_display, parse_tesseract_tsv};
 use crate::searchable_pdf::SearchableWord;
@@ -86,8 +87,9 @@ pub(crate) trait PageSource: Send + Sync {
 }
 
 pub(crate) trait PageRecognizer: Send + Sync {
-    /// Recognises one P6 page and returns Tesseract TSV.
-    fn recognize_tsv(&self, p6: &[u8], cancellation: &OcrCancellation) -> Result<String, PageError>;
+    /// Recognises one P6 page: Tesseract TSV in the pixels of the image the
+    /// engine saw, and that image's rotation relative to the page.
+    fn recognize_tsv(&self, p6: &[u8], cancellation: &OcrCancellation) -> Result<(String, Skew), PageError>;
 }
 
 const REQUEST_RUN: u8 = 0;
@@ -581,9 +583,13 @@ fn process_page(page: u32, source: &dyn PageSource, recognizer: &dyn PageRecogni
     for _ in 0..MAX_ATTEMPTS {
         if cancellation.is_cancelled() { return WorkResult::Cancelled; }
         match recognizer.recognize_tsv(&raster.p6, cancellation) {
-            Ok(tsv) => {
-                let mapped = parse_tesseract_tsv(tsv.as_bytes(), raster.width, raster.height)
-                    .and_then(|parsed| map_words_to_display(&parsed, f64::from(raster.page_width), f64::from(raster.page_height)));
+            Ok((tsv, skew)) => {
+                let (recognized_width, recognized_height) = skew.recognition_size(raster.width, raster.height);
+                let mapped = parse_tesseract_tsv(tsv.as_bytes(), recognized_width, recognized_height)
+                    .and_then(|mut parsed| {
+                        map_words_to_page(&mut parsed, skew, raster.width, raster.height);
+                        map_words_to_display(&parsed, f64::from(raster.page_width), f64::from(raster.page_height))
+                    });
                 match mapped {
                     Ok(display) => {
                         words = Some(display.into_iter().map(|word| SearchableWord { x: word.x, y: word.y, width: word.width, height: word.height, text: word.text }).collect::<Vec<_>>());
@@ -714,7 +720,7 @@ pub(crate) mod tests {
     }
 
     impl PageRecognizer for FakeEngine {
-        fn recognize_tsv(&self, p6: &[u8], cancellation: &OcrCancellation) -> Result<String, PageError> {
+        fn recognize_tsv(&self, p6: &[u8], cancellation: &OcrCancellation) -> Result<(String, Skew), PageError> {
             let call = self.calls.fetch_add(1, Ordering::AcqRel) + 1;
             if self.broken { return Err(PageError::Page(PageIssue::EngineStopped, "the engine failed to start".into())); }
             let page = page_of(p6);
@@ -727,9 +733,9 @@ pub(crate) mod tests {
             match self.failures.iter().find(|(failing, _)| *failing == page).map(|(_, failure)| *failure) {
                 Some(Failure::Timeout) => Err(PageError::Page(PageIssue::TimedOut, "timed out".into())),
                 Some(Failure::Crash) => Err(PageError::Page(PageIssue::EngineStopped, "access violation".into())),
-                Some(Failure::Garbage) => Ok("not a tsv".into()),
+                Some(Failure::Garbage) => Ok(("not a tsv".into(), Skew::NONE)),
                 Some(Failure::FirstAttemptOnly) if attempt == 1 => Err(PageError::Page(PageIssue::TimedOut, "timed out".into())),
-                _ => Ok(tsv(page)),
+                _ => Ok((tsv(page), Skew::NONE)),
             }
         }
     }
@@ -1321,7 +1327,7 @@ pub(crate) mod tests {
 
     struct LetterEngine;
     impl PageRecognizer for LetterEngine {
-        fn recognize_tsv(&self, _p6: &[u8], _cancellation: &OcrCancellation) -> Result<String, PageError> {
+        fn recognize_tsv(&self, _p6: &[u8], _cancellation: &OcrCancellation) -> Result<(String, Skew), PageError> {
             let mut rows = vec![
                 "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext".to_string(),
                 "1\t1\t0\t0\t0\t0\t0\t0\t1275\t1650\t-1\t".into(),
@@ -1332,7 +1338,7 @@ pub(crate) mod tests {
                 rows.push(format!("4\t1\t1\t1\t{}\t0\t100\t{}\t1000\t30\t-1\t", line + 1, 100 + line * 34));
                 for word in 0..10 { rows.push(format!("5\t1\t1\t1\t{}\t{}\t{}\t{}\t90\t30\t90\tword{}", line + 1, word + 1, 100 + word * 100, 100 + line * 34, line * 10 + word)); }
             }
-            Ok(rows.join("\n"))
+            Ok((rows.join("\n"), Skew::NONE))
         }
     }
 

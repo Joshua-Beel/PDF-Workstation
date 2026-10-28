@@ -153,9 +153,12 @@ pub fn parse_tesseract_tsv(
                 "OCR TSV row {row_number} has an invalid word record"
             ));
         }
-        let text = expand_latin_ligatures(text);
+        // The engine sometimes leaves an ASCII space at the edge of a word's text
+        // (seen on real scans); words are already split, so edges are trimmed
+        // and a word that is only spaces is checked and then left out.
+        let text = expand_latin_ligatures(text.trim_matches(' '));
         let text = text.as_str();
-        if confidence < 0.0 || !is_supported_word_text(text) {
+        if confidence < 0.0 || (!text.is_empty() && !is_supported_word_text(text)) {
             return Err(format!(
                 "OCR TSV row {row_number} contains unsupported word text"
             ));
@@ -165,6 +168,9 @@ pub fn parse_tesseract_tsv(
         }
 
         let line_bounds = hierarchy.accept_word(block, paragraph, line, word, bounds, row_number)?;
+        if text.is_empty() {
+            continue;
+        }
 
         let position = (block, paragraph, line, word);
         if let Some(previous) = previous_position {
@@ -281,7 +287,27 @@ impl Bounds {
             && child_bottom <= bottom
     }
 
-    fn contains_within(self, child: Self, slack: u32) -> bool {
+    /// Real engine output places word boxes outside their line box: on ten
+    /// real scans by up to 17 px above, 12 px below, 138 px left and 38 px
+    /// right, because the line box is the text row, not the union of its
+    /// words. A word must still share at least one pixel row with its line
+    /// (it already has to lie inside the page raster).
+    fn overlaps_vertically(self, word: Self) -> bool {
+        let (Some(bottom), Some(word_bottom)) = (
+            self.top.checked_add(self.height),
+            word.top.checked_add(word.height),
+        ) else {
+            return false;
+        };
+        word.top < bottom && self.top < word_bottom
+    }
+
+    /// With automatic page segmentation (`--psm 3`) paragraph and line boxes
+    /// do not nest either: on real scans a line started 29 px left of its
+    /// paragraph, a paragraph was 14 px wider than its block and a line box
+    /// reached 43 px above its paragraph. A paragraph must still overlap its
+    /// block and a line its paragraph (and every box lies inside the page).
+    fn overlaps(self, child: Self) -> bool {
         let (Some(right), Some(bottom), Some(child_right), Some(child_bottom)) = (
             self.left.checked_add(self.width),
             self.top.checked_add(self.height),
@@ -290,20 +316,13 @@ impl Bounds {
         ) else {
             return false;
         };
-        child.left.saturating_add(slack) >= self.left
-            && child.top.saturating_add(slack) >= self.top
-            && child_right <= right.saturating_add(slack)
-            && child_bottom <= bottom.saturating_add(slack)
+        child.left < right && self.left < child_right && child.top < bottom && self.top < child_bottom
     }
 }
 
 /// Raster resolution the OCR page images are rendered at (matches `ocr.rs`).
+#[allow(dead_code)]
 pub(crate) const RASTER_DPI: u32 = 150;
-/// Rounding slack for parent/child TSV boxes: 3.84 pt at the raster DPI,
-/// 8 px at 150 DPI. It applies at three levels (paragraph in block, line in
-/// paragraph, word in line), so a word can sit up to three times this far
-/// outside its block while staying exactly inside the page.
-const CONTAINMENT_SLACK_PIXELS: u32 = (RASTER_DPI * 384).div_ceil(7200);
 
 #[derive(Default)]
 struct Hierarchy {
@@ -366,7 +385,7 @@ impl Hierarchy {
                 && self.last_paragraph.checked_add(1) == Some(paragraph)
                 && line == 0
                 && word == 0
-                && self.block.unwrap().1.contains_within(bounds, CONTAINMENT_SLACK_PIXELS) =>
+                && self.block.unwrap().1.overlaps(bounds) =>
             {
                 self.paragraph = Some((paragraph, bounds));
                 self.line = None;
@@ -380,7 +399,7 @@ impl Hierarchy {
                 && paragraph == self.last_paragraph
                 && self.last_line.checked_add(1) == Some(line)
                 && word == 0
-                && self.paragraph.unwrap().1.contains_within(bounds, CONTAINMENT_SLACK_PIXELS) =>
+                && self.paragraph.unwrap().1.overlaps(bounds) =>
             {
                 self.line = Some((line, bounds));
                 self.last_line = line;
@@ -407,7 +426,7 @@ impl Hierarchy {
             && paragraph == self.last_paragraph
             && line == self.last_line
             && self.last_word.checked_add(1) == Some(word)
-            && self.line.unwrap().1.contains_within(bounds, CONTAINMENT_SLACK_PIXELS);
+            && self.line.unwrap().1.overlaps_vertically(bounds);
         if !valid {
             return Err(format!(
                 "OCR TSV row {row} violates the required word hierarchy"
@@ -448,8 +467,8 @@ fn validate_word(word: &OcrWord, raster_width: u32, raster_height: u32) -> Resul
         .ok_or_else(|| "OCR line box overflows".to_string())?;
     if word.line_height == 0
         || line_bottom > raster_height
-        || word.top.saturating_add(CONTAINMENT_SLACK_PIXELS) < word.line_top
-        || bottom > line_bottom.saturating_add(CONTAINMENT_SLACK_PIXELS)
+        || word.top >= line_bottom
+        || bottom <= word.line_top
     {
         return Err("OCR word is outside its line band".to_string());
     }

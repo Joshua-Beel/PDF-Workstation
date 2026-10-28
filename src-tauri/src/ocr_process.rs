@@ -20,6 +20,7 @@ use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
 use crate::child_job::{
     self, ChildCommand, ChildSystemError, JobLimits, OutputBounds, TerminalReason, EXIT_CANCELLED,
 };
+use crate::ocr_preprocess::{preprocess_p6, PreprocessOptions, Skew};
 
 pub(crate) const OCR_INPUT_LIMIT: usize = 16 * 1024 * 1024;
 pub(crate) const OCR_STDOUT_LIMIT: usize = 1024 * 1024;
@@ -130,10 +131,13 @@ pub(crate) struct OcrExecutableIdentity {
     pub(crate) sha256: [u8; 32],
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(crate) struct OcrProcessOutput {
     pub(crate) text: String,
     pub(crate) peak_job_commit_bytes: usize,
+    /// The rotation applied to the recognition image; TSV boxes are in that
+    /// image and go back to page pixels with `ocr_preprocess::map_words_to_page`.
+    pub(crate) skew: Skew,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -297,24 +301,52 @@ impl OcrProcessRunner {
         )
     }
 
+    /// Text or TSV output with a chosen clean-up, for accuracy comparisons.
+    #[cfg(test)]
+    pub(crate) fn recognize_p6_with_preprocess(
+        &self,
+        input: &[u8],
+        preprocess: PreprocessOptions,
+        tsv: bool,
+    ) -> Result<OcrProcessOutput, OcrProcessError> {
+        let cancellation = OcrCancellation::default();
+        let operation = OcrOperation::try_begin(&cancellation)?;
+        let profile = if tsv { OcrOutputProfile::Tsv } else { OcrOutputProfile::Text };
+        let result = self.recognize_inner_admitted(input, RunOptions { preprocess, ..RunOptions::production() }, profile, &operation);
+        operation.finish(result)
+    }
+
     fn recognize_inner_admitted(
         &self,
         input: &[u8],
-        options: RunOptions<'_>,
+        mut options: RunOptions<'_>,
         output_profile: OcrOutputProfile,
         operation: &OcrOperation,
     ) -> Result<OcrProcessOutput, OcrProcessError> {
         let cancellation = &operation.cancellation;
         cancellation.ensure_runnable()?;
         validate_p6(input)?;
-        run_child(
+        let started = std::time::Instant::now();
+        // Clean-up is an improvement, not a requirement: if it cannot run (for
+        // example memory is short), the page is recognised as rendered.
+        let (recognition, skew) = match preprocess_p6(input, options.preprocess, &|| cancellation.is_cancelled()) {
+            Ok(prepared) => (std::borrow::Cow::Owned(prepared.p6), prepared.skew),
+            Err(_) if cancellation.is_cancelled() => return Err(OcrProcessError::Cancelled),
+            Err(_) => (std::borrow::Cow::Borrowed(input), Skew::NONE),
+        };
+        cancellation.ensure_runnable()?;
+        options.timeout = options.timeout.checked_sub(started.elapsed()).filter(|left| !left.is_zero())
+            .ok_or(OcrProcessError::TimedOut)?;
+        let mut output = run_child(
             &self.engine_path,
             &self.tessdata_dir,
-            input,
+            &recognition,
             cancellation,
             options,
             output_profile,
-        )
+        )?;
+        output.skew = skew;
+        Ok(output)
     }
 }
 
@@ -328,11 +360,12 @@ struct RunOptions<'a> {
     after_resume: Option<&'a dyn Fn()>,
     before_finish: Option<&'a dyn Fn()>,
     background: bool,
+    preprocess: PreprocessOptions,
 }
 
 impl RunOptions<'_> {
     fn production() -> Self {
-        Self { timeout: OCR_TIMEOUT, before_resume: None, after_resume: None, before_finish: None, background: false }
+        Self { timeout: OCR_TIMEOUT, before_resume: None, after_resume: None, before_finish: None, background: false, preprocess: PreprocessOptions::PRODUCTION }
     }
 }
 
@@ -693,13 +726,86 @@ fn run_child(
         return Err(OcrProcessError::ChildExit { code: exit_code, stderr });
     }
     run.writer_result?;
-    if !stderr.is_empty() {
-        return Err(OcrProcessError::UnexpectedStderr(stderr));
+    let mut text = stdout;
+    match classify_stderr(&stderr) {
+        Some(StderrVerdict::Clean) => {}
+        Some(StderrVerdict::PageSkipped) => {
+            // `input` is the image the engine saw: with a deskew it is the
+            // padded canvas, the size the TSV is parsed at (`Skew::recognition_size`).
+            let (width, height) = validate_p6(input)?;
+            text = match output_profile {
+                OcrOutputProfile::Text => String::new(),
+                OcrOutputProfile::Tsv => blank_page_tsv(width, height),
+            };
+        }
+        None => return Err(OcrProcessError::UnexpectedStderr(stderr)),
     }
     if cancellation.is_cancelled() {
         return Err(OcrProcessError::Cancelled);
     }
-    Ok(OcrProcessOutput { text: stdout, peak_job_commit_bytes })
+    Ok(OcrProcessOutput { text, peak_job_commit_bytes, skew: Skew::NONE })
+}
+
+/// Lines the engine writes to stderr with `--psm 3` on ordinary scans even at
+/// `--loglevel ERROR` (seen on real pages, 2026-10-28). Each must match a
+/// whole line exactly; `#` stands for 1 to 9 ASCII digits and nothing else.
+/// Any other line, a line over 200 bytes or more than `OCR_STDERR_MAX_LINES`
+/// lines still fails the page, as does a non-zero exit.
+const BENIGN_STDERR_LINES: [&str; 4] = [
+    "Detected # diacritics",
+    "Warning:guessing pitch as xheight on row #, block #",
+    "Error in boxClipToRectangle: box outside rectangle",
+    "Error in pixScanForForeground: invalid box",
+];
+/// The engine found too little text to lay out: the page has no text.
+const SKIPPED_PAGE_LINE: &str = "Too few characters. Skipping this page";
+const OCR_STDERR_MAX_LINES: usize = 64;
+
+#[derive(Debug, PartialEq)]
+enum StderrVerdict { Clean, PageSkipped }
+
+fn classify_stderr(stderr: &str) -> Option<StderrVerdict> {
+    if stderr.is_empty() {
+        return Some(StderrVerdict::Clean);
+    }
+    let body = stderr.strip_suffix('\n')?;
+    let mut verdict = StderrVerdict::Clean;
+    for (index, line) in body.split('\n').enumerate() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if index >= OCR_STDERR_MAX_LINES || line.len() > 200 {
+            return None;
+        }
+        if line == SKIPPED_PAGE_LINE {
+            verdict = StderrVerdict::PageSkipped;
+        } else if !BENIGN_STDERR_LINES.iter().any(|template| matches_template(line, template)) {
+            return None;
+        }
+    }
+    Some(verdict)
+}
+
+fn matches_template(line: &str, template: &str) -> bool {
+    let (mut line, mut template) = (line.as_bytes(), template.as_bytes());
+    while let Some((&expected, rest)) = template.split_first() {
+        if expected == b'#' {
+            let digits = line.iter().take_while(|byte| byte.is_ascii_digit()).count();
+            if digits == 0 || digits > 9 {
+                return false;
+            }
+            line = &line[digits..];
+        } else {
+            match line.split_first() {
+                Some((&actual, remaining)) if actual == expected => line = remaining,
+                _ => return false,
+            }
+        }
+        template = rest;
+    }
+    line.is_empty()
+}
+
+fn blank_page_tsv(width: usize, height: usize) -> String {
+    format!("level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n1\t1\t0\t0\t0\t0\t0\t0\t{width}\t{height}\t-1\t\n")
 }
 
 /// Best effort: a child that keeps normal priority still works, only less politely.
@@ -724,7 +830,7 @@ fn build_command_line(engine: &Path, tessdata: &Path, output_profile: OcrOutputP
         OsString::from("--oem"),
         OsString::from("1"),
         OsString::from("--psm"),
-        OsString::from("6"),
+        OsString::from("3"),
         OsString::from("--dpi"),
         OsString::from("150"),
         OsString::from("--loglevel"),
@@ -828,6 +934,10 @@ fn main() {
         "unexpected-stderr" => {
             print!("recognized text\n");
             eprintln!("unexpected warning");
+        }
+        "stderr-file" => {
+            print!("recognized text\n");
+            eprint!("{}", fs::read_to_string(directory.join("stderr.txt")).unwrap());
         }
         "sleep" => thread::sleep(Duration::from_secs(30)),
         "spawn-grandchild" => {
@@ -953,7 +1063,7 @@ fn main() {
     fn command_line_quotes_paths_without_using_a_shell() {
         let command = build_command_line(Path::new(r"C:\OCR engine\tesseract.exe"), Path::new(r"C:\model space\tessdata"), OcrOutputProfile::Text).unwrap();
         let text = String::from_utf16(&command[..command.len() - 1]).unwrap();
-        assert_eq!(text, r#""C:\OCR engine\tesseract.exe" "stdin" "stdout" "--tessdata-dir" "C:\model space\tessdata" "-l" "eng" "--oem" "1" "--psm" "6" "--dpi" "150" "--loglevel" "ERROR""#);
+        assert_eq!(text, r#""C:\OCR engine\tesseract.exe" "stdin" "stdout" "--tessdata-dir" "C:\model space\tessdata" "-l" "eng" "--oem" "1" "--psm" "3" "--dpi" "150" "--loglevel" "ERROR""#);
         let tsv = build_command_line(Path::new(r"C:\OCR engine\tesseract.exe"), Path::new(r"C:\model space\tessdata"), OcrOutputProfile::Tsv).unwrap();
         let tsv = String::from_utf16(&tsv[..tsv.len() - 1]).unwrap();
         assert_eq!(tsv, format!("{text} \"-c\" \"tessedit_create_tsv=1\" \"-c\" \"tessedit_create_txt=0\""));
@@ -1028,7 +1138,7 @@ fn main() {
         let result = suspended.runner.recognize_with_options(
             TEST_P6,
             &cancellation,
-            RunOptions { timeout: Duration::from_secs(120), before_resume: Some(&hook), after_resume: None, before_finish: None, background: false },
+            RunOptions { timeout: Duration::from_secs(120), before_resume: Some(&hook), after_resume: None, before_finish: None, background: false, preprocess: PreprocessOptions::PRODUCTION },
         );
         assert_eq!(result, Err(OcrProcessError::Cancelled));
         assert!(!suspended.directory.join("child.pid").exists());
@@ -1077,6 +1187,7 @@ fn main() {
                     after_resume: None,
                     before_finish: Some(&before_finish),
                     background: false,
+                    preprocess: PreprocessOptions::PRODUCTION,
                 },
             )
         });
@@ -1222,6 +1333,38 @@ fn main() {
     }
 
     #[test]
+    fn only_the_exact_engine_diagnostics_are_allowed_on_stderr() {
+        let _serial = test_lock();
+        let run = |stderr: &str| {
+            let case = fake_case("stderr-file");
+            std::fs::write(case.directory.join("stderr.txt"), stderr).unwrap();
+            case.runner.recognize_p6(TEST_P6, &OcrCancellation::default()).map(|output| output.text)
+        };
+        assert_eq!(run("Detected 178 diacritics\r\nWarning:guessing pitch as xheight on row 4, block 21\n").unwrap(), "recognized text\n");
+        assert_eq!(run("Error in boxClipToRectangle: box outside rectangle\nError in pixScanForForeground: invalid box\n").unwrap(), "recognized text\n");
+        assert_eq!(run("Too few characters. Skipping this page\n").unwrap(), "", "a skipped page has no text");
+        for refused in [
+            "Detected 17a diacritics\n", "Detected  17 diacritics\n", "Detected 1234567890 diacritics\n",
+            "detected 17 diacritics\n", "Detected 17 diacritics", "Detected 17 diacritics \n",
+            "Detected -1 diacritics\n", "Warning:guessing pitch as xheight on row 4, block\n",
+            "Detected 1 diacritics\nunexpected warning\n", "Error in boxClipToRectangle: box outside rectangle!\n",
+        ] {
+            assert!(matches!(run(refused), Err(OcrProcessError::UnexpectedStderr(_))), "{refused:?}");
+        }
+        let many = "Detected 1 diacritics\n".repeat(OCR_STDERR_MAX_LINES + 1);
+        assert!(matches!(run(&many), Err(OcrProcessError::UnexpectedStderr(_))));
+        assert!(matches!(run(&"Detected 1 diacritics\n".repeat(OCR_STDERR_MAX_LINES)), Ok(_)));
+    }
+
+    #[test]
+    fn a_skipped_page_is_an_empty_strict_tsv_page() {
+        assert_eq!(classify_stderr(""), Some(StderrVerdict::Clean));
+        assert_eq!(classify_stderr("Too few characters. Skipping this page\r\n"), Some(StderrVerdict::PageSkipped));
+        let parsed = crate::searchable_ocr::parse_tesseract_tsv(blank_page_tsv(1275, 1650).as_bytes(), 1275, 1650).unwrap();
+        assert!(parsed.words.is_empty() && parsed.extracted_text.is_empty());
+    }
+
+    #[test]
     fn timeout_and_unwind_drop_kill_and_reap_the_owned_child() {
         let _serial = test_lock();
         let timed = fake_case("sleep");
@@ -1230,7 +1373,7 @@ fn main() {
         let result = timed.runner.recognize_with_options(
             TEST_P6,
             &OcrCancellation::default(),
-            RunOptions { timeout: Duration::from_millis(200), before_resume: None, after_resume: Some(&published), before_finish: None, background: false },
+            RunOptions { timeout: Duration::from_millis(200), before_resume: None, after_resume: Some(&published), before_finish: None, background: false, preprocess: PreprocessOptions::PRODUCTION },
         );
         assert_eq!(result, Err(OcrProcessError::TimedOut));
         assert_process_reaped(wait_for_pid(&timed.directory));
@@ -1246,7 +1389,7 @@ fn main() {
             let _ = unwound.runner.recognize_with_options(
                 TEST_P6,
                 &OcrCancellation::default(),
-                RunOptions { timeout: Duration::from_secs(120), before_resume: None, after_resume: Some(&after_resume), before_finish: None, background: false },
+                RunOptions { timeout: Duration::from_secs(120), before_resume: None, after_resume: Some(&after_resume), before_finish: None, background: false, preprocess: PreprocessOptions::PRODUCTION },
             );
         }));
         assert!(caught.is_err());

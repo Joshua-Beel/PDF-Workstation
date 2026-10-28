@@ -226,9 +226,32 @@ fn rejects_children_outside_parent_boxes() {
     let tsv = document(&[
         "1\t1\t0\t0\t0\t0\t0\t0\t1000\t500\t-1\t",
         "2\t1\t1\t0\t0\t0\t0\t0\t100\t100\t-1\t",
-        "3\t1\t1\t1\t0\t0\t90\t90\t20\t20\t-1\t",
+        "3\t1\t1\t1\t0\t0\t100\t90\t20\t20\t-1\t",
     ]);
-    assert!(parse_tesseract_tsv(tsv.as_bytes(), 1000, 500).is_err());
+    assert!(parse_tesseract_tsv(tsv.as_bytes(), 1000, 500).is_err(), "a paragraph that only touches its block");
+}
+
+/// Shapes from real `--psm 3` output (synthetic text): lines that start left
+/// of their paragraph or reach above it, and a paragraph wider than its block.
+#[test]
+fn accepts_paragraphs_and_lines_that_overlap_their_parents() {
+    let tsv = document(&[
+        "1\t1\t0\t0\t0\t0\t0\t0\t1200\t900\t-1\t",
+        "2\t1\t1\t0\t0\t0\t292\t429\t245\t18\t-1\t",
+        "3\t1\t1\t1\t0\t0\t292\t429\t259\t18\t-1\t",
+        "4\t1\t1\t1\t1\t0\t292\t429\t259\t18\t-1\t",
+        "5\t1\t1\t1\t1\t1\t292\t430\t120\t17\t90\tsample",
+        "5\t1\t1\t1\t1\t2\t430\t430\t121\t17\t90\twords",
+        "2\t1\t2\t0\t0\t0\t152\t202\t900\t600\t-1\t",
+        "3\t1\t2\t1\t0\t0\t180\t245\t850\t500\t-1\t",
+        "4\t1\t2\t1\t1\t0\t151\t202\t700\t60\t-1\t",
+        "5\t1\t2\t1\t1\t1\t151\t205\t300\t50\t80\tleft",
+        "4\t1\t2\t1\t2\t0\t300\t700\t400\t60\t-1\t",
+        "5\t1\t2\t1\t2\t1\t300\t705\t200\t50\t80\tbelow",
+    ]);
+    let parsed = parse_tesseract_tsv(tsv.as_bytes(), 1200, 900).unwrap();
+    assert_eq!(parsed.extracted_text, "sample words\nleft\nbelow");
+    assert!(map_words_to_display(&parsed, 576.0, 432.0).is_ok());
 }
 
 #[test]
@@ -300,15 +323,81 @@ fn still_refuses_line_and_word_boxes_far_outside_their_parents() {
         "1\t1\t0\t0\t0\t0\t0\t0\t1000\t500\t-1\t",
         "2\t1\t1\t0\t0\t0\t10\t10\t400\t100\t-1\t",
         "3\t1\t1\t1\t0\t0\t10\t10\t400\t100\t-1\t",
-        "4\t1\t1\t1\t1\t0\t10\t19\t400\t100\t-1\t",
+        "4\t1\t1\t1\t1\t0\t10\t110\t400\t30\t-1\t",
+        "5\t1\t1\t1\t1\t1\t10\t112\t40\t26\t90\tA",
     ]);
-    assert!(parse_tesseract_tsv(far_line.as_bytes(), 1000, 500).is_err());
+    let refused = parse_tesseract_tsv(far_line.as_bytes(), 1000, 500).unwrap_err();
+    assert!(refused.contains("page hierarchy"), "a line that shares no pixel with its paragraph: {refused}");
+    // A word that shares no pixel row with its line is refused, above or below.
+    for word in ["5\t1\t1\t1\t1\t1\t0\t121\t10\t29\t90\tA", "5\t1\t1\t1\t1\t1\t0\t71\t10\t29\t90\tA"] {
+        let rows = [
+            "1\t1\t0\t0\t0\t0\t0\t0\t1000\t500\t-1\t",
+            "2\t1\t1\t0\t0\t0\t0\t0\t1000\t500\t-1\t",
+            "3\t1\t1\t1\t0\t0\t0\t0\t1000\t500\t-1\t",
+            "4\t1\t1\t1\t1\t0\t0\t100\t400\t20\t-1\t",
+            word,
+        ];
+        assert!(parse_tesseract_tsv(document(&rows).as_bytes(), 1000, 500).is_err(), "{word}");
+    }
+}
+
+/// Shapes seen in real engine output on scanned pages (synthetic text): the
+/// line box is the text row, so a tall first letter or a stray mark starts
+/// left of it and above or below it.
+#[test]
+fn accepts_words_that_overhang_their_line_box_and_keeps_them_in_its_band() {
     let rows = [
         "1\t1\t0\t0\t0\t0\t0\t0\t1000\t500\t-1\t",
-        "2\t1\t1\t0\t0\t0\t0\t0\t1000\t500\t-1\t",
-        "3\t1\t1\t1\t0\t0\t0\t0\t1000\t500\t-1\t",
-        "4\t1\t1\t1\t1\t0\t0\t100\t400\t20\t-1\t",
-        "5\t1\t1\t1\t1\t1\t0\t100\t10\t29\t90\tA",
+        "2\t1\t1\t0\t0\t0\t150\t100\t800\t200\t-1\t",
+        "3\t1\t1\t1\t0\t0\t150\t100\t800\t200\t-1\t",
+        "4\t1\t1\t1\t1\t0\t150\t120\t600\t30\t-1\t",
+        "5\t1\t1\t1\t1\t1\t12\t103\t110\t40\t61.5\tSample",
+        "5\t1\t1\t1\t1\t2\t200\t125\t60\t20\t90\tthe",
+        "5\t1\t1\t1\t1\t3\t700\t130\t88\t32\t40\tpage,",
     ];
-    assert!(parse_tesseract_tsv(document(&rows).as_bytes(), 1000, 500).is_err());
+    let parsed = parse_tesseract_tsv(document(&rows).as_bytes(), 1000, 500).unwrap();
+    assert_eq!(parsed.extracted_text, "Sample the page,");
+    let (first, middle, last) = (&parsed.words[0], &parsed.words[1], &parsed.words[2]);
+    for word in [first, middle, last] {
+        assert_eq!((word.line_top, word.line_height), (120, 30), "one band per line keeps the line together on extraction");
+    }
+    let mapped = map_words_to_display(&parsed, 500.0, 250.0).unwrap();
+    assert_eq!((mapped[0].x, mapped[0].y, mapped[0].height), (6.0, 60.0, 15.0));
+    let mut detached = parsed.clone();
+    detached.words[1].top = 160;
+    assert!(map_words_to_display(&detached, 500.0, 250.0).is_err(), "a word below its band is refused at mapping too");
+}
+
+#[test]
+fn trims_an_engine_space_at_the_edge_of_a_word_and_skips_space_only_words() {
+    let tsv = one_line(&[
+        "5\t1\t1\t1\t1\t1\t10\t10\t30\t20\t18.3\tone",
+        "5\t1\t1\t1\t1\t2\t50\t10\t60\t20\t60.6\t quick,",
+        "5\t1\t1\t1\t1\t3\t120\t10\t5\t20\t30\t ",
+        "5\t1\t1\t1\t1\t4\t130\t10\t20\t20\t75\tas ",
+    ]);
+    let parsed = parse_tesseract_tsv(tsv.as_bytes(), 1000, 500).unwrap();
+    assert_eq!(parsed.extracted_text, "one quick, as");
+    assert_eq!(parsed.words.len(), 3);
+    for text in [" two words", "\u{85}nel", "tab\t", "\u{a0}nbsp"] {
+        let row = format!("5\t1\t1\t1\t1\t1\t0\t0\t5\t5\t90\t{text}");
+        assert!(parse_tesseract_tsv(one_line(&[&row]).as_bytes(), 1000, 500).is_err(), "{text:?}");
+    }
+    let negative = one_line(&["5\t1\t1\t1\t1\t1\t0\t0\t5\t5\t-1\t "]);
+    assert!(parse_tesseract_tsv(negative.as_bytes(), 1000, 500).is_err());
+    let outside = one_line(&["5\t1\t1\t1\t1\t1\t995\t0\t6\t5\t90\t "]);
+    assert!(parse_tesseract_tsv(outside.as_bytes(), 1000, 500).is_err());
+}
+
+/// Real engine output: Tesseract 5.5.3 with the app's arguments and `--psm 3`
+/// on the repository's own synthetic skewed, noisy fixture (text from
+/// `scripts/ocr/accuracy-synthetic.json`, nothing from a real document).
+#[test]
+fn parses_real_psm3_output_of_a_synthetic_page() {
+    let tsv = include_str!("fixtures/ocr-psm3-synthetic-skew.tsv");
+    let parsed = parse_tesseract_tsv(tsv.as_bytes(), 1275, 340).unwrap();
+    assert_eq!(parsed.words.len(), 55);
+    assert!(parsed.extracted_text.starts_with("Invoice 2047."));
+    assert!(parsed.extracted_text.contains("(555-0142)"));
+    assert!(map_words_to_display(&parsed, 612.0, 163.2).is_ok());
 }

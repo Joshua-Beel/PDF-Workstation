@@ -6,7 +6,7 @@ import { OCR_ARGS, OCR_DPI, SETUP_ROOT_ENV, formatTable, runManifest, verifyEngi
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 function parseArgs(argv) {
-  const options = { manifest: null, engineRoot: process.env[SETUP_ROOT_ENV] || null, out: null, keepText: false };
+  const options = { manifest: null, engineRoot: process.env[SETUP_ROOT_ENV] || null, out: null, keepText: false, textDir: null };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const value = () => { if (i + 1 >= argv.length) throw new Error(`${arg} needs a value.`); return argv[++i]; };
@@ -14,7 +14,8 @@ function parseArgs(argv) {
     else if (arg === '--engine-root') options.engineRoot = value();
     else if (arg === '--out') options.out = value();
     else if (arg === '--keep-text') options.keepText = true;
-    else throw new Error(`Unknown argument ${arg}. Usage: node scripts/ocr-accuracy.mjs --manifest <manifest.json> [--engine-root <setup-ocr output root>] [--out <report.json>] [--keep-text]`);
+    else if (arg === '--text-dir') options.textDir = value();
+    else throw new Error(`Unknown argument ${arg}. Usage: node scripts/ocr-accuracy.mjs --manifest <manifest.json> [--engine-root <setup-ocr output root>] [--out <report.json>] [--keep-text] [--text-dir <folder of <image stem>.ocr.txt from the app path>]`);
   }
   if (!options.manifest) throw new Error('--manifest is required.');
   if (!options.engineRoot) throw new Error(`No engine: pass --engine-root or set ${SETUP_ROOT_ENV} to a scripts/setup-ocr.ps1 output root.`);
@@ -24,12 +25,12 @@ function parseArgs(argv) {
 try {
   const options = parseArgs(process.argv.slice(2));
   const engine = await verifyEngine(resolve(options.engineRoot), repository);
-  const report = await runManifest(resolve(options.manifest), engine, { keepText: options.keepText });
+  const report = await runManifest(resolve(options.manifest), engine, { keepText: options.keepText, textDir: options.textDir ? resolve(options.textDir) : undefined });
   const output = {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
     engine: { tesseract: engine.tesseract, leptonica: engine.leptonica, model: `eng fast ${engine.modelVersion}`, executableBytes: engine.executable.bytes, executableSha256: engine.executable.sha256, modelSha256: engine.model.sha256 },
-    invocation: { arguments: OCR_ARGS.map((arg) => (arg === '<tessdata>' ? '<engine>/tessdata' : arg)), dpi: OCR_DPI, input: 'P6 on stdin, as the app sends it' },
+    invocation: { arguments: OCR_ARGS.map((arg) => (arg === '<tessdata>' ? '<engine>/tessdata' : arg)), dpi: OCR_DPI, input: options.textDir ? 'text recognised by the app path (preprocessed input), read from --text-dir' : 'P6 on stdin without the app preprocessing' },
     normalisation: 'NFKC, curly quotes and dashes mapped to ASCII, all whitespace collapsed to one space, trimmed; case and punctuation kept',
     scope: report.scope,
     results: report.results,

@@ -2,6 +2,7 @@ use std::{sync::Arc, time::{Duration, Instant}};
 
 use crate::{
     ocr::OcrPageRequest,
+    ocr_preprocess::map_words_to_page,
     ocr_process::{OcrCancellation, OcrOperation, OcrProcessError, OcrProcessRunner},
     searchable_ocr::{map_words_to_display, parse_tesseract_tsv},
     searchable_pdf::{write_searchable_pdf, SearchableRasterPage, SearchableWord},
@@ -19,7 +20,7 @@ pub(crate) const MAX_DOCUMENT_RUNTIME: Duration = Duration::from_secs(300);
 pub(crate) struct PreparedSearchableOcr {
     pub(crate) bytes: Vec<u8>,
     pub(crate) pages: Vec<SearchableRasterPage>,
-    pub(crate) expected_text: Vec<String>,
+    pub(crate) expected_characters: Vec<String>,
     pub(crate) deadline: Instant,
     pub(crate) cancellation: OcrCancellation,
 }
@@ -53,7 +54,7 @@ impl SearchableOcrCoordinator {
             };
         }
         let mut pages = Vec::with_capacity(page_count);
-        let mut expected_text = Vec::with_capacity(page_count);
+        let mut expected_characters = Vec::with_capacity(page_count);
         for index in 0..page_count {
             finish_try!(cancellation.ensure_runnable());
             let page = finish_try!(u16::try_from(index).map_err(|_| OcrProcessError::Document("Searchable OCR page is out of range.".into())));
@@ -80,16 +81,17 @@ impl SearchableOcrCoordinator {
             finish_try!(cancellation.ensure_runnable());
             finish_try!(self.service.validate_ocr_result(request, operation.worker_hold()).await
                 .map_err(OcrProcessError::Document));
-            let parsed = finish_try!(parse_tesseract_tsv(output.text.as_bytes(), raster.width, raster.height)
+            let (recognized_width, recognized_height) = output.skew.recognition_size(raster.width, raster.height);
+            let mut parsed = finish_try!(parse_tesseract_tsv(output.text.as_bytes(), recognized_width, recognized_height)
                 .map_err(OcrProcessError::InvalidInput));
+            map_words_to_page(&mut parsed, output.skew, raster.width, raster.height);
             let displayed = finish_try!(map_words_to_display(&parsed, f64::from(raster.page_width), f64::from(raster.page_height))
                 .map_err(OcrProcessError::InvalidInput));
             let rgb = finish_try!(p6_rgb(&raster.p6, raster.width, raster.height)
                 .map_err(OcrProcessError::InvalidInput));
-            // PDFium exposes PDF line breaks as CRLF on Windows. Keep this an
-            // exact oracle by deriving that representation from the strict TSV
-            // hierarchy instead of normalizing extracted output after the fact.
-            expected_text.push(parsed.extracted_text.replace('\n', "\r\n"));
+            // The characters of the recognised words, for the per-page
+            // character-multiset check after the copy is reopened.
+            expected_characters.push(parsed.words.iter().map(|word| word.text.as_str()).collect::<String>());
             pages.push(SearchableRasterPage {
                 page_width: raster.page_width,
                 page_height: raster.page_height,
@@ -105,7 +107,7 @@ impl SearchableOcrCoordinator {
         let bytes = finish_try!(write_searchable_pdf(&pages).map_err(OcrProcessError::InvalidInput));
         if Instant::now() >= deadline { return operation.finish(Err(OcrProcessError::TimedOut)); }
         finish_try!(cancellation.ensure_runnable());
-        Ok((PreparedSearchableOcr { bytes, pages, expected_text, deadline, cancellation }, operation))
+        Ok((PreparedSearchableOcr { bytes, pages, expected_characters, deadline, cancellation }, operation))
     }
 
     pub(crate) async fn create(
@@ -198,5 +200,43 @@ mod tests {
             tauri::async_runtime::block_on(service.close(request.document_id)).unwrap();
             tauri::async_runtime::block_on(service.close(reopened_request.document_id)).unwrap();
         }
+    }
+
+    /// Evidence, not a gate: each `*.png` in `SM4_SEARCHABLE_PAGES_DIR` (read
+    /// only) is placed on a Letter page, then saved through the full
+    /// searchable-copy path (render, engine, parse, write, reopen checks).
+    #[test]
+    #[ignore = "measurement: needs the OCR setup root and SM4_SEARCHABLE_PAGES_DIR"]
+    fn scan_pages_save_through_the_searchable_copy_path() {
+        let Some(setup) = crate::ocr_test_support::require_local_setup("scan_pages_save_through_the_searchable_copy_path") else { return; };
+        let Some(input) = std::env::var_os("SM4_SEARCHABLE_PAGES_DIR") else { return; };
+        let _serial = crate::ocr_process::test_lock();
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let runner = OcrProcessRunner::new(setup.root.join("engine/bin/tesseract.exe"), setup.root.join("engine/tessdata"), setup.engine).unwrap();
+        let coordinator = SearchableOcrCoordinator::new(service.clone(), runner);
+        let folder = tempfile::tempdir().unwrap();
+        let mut pages = std::fs::read_dir(&input).unwrap().map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "png")).collect::<Vec<_>>();
+        pages.sort();
+        let mut saved = 0;
+        for png in &pages {
+            let stem = png.file_stem().unwrap().to_string_lossy().into_owned();
+            let scan = folder.path().join(format!("{stem}.pdf"));
+            crate::image_pdf::prepare_and_write(png, &scan, crate::image_pdf::ImagePdfOptions {
+                page_size: crate::image_pdf::ImagePdfPageSize::Letter,
+                orientation: crate::image_pdf::ImagePdfOrientation::Auto,
+                margin_points: 0.0,
+            }, |_| Ok(())).unwrap();
+            let opened = tauri::async_runtime::block_on(service.open(scan)).unwrap();
+            let request = opened.ocr_request(0);
+            let output = folder.path().join(format!("{stem}-searchable.pdf"));
+            match tauri::async_runtime::block_on(coordinator.create(request.document_id, request.revision, 1, output, OcrCancellation::default())) {
+                Ok(_) => { saved += 1; println!("SM4_SAVE {stem} saved"); }
+                Err(error) => println!("SM4_SAVE {stem} failed: {error:?}"),
+            }
+            tauri::async_runtime::block_on(service.close(request.document_id)).unwrap();
+        }
+        println!("SM4_SAVE {saved} of {} pages saved", pages.len());
     }
 }

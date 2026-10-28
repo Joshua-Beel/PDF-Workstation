@@ -71,6 +71,7 @@ fn unicode_words_extract_exactly_and_stay_inside_their_boxes() {
     assert_eq!(text.all(), expected_text);
 
     let mut generated = 0;
+    let mut separators = 0;
     let mut chars = Vec::new();
     let all_chars = text.chars();
     for character in all_chars.iter() {
@@ -78,8 +79,13 @@ fn unicode_words_extract_exactly_and_stay_inside_their_boxes() {
             generated += 1;
             continue;
         }
+        if character.unicode_value() == 0x20 {
+            separators += 1;
+            continue;
+        }
         chars.push(character);
     }
+    assert_eq!(separators, words.len() - lines.len(), "one drawn separator between words of a line");
     let units = |character: &pdfium_render::prelude::PdfPageTextChar| {
         let value = character.unicode_value();
         match char::from_u32(value) {
@@ -197,4 +203,174 @@ fn deterministic_fixtures_reopen_with_exact_pixels_and_pdfium_text() {
         let expected_text = parsed.extracted_text.replace('\n', "\r\n");
         assert_eq!(text.inside_rect(visible), expected_text, "{name} text");
     }
+}
+
+/// Evidence, not a gate: for every `<stem>.pnm` with a `<stem>.tsv` written by
+/// the engine with the app's TSV arguments in `SM4_TEXTLAYER_DIR`, build the
+/// searchable page and check PDFium extracts exactly the parsed text.
+#[test]
+#[ignore = "measurement: set SM4_TEXTLAYER_DIR to a folder of engine TSV and P6 pages"]
+fn engine_tsv_pages_get_an_extractable_text_layer() {
+    let Some(folder) = std::env::var_os("SM4_TEXTLAYER_DIR") else { return; };
+    let mut entries = std::fs::read_dir(&folder).unwrap().map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "tsv")).collect::<Vec<_>>();
+    entries.sort();
+    let (mut accepted, mut total, mut same_words_in_order, mut same_word_set, mut drawn_chars_match, mut lost_words, mut total_words) = (0, 0, 0, 0, 0, 0, 0);
+    for tsv_path in entries {
+        total += 1;
+        let p6 = std::fs::read(tsv_path.with_extension("pnm")).unwrap();
+        let mut parts = p6.splitn(4, |byte| *byte == b'\n');
+        parts.next();
+        let size = std::str::from_utf8(parts.next().unwrap()).unwrap().to_owned();
+        parts.next();
+        let rgb = parts.next().unwrap().to_vec();
+        let (width, height) = size.split_once(' ').map(|(w, h)| (w.parse::<u32>().unwrap(), h.parse::<u32>().unwrap())).unwrap();
+        let (page_width, page_height) = ((f64::from(width) * 72.0 / 150.0) as f32, (f64::from(height) * 72.0 / 150.0) as f32);
+        let stem = tsv_path.file_stem().unwrap().to_string_lossy().into_owned();
+        let parsed = match parse_tesseract_tsv(&std::fs::read(&tsv_path).unwrap(), width, height) {
+            Ok(parsed) => parsed,
+            Err(error) => { println!("SM4_TEXTLAYER {stem} refused: {error}"); continue; }
+        };
+        let words = map_words_to_display(&parsed, f64::from(page_width), f64::from(page_height)).unwrap().into_iter()
+            .map(|word| SearchableWord { x: word.x, y: word.y, width: word.width, height: word.height, text: word.text }).collect::<Vec<_>>();
+        let count = words.len();
+        let bytes = write_searchable_pdf(&[SearchableRasterPage {
+            page_width, page_height, image_width: width, image_height: height, rgb, words,
+        }]).unwrap();
+        let document = pdfium().load_pdf_from_byte_vec(bytes, None).unwrap();
+        let page = document.pages().get(0).unwrap();
+        let text = page.text().unwrap();
+        let extracted = text.all();
+        let drawn = text.chars().iter().filter(|c| !c.is_generated().unwrap() && c.unicode_value() != 0x20)
+            .map(|c| char::from_u32(c.unicode_value()).unwrap_or('\u{fffd}')).collect::<String>();
+        let concatenated = parsed.words.iter().map(|w| w.text.as_str()).collect::<String>();
+        if drawn == concatenated { drawn_chars_match += 1; } else {
+            let at = drawn.chars().zip(concatenated.chars()).take_while(|(a, b)| a == b).count();
+            println!("SM4_TEXTLAYER {stem} drawn chars differ at {at}: {:?} vs {:?}", drawn.chars().skip(at.saturating_sub(5)).take(15).collect::<String>(), concatenated.chars().skip(at.saturating_sub(5)).take(15).collect::<String>());
+        }
+        let expected = parsed.extracted_text.replace('\n', "\r\n");
+        let exact = extracted == expected;
+        {
+            let mut a = extracted.split_whitespace().collect::<Vec<_>>();
+            let mut b = expected.split_whitespace().collect::<Vec<_>>();
+            if a == b { same_words_in_order += 1; }
+            a.sort_unstable();
+            b.sort_unstable();
+            if a == b { same_word_set += 1; }
+            let mut pool = a.clone();
+            let lost = b.iter().filter(|word| match pool.binary_search(word) { Ok(i) => { pool.remove(i); false } Err(_) => true }).count();
+            lost_words += lost;
+            total_words += b.len();
+        }
+        if exact {
+            accepted += 1;
+        } else {
+            let at = extracted.chars().zip(expected.chars()).take_while(|(a, b)| a == b).count();
+            let around = |text: &str| text.chars().skip(at.saturating_sub(10)).take(30).collect::<String>();
+            println!("SM4_TEXTLAYER {stem} differs at char {at}: extracted {:?} expected {:?}", around(&extracted), around(&expected));
+            let collapse = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let mut extracted_words = extracted.split_whitespace().collect::<Vec<_>>();
+            let mut expected_words = expected.split_whitespace().collect::<Vec<_>>();
+            let same_order = collapse(&extracted) == collapse(&expected);
+            extracted_words.sort_unstable();
+            expected_words.sort_unstable();
+            println!("SM4_TEXTLAYER {stem} same words in order={same_order} same words any order={}", extracted_words == expected_words);
+            let only = |a: &[&str], b: &[&str]| { let mut b = b.to_vec(); a.iter().filter(|w| match b.iter().position(|x| x == *w) { Some(i) => { b.remove(i); false } None => true }).take(6).map(|w| w.to_string()).collect::<Vec<_>>() };
+            println!("SM4_TEXTLAYER {stem} only extracted {:?} only expected {:?}", only(&extracted_words, &expected_words), only(&expected_words, &extracted_words));
+        }
+        println!("SM4_TEXTLAYER {stem} words={count} pdfium_text_exact={exact}");
+    }
+    println!("SM4_TEXTLAYER of {total} pages: exact {accepted}, same words in order {same_words_in_order}, same words any order {same_word_set}, drawn characters in order {drawn_chars_match}; OCR words not found as a whole word in the extraction {lost_words} of {total_words}");
+}
+
+/// Words whose boxes touch or overlap (common on scans) used to come out of
+/// PDFium joined ("boxestouch"); the drawn separators keep them apart.
+#[test]
+fn touching_and_overlapping_words_extract_as_separate_words_on_their_lines() {
+    const HEADER: &str =
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext";
+    let lines: [&[(u32, u32, &str)]; 3] = [
+        &[(100, 120, "pack"), (220, 90, "my"), (308, 150, "boxes"), (470, 40, "with")],
+        &[(100, 80, "five"), (182, 140, "dozen,"), (322, 60, "in"), (380, 200, "liquor")],
+        &[(100, 130, "jugs"), (226, 60, "by"), (300, 90, "noon")],
+    ];
+    let mut rows = vec![
+        "1\t1\t0\t0\t0\t0\t0\t0\t1000\t500\t-1\t".to_string(),
+        "2\t1\t1\t0\t0\t0\t50\t40\t900\t300\t-1\t".to_string(),
+        "3\t1\t1\t1\t0\t0\t50\t40\t900\t300\t-1\t".to_string(),
+    ];
+    for (line_index, words) in lines.iter().enumerate() {
+        let top = 50 + 70 * line_index as u32;
+        rows.push(format!("4\t1\t1\t1\t{}\t0\t60\t{top}\t880\t50\t-1\t", line_index + 1));
+        for (word_index, (left, width, text)) in words.iter().enumerate() {
+            rows.push(format!("5\t1\t1\t1\t{}\t{}\t{left}\t{}\t{width}\t40\t91.5\t{text}", line_index + 1, word_index + 1, top + 5));
+        }
+    }
+    let tsv = std::iter::once(HEADER.to_string()).chain(rows).collect::<Vec<_>>().join("\n");
+    let parsed = parse_tesseract_tsv(tsv.as_bytes(), 1000, 500).unwrap();
+    let words = map_words_to_display(&parsed, 480.0, 240.0).unwrap().into_iter()
+        .map(|word| SearchableWord { x: word.x, y: word.y, width: word.width, height: word.height, text: word.text })
+        .collect::<Vec<_>>();
+    let bytes = write_searchable_pdf(&[SearchableRasterPage {
+        page_width: 480.0, page_height: 240.0, image_width: 4, image_height: 2, rgb: vec![255; 24], words,
+    }]).unwrap();
+    let document = pdfium().load_pdf_from_byte_vec(bytes, None).unwrap();
+    let page = document.pages().get(0).unwrap();
+    let extracted = page.text().unwrap().all();
+    assert_eq!(parsed.extracted_text, "pack my boxes with\nfive dozen, in liquor\njugs by noon");
+    let words_only = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(words_only(&extracted), words_only(&parsed.extracted_text), "{extracted:?}");
+    assert_eq!(extracted.lines().count(), 3, "{extracted:?}");
+}
+
+#[test]
+fn extraction_check_compares_character_multisets() {
+    use searchable_pdf::extraction_has_the_word_characters as check;
+    // Shaped like real scans: PDFium reorders interleaved rows and reports a
+    // line-end hyphen as U+0002.
+    let words = ["infor-", "mation", "of", "A.", "B.", "SAMPLE,", "3/8"].concat();
+    assert!(check("infor\u{2}mation of\r\nA.SAMPLE, B. 3/8", &words));
+    assert!(check("3/8 B.\r\nSAMPLE,A. of mation infor-", &words));
+    assert!(!check("infor\u{2}mation of\r\nA.SAMPLE, B. 3/8x", &words), "extra character");
+    assert!(!check("infor\u{2}mation of\r\nA.SAMPLE, B. 38", &words), "missing character");
+    assert!(!check("infor\u{2}mation of\r\nA.SAMPLE, B. 3/9", &words), "substituted character");
+    for bad in ["\u{1}", "\u{FFFD}", "\u{FFFE}", "\t", "\u{0}"] {
+        assert!(!check(&format!("infor-mation of A.SAMPLE, B. 3/8{bad}"), &words), "{bad:?}");
+    }
+    assert!(check("", ""));
+    assert!(check(" \r\n \r\n", ""), "an empty page extracts to whitespace only");
+    assert!(!check("x", ""));
+    assert!(!check("\u{a0}", ""), "only U+0020, CR and LF are dropped");
+}
+
+#[test]
+fn a_hyphenated_two_line_page_passes_the_extraction_check() {
+    const HEADER: &str =
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext";
+    let tsv = [
+        HEADER,
+        "1\t1\t0\t0\t0\t0\t0\t0\t1000\t500\t-1\t",
+        "2\t1\t1\t0\t0\t0\t50\t40\t900\t200\t-1\t",
+        "3\t1\t1\t1\t0\t0\t50\t40\t900\t200\t-1\t",
+        "4\t1\t1\t1\t1\t0\t60\t50\t880\t50\t-1\t",
+        "5\t1\t1\t1\t1\t1\t100\t55\t180\t40\t90\tthe",
+        "5\t1\t1\t1\t1\t2\t300\t55\t60\t40\t90\ttest",
+        "5\t1\t1\t1\t1\t3\t380\t55\t200\t40\t90\tinfor-",
+        "4\t1\t1\t1\t2\t0\t60\t120\t880\t50\t-1\t",
+        "5\t1\t1\t1\t2\t1\t100\t125\t120\t40\t90\tmation",
+        "5\t1\t1\t1\t2\t2\t240\t125\t200\t40\t90\tsheet.",
+    ].join("\n");
+    let parsed = parse_tesseract_tsv(tsv.as_bytes(), 1000, 500).unwrap();
+    let words = map_words_to_display(&parsed, 480.0, 240.0).unwrap().into_iter()
+        .map(|word| SearchableWord { x: word.x, y: word.y, width: word.width, height: word.height, text: word.text })
+        .collect::<Vec<_>>();
+    let bytes = write_searchable_pdf(&[SearchableRasterPage {
+        page_width: 480.0, page_height: 240.0, image_width: 4, image_height: 2, rgb: vec![255; 24], words,
+    }]).unwrap();
+    let document = pdfium().load_pdf_from_byte_vec(bytes, None).unwrap();
+    let extracted = document.pages().get(0).unwrap().text().unwrap().all();
+    let characters = parsed.words.iter().map(|word| word.text.as_str()).collect::<String>();
+    assert!(searchable_pdf::extraction_has_the_word_characters(&extracted, &characters), "{extracted:?}");
+    assert!(!searchable_pdf::extraction_has_the_word_characters(&extracted, &format!("{characters}x")));
+    assert!(!searchable_pdf::extraction_has_the_word_characters(&extracted, &characters.replacen('m', "n", 1)));
 }

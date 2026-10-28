@@ -56,9 +56,9 @@ struct TesseractRecognizer {
 }
 
 impl PageRecognizer for TesseractRecognizer {
-    fn recognize_tsv(&self, p6: &[u8], _cancellation: &OcrCancellation) -> Result<String, PageError> {
+    fn recognize_tsv(&self, p6: &[u8], _cancellation: &OcrCancellation) -> Result<(String, crate::ocr_preprocess::Skew), PageError> {
         match self.runner.recognize_p6_tsv_background(p6, &self.operation) {
-            Ok(output) => Ok(output.text),
+            Ok(output) => Ok((output.text, output.skew)),
             Err(OcrProcessError::Cancelled) => Err(PageError::Cancelled),
             Err(OcrProcessError::TimedOut) => Err(PageError::Page(PageIssue::TimedOut, "timed out".into())),
             Err(OcrProcessError::InvalidInput(message)) => Err(PageError::Page(PageIssue::EngineOutputRefused, message)),
@@ -532,7 +532,7 @@ mod tests {
         let foreign = root.join("keep-me");
         for path in [&fresh, &missing, &corrupt, &newer, &locked, &foreign] { std::fs::create_dir_all(path).unwrap(); }
         std::fs::write(corrupt.join(crate::searchable_pdf_stream::MANIFEST_FILE), b"{not json").unwrap();
-        std::fs::write(newer.join(crate::searchable_pdf_stream::MANIFEST_FILE), br#"{"format": 2, "somethingNew": true}"#).unwrap();
+        std::fs::write(newer.join(crate::searchable_pdf_stream::MANIFEST_FILE), br#"{"format": 3, "somethingNew": true}"#).unwrap();
         std::fs::write(locked.join(crate::searchable_pdf_stream::MANIFEST_FILE), b"{}").unwrap();
         let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 60 * 60);
         let age = |path: &Path| { std::fs::OpenOptions::new().write(true).custom_flags(0x0200_0000).open(path).unwrap().set_modified(day_ago).unwrap(); };

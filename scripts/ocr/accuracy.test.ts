@@ -135,8 +135,8 @@ describe('image decoding', () => {
 describe('engine identity', () => {
   it('uses the same invocation as ocr_process.rs and the same pins as ocr_build.rs', () => {
     const processSource = readFileSync(join(repo, 'src-tauri/src/ocr_process.rs'), 'utf8');
-    expect(processSource).toContain('"-l" "eng" "--oem" "1" "--psm" "6" "--dpi" "150" "--loglevel" "ERROR"');
-    expect(OCR_ARGS.slice(4).join(' ')).toBe('-l eng --oem 1 --psm 6 --dpi 150 --loglevel ERROR');
+    expect(processSource).toContain('"-l" "eng" "--oem" "1" "--psm" "3" "--dpi" "150" "--loglevel" "ERROR"');
+    expect(OCR_ARGS.slice(4).join(' ')).toBe('-l eng --oem 1 --psm 3 --dpi 150 --loglevel ERROR');
     expect(processSource).toContain('["-c", "tessedit_create_tsv=1", "-c", "tessedit_create_txt=0"]');
     const build = readFileSync(join(repo, 'src-tauri/ocr_build.rs'), 'utf8');
     for (const value of [MODEL_SHA256, ...Object.values(PINS), ...RECIPE_INPUTS, ...LICENSES]) expect(build).toContain(value);
@@ -173,6 +173,20 @@ describe('engine identity', () => {
       expect(report.results[0].charEdits).toBe(1);
       expect(report.results[0].wordEdits).toBe(1);
       expect(report.total.cer).toBeCloseTo(1 / 11);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+  it('scores text the app path already recognised, read from a text folder', async () => {
+    const dir = scratch();
+    try {
+      mkdirSync(join(dir, 'app'));
+      writeFileSync(join(dir, 'a.pgm'), Buffer.concat([Buffer.from('P5\n1 1\n255\n'), Buffer.from([0])]));
+      writeFileSync(join(dir, 'a.txt'), 'hello world\n');
+      writeFileSync(join(dir, 'app', 'a.ocr.txt'), 'hello wurld\n');
+      writeFileSync(join(dir, 'm.json'), JSON.stringify({ schemaVersion: 1, entries: [{ id: 'a', image: 'a.pgm', truth: 'a.txt' }] }));
+      const report = await runManifest(join(dir, 'm.json'), {} as never, { textDir: join(dir, 'app'), recognize: async () => { throw new Error('the engine must not run'); } });
+      expect(report.results[0].charEdits).toBe(1);
+      rmSync(join(dir, 'app', 'a.ocr.txt'));
+      await expect(runManifest(join(dir, 'm.json'), {} as never, { textDir: join(dir, 'app') })).rejects.toThrow();
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
