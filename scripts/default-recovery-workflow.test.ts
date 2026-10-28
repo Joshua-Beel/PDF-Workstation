@@ -65,9 +65,9 @@ it('is manual, candidate-bound, immutable-action pinned, and write-scoped only o
   expect(lf.match(/^ +permissions:/gm)?.length).toBe(1);
   expect(lf).toContain('\npermissions:\n  contents: read\n  actions: read\n\njobs:\n  verify-installed-recovery:\n    permissions:\n      contents: write\n      actions: read\n    runs-on: windows-2022\n');
   expect(lf).not.toMatch(/actions:\s*write|id-token:\s*write|secrets\.|AZURE_|TAURI_SIGNING|gh release|git push/);
-  expect(workflow.match(/actions\/checkout@11d5960a326750d5838078e36cf38b85af677262/g)?.length).toBe(2);
-  expect(workflow).toContain('actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093');
-  expect(workflow).toContain('actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02');
+  expect(workflow.match(/actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1/g)?.length).toBe(2);
+  expect(workflow).toContain('actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131');
+  expect(workflow).toContain('actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9');
 });
 
 it('parses and assigns no PowerShell automatic or read-only variable', () => {

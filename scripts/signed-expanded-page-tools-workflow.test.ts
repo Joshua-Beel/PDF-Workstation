@@ -22,9 +22,9 @@ describe('signed installed expanded page-tools workflow', () => {
     expect(workflow).toContain('fetch-depth: 0');
     expect(workflow).toContain('git diff --quiet --');
     expect(workflow).toContain('git diff --cached --quiet --');
-    expect(workflow).toContain('actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683');
-    expect(workflow).toContain('actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093');
-    expect(workflow).toContain('actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02');
+    expect(workflow).toContain('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1');
+    expect(workflow).toContain('actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131');
+    expect(workflow).toContain('actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9');
     expect(workflow).not.toMatch(/uses:\s*actions\/(?:checkout|download-artifact|upload-artifact)@v\d+/);
     const verify = workflow.slice(workflow.indexOf('- name: Verify signed installed expanded page tools'), workflow.indexOf('- name: Upload only the sanitized expanded page-tools record'));
     expect(verify).toContain('./scripts/verify-signed-expanded-page-tools.ps1');

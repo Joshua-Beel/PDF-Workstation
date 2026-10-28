@@ -36,9 +36,9 @@ describe('default draft verification workflow', () => {
     }
     const uses = [...workflow.matchAll(/^\s*-?\s*uses:\s*([^\s#]+)\s*$/gm)].map(match => match[1]);
     expect(uses).toEqual([
-      'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
-      'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
-      'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02',
+      'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+      'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+      'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9',
     ]);
     for (const use of uses) expect(use).toMatch(/@[0-9a-f]{40}$/);
     expect(workflow.match(/persist-credentials: false/g)).toHaveLength(2);
@@ -114,6 +114,23 @@ describe('default draft verification workflow', () => {
     `;
     const result = runPowerShell(check);
     expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
+  it('assigns no PowerShell automatic or read-only variable in the PDFium preparation or draft verifier', () => {
+    const check = String.raw`
+      $ErrorActionPreference='Stop'
+      $forbidden=@('_','args','error','event','eventargs','eventsubscriber','executioncontext','false','foreach','home','host','input','iscoreclr','islinux','ismacos','iswindows','lastexitcode','matches','myinvocation','nestedpromptlevel','ofs','pid','psboundparameters','pscmdlet','pscommandpath','psculture','psdebugcontext','psedition','psitem','psscriptroot','psuiculture','psversiontable','pwd','sender','shellid','stacktrace','switch','this','true')
+      foreach($path in @('./scripts/prepare-default-draft-pdfium.ps1','./scripts/verify-default-draft.ps1')){
+        $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path),[ref]$tokens,[ref]$errors);if($errors.Count){throw ('parse '+$path)}
+        $assigned=@($ast.FindAll({param($node)$node-is[Management.Automation.Language.AssignmentStatementAst]-and$node.Left-is[Management.Automation.Language.VariableExpressionAst]},$true)|ForEach-Object{$_.Left.VariablePath.UserPath.ToLowerInvariant()})
+        $hits=@($assigned|Where-Object{$forbidden-contains$_}|Sort-Object -Unique)
+        if($hits.Count){throw ('Automatic or read-only variable assignment in '+$path+': '+($hits-join', '))}
+      }
+      Write-Output PASS
+    `;
+    const result = runPowerShell(check);
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(result.stdout).toContain('PASS');
   });
 
   it('executes the real metadata and extraction inventory guards against missing, extra, OCR, collision, and traversal-shaped cases', () => {

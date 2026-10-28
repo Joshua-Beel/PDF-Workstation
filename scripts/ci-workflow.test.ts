@@ -28,8 +28,8 @@ describe('push and pull request CI workflow', () => {
 
   it('runs the signing-free gate in order', () => {
     const ordered = [
-      'actions/checkout@11d5960a326750d5838078e36cf38b85af677262',
-      'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
+      'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+      'actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1',
       'dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d',
       'actions/cache/restore@',
       'run: npm ci',

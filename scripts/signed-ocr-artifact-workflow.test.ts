@@ -56,8 +56,8 @@ describe('manual signed OCR artifact workflow', () => {
     expect(workflow).toContain('-SourceRevision $env:GITHUB_SHA');
     expect(workflow).toContain('${{ env.EXPORT_ROOT }}/*_x64-setup.exe');
     expect(workflow).toContain('${{ env.EXPORT_ROOT }}/artifact-verification.json');
-    expect(workflow.indexOf('actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02')).toBeGreaterThan(0);
-    expect(workflow.slice(workflow.indexOf('actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'))).not.toContain('BUILD_PROOF_ROOT');
+    expect(workflow.indexOf('actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9')).toBeGreaterThan(0);
+    expect(workflow.slice(workflow.indexOf('actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9'))).not.toContain('BUILD_PROOF_ROOT');
 
     expect(builder).toContain("if ($SourceRevision -and -not ($SignedOcr -or $UnsignedLocal))");
     expect(builder).toContain('SourceRevision does not match the current git HEAD.');

@@ -120,6 +120,9 @@ Full history: [docs/changelog.md](docs/changelog.md)
 
 - Dependency notices inventory refreshed for the new test-only `rayon` dev-dependency; notice text unchanged (SM0).
 - OCR hardening follow-up: the stale OCR work-directory sweep runs once per process, and a test now proves it deletes a matching directory older than 24 h while sparing fresh and foreign-named ones (SM4; no version change).
+- In-app update check now starts from published, publisher-signed 0.3.1 (not 0.2.0) and answers its native install confirmation: No keeps 0.3.1, then Yes installs; record schema 5. Tests only until the next release (SM6).
+- Workflows: every `actions/*` step moved off Node 20 to Node 24 releases (checkout 7.0.1, upload-artifact 7.0.2, download-artifact 7.0.0, setup-node 7.1.0, setup-dotnet 6.0.0, cache 6.1.0), SHA-pinned; a test now allows only these pins (SM6).
+- Release scripts: the PDFium preparation and Step 1 draft verifier no longer assign PowerShell's automatic `$matches`; an AST test now covers both (SM6; scripts and test only).
 - Security: hostile-nesting test fixed (debug parse of 100 levels needs ~1.95 MiB on lopdf's rayon threads); it now runs on a private pool, a quarter of the 2 MiB production stack in release (SM7; test only).
 - Security: save-copy reference scrub confirmed bounded; lopdf 0.45 refuses objects nested over 100 levels, now pinned by a hostile-nesting regression test on a 512 KiB stack (SM7; test only).
 - OCR hardening: Tesseract now starts in a private per-job temp directory (removed afterwards), not the install folder; OCR timing tests made deterministic; unused OCR licence build env vars dropped (SM4; no version change).
@@ -130,6 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - In-app update check: tauri-driver start moved inside the session try, so a start failure is cleaned up and reported as itself (SM6; review P3).
 - In-app update check: 7-Zip and the standalone silent installers run with the shared minimal environment, as tauri-driver already does (SM6; review P3).
 - In-app update check: before the post-update session, waits up to 60 s for updater setup processes started from temp after the retry to exit, and fails if any remain (SM6; review P3).
-- In-app update check: a WebDriver session stop in the main flow now fails if the driver or any owned process did not exit; error-path cleanup stays best effort (SM6; review P3).
-- Docs: `docs/releases.md` in-app update section names the current receipt schema (v3) for the false publisher-UI claims (SM6; review P3).
-- In-app update check: the receipt also records the shell-window probe taken at the end of the relaunch wait (`updater.shellWindowAtRelaunch`) (SM6; review P3).
