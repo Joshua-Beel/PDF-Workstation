@@ -152,6 +152,9 @@ impl PdfEngine for RemotePdfEngine {
     fn load_from_slice<'a>(&'a self, bytes: &'a [u8], password: Option<&str>) -> Result<RemoteDocument<'a>, LoadError> {
         self.load(bytes, password)
     }
+    fn load_shared(&self, bytes: &crate::editor::SourceBytes, password: Option<&str>) -> Result<RemoteDocument<'_>, LoadError> {
+        self.load(bytes, password)
+    }
     /// Lets a crash-looped engine start helpers again (the engine-stopped state's "Try again").
     fn reset_after_stop(&self) {
         self.supervisor.borrow_mut().reset_after_stop();

@@ -182,6 +182,13 @@ impl PdfEngine for SelectedEngine {
             Self::Remote(engine) => engine.load_from_vec(bytes, password).map(SelectedDocument::Remote),
         }
     }
+    fn load_shared(&self, bytes: &crate::editor::SourceBytes, password: Option<&str>) -> Result<SelectedDocument<'_>, LoadError> {
+        match self {
+            Self::InProcess(engine) => engine.load_shared(bytes, password).map(SelectedDocument::InProcess),
+            #[cfg(windows)]
+            Self::Remote(engine) => engine.load_shared(bytes, password).map(SelectedDocument::Remote),
+        }
+    }
     fn load_from_slice<'a>(&'a self, bytes: &'a [u8], password: Option<&str>) -> Result<SelectedDocument<'a>, LoadError> {
         match self {
             Self::InProcess(engine) => engine.load_from_slice(bytes, password).map(SelectedDocument::InProcess),

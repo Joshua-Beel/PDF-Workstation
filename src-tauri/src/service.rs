@@ -333,7 +333,7 @@ impl PdfService {
                             let (session, _) = sessions.get(&id).ok_or("Document is closed")?;
                             let note_state = note_documents.get(&id).map(|(revision, _)| vec![(id, *revision)]).unwrap_or_default();
                             Ok(OcrWorkerState {
-                                source: session.source.clone(), plan: session.plan.clone(), revision: session.revision,
+                                source: session.source.to_vec(), plan: session.plan.clone(), revision: session.revision,
                                 dirty: session.dirty(), can_undo: session.can_undo(), can_redo: session.can_redo(),
                                 cache_entries: cache.entries.iter().filter(|(key, _, _)| key.0 == id).map(|(key, bytes, _)| (*key, bytes.len())).collect(),
                                 cache_weight: cache.entries.iter().filter(|(key, _, _)| key.0 == id).map(|(_, _, weight)| *weight).sum(),
@@ -690,9 +690,9 @@ impl PdfService {
                             let path = pending.get(&request_id).ok_or("Password request expired. Open the PDF again.")?.clone();
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
                             if password.contains('\0') { return Err("Passwords cannot contain a null character.".into()); }
-                            let bytes = crate::open_limits::read_open_source(&path, sessions.values().map(|(session, _)| session.source.len() as u64), document_limit)?;
+                            let bytes = crate::editor::SourceBytes::from(crate::open_limits::read_open_source(&path, sessions.values().map(|(session, _)| session.source.len() as u64), document_limit)?);
                             let parsed = crate::pdf_load::load_for_open(&bytes)?;
-                            let document = match engine.load_from_vec(bytes.clone(), Some(&password)) {
+                            let document = match engine.load_shared(&bytes, Some(&password)) {
                                 Ok(document) => document,
                                 Err(error) if error.is_password() => return Ok(OpenResult::PasswordRequired { request_id, name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), incorrect: !password.is_empty() }),
                                 Err(error) => return Err(format!("Unable to open PDF: {error}")),
@@ -726,9 +726,9 @@ impl PdfService {
                         if reply.is_closed() { continue; }
                         let result = (|| {
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
-                            let bytes = crate::open_limits::read_open_source(&path, sessions.values().map(|(session, _)| session.source.len() as u64), document_limit)?;
+                            let bytes = crate::editor::SourceBytes::from(crate::open_limits::read_open_source(&path, sessions.values().map(|(session, _)| session.source.len() as u64), document_limit)?);
                             let parsed = crate::pdf_load::load_for_open(&bytes)?;
-                            let document = engine.load_from_vec(bytes.clone(), None).map_err(|e| format!("Unable to open PDF: {e}"))?;
+                            let document = engine.load_shared(&bytes, None).map_err(|e| format!("Unable to open PDF: {e}"))?;
                             let pages = document.page_sizes()?;
                             let id = next_id; next_id += 1;
                             let info = DocumentInfo { id, name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(), path: path.to_string_lossy().into_owned(), pages, revision: 0, dirty: false, can_undo: false, can_redo: false };
@@ -767,8 +767,9 @@ impl PdfService {
                             if !record.active { return Ok(None); }
                             accept_recovery_record(&mut recovery_floors, &record)?;
                             if recovery_heads.values().any(|(identity, _)| *identity == source) { return Err("Another open tab already owns recovery for this PDF.".into()); }
+                            let bytes = crate::editor::SourceBytes::from(bytes);
                             let parsed = crate::pdf_load::load_for_open(&bytes)?;
-                            let document = engine.load_from_vec(bytes.clone(), None).map_err(|error| format!("Unable to open PDF: {error}"))?;
+                            let document = engine.load_shared(&bytes, None).map_err(|error| format!("Unable to open PDF: {error}"))?;
                             if !document.is_unprotected() { return Err("Encrypted or restricted PDFs cannot be restored from recovery.".into()); }
                             let pages = document.page_sizes()?;
                             let mut session = EditSession::opened(bytes, parsed, pages.len(), None);
@@ -868,7 +869,7 @@ impl PdfService {
                         })();
                         let _ = reply.send(result);
                     }
-                    Request::AdmittedRender(id,page,width,token)=>{let reply={let mut a=render_admission.lock().expect("render admission mutex poisoned");let key=a.keys.iter().find_map(|(key,value)|(*value==token).then_some(*key));if let Some(key)=key{a.keys.remove(&key);}a.replies.remove(&token)};let Some(reply)=reply else{continue};
+                    Request::AdmittedRender(id,page,width,token)=>{let reply=render_admission.lock().expect("render admission mutex poisoned").take(token);let Some(reply)=reply else{continue};
                         #[cfg(test)]
                         { render_work.entry(id).or_default().dequeued += 1; }
                         if reply.is_closed() {
@@ -1535,8 +1536,23 @@ impl PdfService {
     pub async fn cancel_password(&self, id: u64) -> Result<(), String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::CancelPassword(id, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
     }
+    #[cfg(test)]
     pub async fn render(&self, id: u64, page: u16, width: i32) -> Result<Vec<u8>, String> {
-        let (tx, rx) = oneshot::channel(); self.sender.send(Request::Render(id, page, width, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
+        self.render_ticketed(id, page, width, None).await
+    }
+    /// A viewer render the frontend can withdraw with [`PdfService::cancel_render`] once its page scrolls away.
+    pub async fn render_ticketed(&self, id: u64, page: u16, width: i32, ticket: Option<u64>) -> Result<Vec<u8>, String> {
+        let (tx, rx) = oneshot::channel();
+        match ticket { Some(_) => self.sender.send_render(id, page, width, ticket, tx), None => self.sender.send(Request::Render(id, page, width, tx)) }.map_err(|e| e.to_string())?;
+        rx.await.map_err(|e| e.to_string())?
+    }
+    /// Answers a still-queued viewer render as cancelled so the worker skips it. Returns false when the render
+    /// already started, finished or was superseded. Never waits for the worker.
+    pub fn cancel_render(&self, ticket: u64) -> bool { self.sender.cancel_render(ticket) }
+    /// Queues a ticketed viewer render in call order and returns its reply (measurement harnesses).
+    #[cfg(test)]
+    pub(crate) fn queue_render(&self, id: u64, page: u16, width: i32, ticket: u64) -> oneshot::Receiver<Result<Vec<u8>, String>> {
+        let (tx, rx) = oneshot::channel(); self.sender.send_render(id, page, width, Some(ticket), tx).unwrap(); rx
     }
     /// The page's "Try again": lets a stopped PDF engine start again and a document it set aside reload.
     pub async fn retry_engine(&self, id: u64) -> Result<(), String> {
@@ -1905,7 +1921,16 @@ fn restore_recovery_session(session: &mut EditSession, record: &crate::recovery_
     Ok(())
 }
 type RenderKey=(u64,u16,i32,u64);
-#[derive(Default)]struct RenderAdmission{epoch:u64,next:u64,keys:HashMap<RenderKey,u64>,replies:HashMap<u64,Reply<Vec<u8>>>}
+#[derive(Default)]struct RenderAdmission{epoch:u64,next:u64,keys:HashMap<RenderKey,u64>,replies:HashMap<u64,Reply<Vec<u8>>>,tickets:HashMap<u64,u64>,ticket_of:HashMap<u64,u64>}
+impl RenderAdmission{
+    fn forget_ticket(&mut self,token:u64){if let Some(ticket)=self.ticket_of.remove(&token){if self.tickets.get(&ticket)==Some(&token){self.tickets.remove(&ticket);}}}
+    fn take(&mut self,token:u64)->Option<Reply<Vec<u8>>>{let key=self.keys.iter().find_map(|(key,value)|(*value==token).then_some(*key));if let Some(key)=key{self.keys.remove(&key);}self.forget_ticket(token);self.replies.remove(&token)}
+    fn cancel(&mut self,ticket:u64)->bool{
+        let Some(token)=self.tickets.get(&ticket).copied() else{return false};
+        if self.ticket_of.get(&token)!=Some(&ticket){self.tickets.remove(&ticket);return false}
+        if let Some(reply)=self.take(token){let _=reply.send(Err("Viewer render was cancelled because the page is no longer visible.".into()));true}else{false}
+    }
+}
 const WORKER_QUEUE_LIMIT:usize=256;
 #[derive(Debug)]enum SendRejected{Closed,Busy}
 impl std::fmt::Display for SendRejected{fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{f.write_str(match self{SendRejected::Closed=>"sending on a closed channel",SendRejected::Busy=>"The PDF worker is busy with earlier requests. Try again."})}}
@@ -1921,13 +1946,18 @@ impl RequestSender{
         if matches!(request,Request::Close(..)|Request::CancelPassword(..)|Request::EndPrint(..)){self.pending.fetch_add(1,std::sync::atomic::Ordering::AcqRel);return true}
         self.pending.fetch_update(std::sync::atomic::Ordering::AcqRel,std::sync::atomic::Ordering::Acquire,|n|(n<self.queue_limit).then_some(n+1)).is_ok()
     }
+    fn cancel_render(&self,ticket:u64)->bool{self.renders.lock().expect("render admission mutex poisoned").cancel(ticket)}
+    fn send_render(&self,id:u64,page:u16,width:i32,ticket:Option<u64>,reply:Reply<Vec<u8>>)->Result<(),SendRejected>{
+        let mut a=self.renders.lock().expect("render admission mutex poisoned");let key=(id,page,width,a.epoch);
+        let register=|a:&mut RenderAdmission,token:u64|{a.forget_ticket(token);if let Some(ticket)=ticket{a.tickets.insert(ticket,token);a.ticket_of.insert(token,ticket);}};
+        if let Some(token)=a.keys.get(&key).copied(){register(&mut a,token);if let Some(old)=a.replies.insert(token,reply){let _=old.send(Err("Viewer render was superseded by a newer request.".into()));}return Ok(())}
+        if a.keys.len()>=self.limit{let _=reply.send(Err("Viewer render queue is full. Try again.".into()));return Ok(())}
+        a.next=a.next.wrapping_add(1);let token=a.next;a.keys.insert(key,token);a.replies.insert(token,reply);register(&mut a,token);
+        if self.inner.send(Request::AdmittedRender(id,page,width,token)).is_err(){a.take(token);return Err(SendRejected::Closed)}Ok(())
+    }
     fn send(&self,request:Request)->Result<(),SendRejected>{
         if let Request::Render(id,page,width,reply)=request{
-            let mut a=self.renders.lock().expect("render admission mutex poisoned");let key=(id,page,width,a.epoch);
-            if let Some(token)=a.keys.get(&key).copied(){if let Some(old)=a.replies.insert(token,reply){let _=old.send(Err("Viewer render was superseded by a newer request.".into()));}return Ok(())}
-            if a.keys.len()>=self.limit{let _=reply.send(Err("Viewer render queue is full. Try again.".into()));return Ok(())}
-            a.next=a.next.wrapping_add(1);let token=a.next;a.keys.insert(key,token);a.replies.insert(token,reply);
-            if self.inner.send(Request::AdmittedRender(id,page,width,token)).is_err(){a.keys.remove(&key);a.replies.remove(&token);return Err(SendRejected::Closed)}Ok(())
+            self.send_render(id,page,width,None,reply)
         }else{
             if !self.admit(&request){return Err(SendRejected::Busy)}
             {let mut a=self.renders.lock().expect("render admission mutex poisoned");a.epoch=a.epoch.wrapping_add(1);}
@@ -3021,6 +3051,59 @@ mod tests {
         assert!(results.iter().all(|result| result.as_ref().err().is_some_and(|error| error.contains("closed"))));
         assert!(service.print_render_blocking(snapshot.token, 0, 64, 64).err().unwrap().contains("ended"));
         assert!(call(&service, |reply| Request::Properties(info.id, info.revision, reply)).err().unwrap().contains("closed"));
+    }
+    #[test]
+    fn stale_scroll_renders_cancelled_while_queued_never_reach_pdfium() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll"));
+        let info = call(&service, |reply| Request::Open(root.join("../test-corpus/synthetic-text-1500.pdf"), reply)).unwrap();
+        for cancel in [false, true] {
+            let (release, gate) = mpsc::channel();
+            call(&service, |reply| Request::BacklogGate(gate, reply)).unwrap();
+            let base: u16 = if cancel { 100 } else { 0 };
+            let ticket = |page: u16| u64::from(base + page) + 1;
+            let replies: Vec<_> = (0..12u16).map(|page| { let (tx, rx) = oneshot::channel(); service.sender.send_render(info.id, base + page, 700, Some(ticket(page)), tx).unwrap(); rx }).collect();
+            if cancel { for page in 0..11 { assert!(service.cancel_render(ticket(page))); } assert!(!service.cancel_render(9_999), "an unknown ticket cancels nothing"); }
+            release.send(Vec::new()).unwrap();
+            let results: Vec<_> = replies.into_iter().map(|rx| rx.blocking_recv().unwrap()).collect();
+            let work = call(&service, |reply| Request::RenderWorkForDocument(info.id, reply)).unwrap();
+            assert!(results[11].is_ok(), "the page still visible renders");
+            if cancel {
+                assert_eq!(work.rendered, 1, "only the page still visible may reach PDFium");
+                assert!(results[..11].iter().all(|result| result.as_ref().err().is_some_and(|error| error.contains("cancelled"))));
+                assert!(!service.cancel_render(ticket(11)), "a finished render cannot be cancelled");
+            } else {
+                assert_eq!(work.rendered, 12, "without cancellation every queued render reaches PDFium");
+                assert!(results.iter().all(Result::is_ok));
+            }
+        }
+        // The worker is shared with tests running in parallel: check only this test's tickets and keys, and never
+        // panic while holding the admission lock (a poisoned lock would take the shared worker down).
+        let leftover = { let a = service.sender.renders.lock().unwrap(); (1..=112u64).any(|ticket| a.tickets.contains_key(&ticket)) || a.keys.keys().any(|key| key.0 == info.id) };
+        assert!(!leftover, "cancellation leaves no admission state behind");
+    }
+    #[test]
+    fn render_cancel_frees_admission_slots_and_ignores_superseded_or_spent_tickets() {
+        let (sender, receiver, state) = admission_sender();
+        let mut replies = Vec::new();
+        for page in 0..32u16 { let (tx, rx) = oneshot::channel(); sender.send_render(1, page, 64, Some(u64::from(page)), tx).unwrap(); replies.push(rx); }
+        let (tx, full) = oneshot::channel(); sender.send_render(1, 40, 64, Some(40), tx).unwrap();
+        assert!(full.blocking_recv().unwrap().unwrap_err().contains("queue is full"));
+        for ticket in 0..31 { assert!(sender.cancel_render(ticket)); }
+        assert!(!sender.cancel_render(0), "a ticket cancels once");
+        for rx in replies.drain(..31) { assert!(rx.blocking_recv().unwrap().unwrap_err().contains("cancelled")); }
+        let (tx, _fresh) = oneshot::channel(); sender.send_render(1, 41, 64, Some(41), tx).unwrap();
+        assert_eq!(state.lock().unwrap().keys.len(), 2, "cancelled renders free their admission slots at once");
+        let (tx, newer) = oneshot::channel(); sender.send_render(1, 31, 64, Some(50), tx).unwrap();
+        assert!(replies.remove(0).blocking_recv().unwrap().unwrap_err().contains("superseded"));
+        assert!(!sender.cancel_render(31), "a superseded ticket must not cancel the newer request for the same page");
+        assert!(sender.cancel_render(50));
+        assert!(newer.blocking_recv().unwrap().unwrap_err().contains("cancelled"));
+        let markers: Vec<u64> = receiver.try_iter().filter_map(|request| match request { Request::AdmittedRender(_, _, _, token) => Some(token), _ => None }).collect();
+        assert_eq!(markers.len(), 33);
+        let mut a = state.lock().unwrap();
+        assert_eq!(markers.iter().filter_map(|token| a.take(*token)).count(), 1, "the worker finds a reply only for the render never cancelled");
+        assert!(a.keys.is_empty() && a.replies.is_empty() && a.tickets.is_empty() && a.ticket_of.is_empty());
     }
     #[test]
     #[ignore = "Manual bounded backlog measurement; no timing regression assertion"]

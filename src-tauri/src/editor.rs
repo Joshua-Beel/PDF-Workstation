@@ -81,8 +81,23 @@ pub(crate) fn source_text_extraction_permission(document: &Document) -> Result<(
     }
 }
 
+/// A document's immutable source bytes. Cloning shares the one buffer, so the in-process PDFium document can
+/// read the same allocation the session holds instead of keeping a second copy of every open PDF.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SourceBytes(std::sync::Arc<Vec<u8>>);
+impl From<Vec<u8>> for SourceBytes { fn from(bytes: Vec<u8>) -> Self { Self(std::sync::Arc::new(bytes)) } }
+impl std::ops::Deref for SourceBytes { type Target = [u8]; fn deref(&self) -> &[u8] { &self.0 } }
+impl AsRef<[u8]> for SourceBytes { fn as_ref(&self) -> &[u8] { &self.0 } }
+impl std::fmt::Debug for SourceBytes { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.debug_struct("SourceBytes").field("len", &self.0.len()).finish() } }
+impl PartialEq<Vec<u8>> for SourceBytes { fn eq(&self, other: &Vec<u8>) -> bool { self.0.as_slice() == other.as_slice() } }
+impl PartialEq<SourceBytes> for Vec<u8> { fn eq(&self, other: &SourceBytes) -> bool { self.as_slice() == other.0.as_slice() } }
+impl PartialEq<[u8]> for SourceBytes { fn eq(&self, other: &[u8]) -> bool { self.0.as_slice() == other } }
+impl PartialEq<&[u8]> for SourceBytes { fn eq(&self, other: &&[u8]) -> bool { self.0.as_slice() == *other } }
+impl<const N: usize> PartialEq<[u8; N]> for SourceBytes { fn eq(&self, other: &[u8; N]) -> bool { self.0.as_slice() == other.as_slice() } }
+impl<const N: usize> PartialEq<&[u8; N]> for SourceBytes { fn eq(&self, other: &&[u8; N]) -> bool { self.0.as_slice() == other.as_slice() } }
+
 pub struct EditSession {
-    pub source: Vec<u8>,
+    pub source: SourceBytes,
     source_page_count: usize,
     pub plan: Vec<PageSpec>,
     undo: VecDeque<Vec<PageSpec>>,
@@ -111,12 +126,14 @@ impl EditSession {
         self.history_bytes = snapshot.history_bytes; self.saved = snapshot.saved;
         self.revision = snapshot.revision; self.next_note = snapshot.next_note;
     }
-    pub fn new(source: Vec<u8>, count: usize) -> Self {
+    pub fn new(source: impl Into<SourceBytes>, count: usize) -> Self {
+        let source = source.into();
         let parsed = crate::pdf_load::load(&source).map_err(|error| error.to_string());
         Self::opened(source, parsed, count, None)
     }
     /// A session for a source already parsed by `pdf_load::load_for_open`, so an open parses it once.
-    pub(crate) fn opened(source: Vec<u8>, parsed: Result<Document, String>, count: usize, password: Option<&str>) -> Self {
+    pub(crate) fn opened(source: impl Into<SourceBytes>, parsed: Result<Document, String>, count: usize, password: Option<&str>) -> Self {
+        let source = source.into();
         let owner_access = parsed.as_ref().ok().is_some_and(|document| password.is_some_and(|password| document.authenticate_owner_password(password).is_ok()));
         let text_extraction_permission = if owner_access {
             Ok(())

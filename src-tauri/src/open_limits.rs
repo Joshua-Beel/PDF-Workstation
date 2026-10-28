@@ -2,12 +2,13 @@ use std::{io::Read, path::Path};
 
 const GIB: u64 = 1024 * 1024 * 1024;
 /// Largest single PDF held open, whether opened from disk or created as a copy (combine, fill, redact, OCR, ...).
-/// The worker keeps the source twice while a document is open (`EditSession.source` and PDFium's copy),
-/// so a document at this limit costs about 2 GiB.
+/// A document opened from disk keeps its source once: in process, PDFium reads `EditSession.source` in place
+/// (`PdfEngine::load_shared`); the open itself peaks near twice the source while lopdf's parse is alive. A copy
+/// opened as a new tab still gives PDFium its own copy, so it costs about 2 GiB at this limit.
 pub const MAX_OPEN_SOURCE_BYTES: u64 = GIB;
 /// Most documents held by the worker at once. Opens and every copy that opens as a new tab count.
 pub const MAX_OPEN_DOCUMENTS: usize = 32;
-/// Total source bytes held across all open documents (about 8 GiB including PDFium's copies).
+/// Total source bytes held across all open documents (up to about 8 GiB when every one is a copy with PDFium's own).
 pub const MAX_OPEN_SOURCE_TOTAL: u64 = 4 * GIB;
 /// Committed-memory cap (Job Object process and job limit) for the planned PDF-engine helper process.
 /// Not used by the app yet. Measured with sources and bitmaps in shared sections, which the job does not

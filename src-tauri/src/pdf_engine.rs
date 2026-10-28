@@ -94,6 +94,10 @@ pub(crate) trait PdfEngine {
     type Document<'a>: EngineDocument where Self: 'a;
     fn load_from_vec(&self, bytes: Vec<u8>, password: Option<&str>) -> Result<Self::Document<'_>, LoadError>;
     fn load_from_slice<'a>(&'a self, bytes: &'a [u8], password: Option<&str>) -> Result<Self::Document<'a>, LoadError>;
+    /// Loads an open document's source. In process PDFium reads the session's own buffer (no second copy).
+    fn load_shared(&self, bytes: &crate::editor::SourceBytes, password: Option<&str>) -> Result<Self::Document<'_>, LoadError> {
+        self.load_from_vec(bytes.to_vec(), password)
+    }
     /// The user's "Try again" after the engine stopped itself (helper crash loop). No-op in process.
     fn reset_after_stop(&self) {}
 }
@@ -156,7 +160,7 @@ impl InProcessEngine {
     fn document<'a>(&self, inner: PdfDocument<'a>) -> InProcessDocument<'a> {
         let handle = self.raw.get_handle_from_document(&inner);
         let bits = unsafe { self.raw.FPDF_GetDocPermissions(handle) } as u64;
-        InProcessDocument { inner, text_extraction_allowed: extraction_bits_allow(bits) }
+        InProcessDocument { inner, text_extraction_allowed: extraction_bits_allow(bits), _source: None }
     }
 }
 
@@ -176,11 +180,22 @@ impl PdfEngine for InProcessEngine {
     fn load_from_slice<'a>(&'a self, bytes: &'a [u8], password: Option<&str>) -> Result<InProcessDocument<'a>, LoadError> {
         Ok(self.document(self.pdfium.load_pdf_from_byte_slice(bytes, password)?))
     }
+    fn load_shared(&self, bytes: &crate::editor::SourceBytes, password: Option<&str>) -> Result<InProcessDocument<'_>, LoadError> {
+        let source = bytes.clone();
+        // SAFETY: PDFium reads this view for as long as the document is open. It points into the heap buffer of
+        // `source`, which is immutable (`SourceBytes` hands out no mutable access) and never moves, and which the
+        // returned document owns in `_source`. `_source` is declared after `inner`, so it is dropped only after
+        // `inner` has closed the PDFium document; `inner` is private and never moved out of the document.
+        let view: &[u8] = unsafe { std::slice::from_raw_parts(source.as_ptr(), source.len()) };
+        let mut document = self.document(self.pdfium.load_pdf_from_byte_slice(view, password)?);
+        document._source = Some(source);
+        Ok(document)
+    }
 }
 
 /// A document loaded in this process. Its PDFium handle is private to this module: the worker can
-/// reach it only through [`EngineDocument`].
-pub(crate) struct InProcessDocument<'a> { inner: PdfDocument<'a>, text_extraction_allowed: bool }
+/// reach it only through [`EngineDocument`]. Field order matters: `inner` must drop before `_source`.
+pub(crate) struct InProcessDocument<'a> { inner: PdfDocument<'a>, text_extraction_allowed: bool, _source: Option<crate::editor::SourceBytes> }
 
 impl InProcessDocument<'_> {
     fn with_target<T>(&self, target: PageTarget<'_>, action: impl FnOnce(&PdfPage<'_>) -> T) -> Result<T, String> {

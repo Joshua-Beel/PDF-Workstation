@@ -22,10 +22,11 @@ const Page = memo(function Page({ id, index, width, height, scale, revision, sel
   const shown = useRef({ url: '', revision });
   useEffect(() => {
     let disposed = false;
+    const stale = new AbortController();
     setError('');
     if (shown.current.revision !== revision) { shown.current = { url: shown.current.url, revision }; setUrl(''); setImageReady(false); }
     const timer = window.setTimeout(() => {
-      renderPage(id, index, Math.min(3000, Math.round(width * scale * window.devicePixelRatio))).then(result => {
+      renderPage(id, index, Math.min(3000, Math.round(width * scale * window.devicePixelRatio)), stale.signal).then(result => {
         if (disposed) { URL.revokeObjectURL(result); return; }
         const previous = shown.current.url;
         shown.current = { url: result, revision };
@@ -39,7 +40,7 @@ const Page = memo(function Page({ id, index, width, height, scale, revision, sel
         if (previous) URL.revokeObjectURL(previous);
       });
     }, 35);
-    return () => { disposed = true; clearTimeout(timer); };
+    return () => { disposed = true; clearTimeout(timer); stale.abort(); };
   }, [id, index, width, scale, revision, attempt]);
   useEffect(() => () => { if (shown.current.url) URL.revokeObjectURL(shown.current.url); }, []);
   const tryAgain = () => { void retryPdfEngine(id).catch(() => undefined).finally(() => setAttempt(value => value + 1)); };
