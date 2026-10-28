@@ -168,9 +168,9 @@ function Read-BoundedJson {
 
 function Assert-ExactAsset {
     param($Release,[uint64]$Id,[string]$Name,[uint64]$Bytes,[string]$Sha256)
-    $matches = @($Release.assets | Where-Object { [uint64]$_.id -eq $Id })
-    if ($matches.Count -ne 1) { throw 'Target release asset id is absent or ambiguous.' }
-    $asset = $matches[0]
+    $found = @($Release.assets | Where-Object { [uint64]$_.id -eq $Id })
+    if ($found.Count -ne 1) { throw 'Target release asset id is absent or ambiguous.' }
+    $asset = $found[0]
     $assetUri = [Uri]([string]$asset.browser_download_url)
     $expectedPath = "/$($script:UpdatePins.Repository)/releases/download/$TargetTag/$Name"
     if ([string]$asset.name -cne $Name -or [uint64]$asset.size -ne $Bytes -or [string]$asset.state -cne 'uploaded' -or
@@ -282,15 +282,15 @@ function Assert-InstallFacts {
 
 function Get-AppProcesses {
     param([string]$ApplicationPath)
-    $canonical = [IO.Path]::GetFullPath($ApplicationPath); $matches = [Collections.Generic.List[object]]::new()
+    $canonical = [IO.Path]::GetFullPath($ApplicationPath); $found = [Collections.Generic.List[object]]::new()
     foreach ($process in @(Get-Process -Name 'pdf-workstation' -ErrorAction SilentlyContinue)) {
         try {
             if ([IO.Path]::GetFullPath([string]$process.Path).Equals($canonical,[StringComparison]::OrdinalIgnoreCase)) {
-                $matches.Add([pscustomobject]@{ Id = [int]$process.Id; StartTimeUtc = $process.StartTime.ToUniversalTime(); StartTicks = [long]$process.StartTime.ToUniversalTime().Ticks })
+                $found.Add([pscustomobject]@{ Id = [int]$process.Id; StartTimeUtc = $process.StartTime.ToUniversalTime(); StartTicks = [long]$process.StartTime.ToUniversalTime().Ticks })
             }
         } catch { }
     }
-    return @($matches)
+    return @($found)
 }
 
 function Stop-ExactProcesses {
@@ -300,7 +300,7 @@ function Stop-ExactProcesses {
             $process = [Diagnostics.Process]::GetProcessById([int]$entry.Id)
             $samePath = [IO.Path]::GetFullPath([string]$process.MainModule.FileName).Equals([IO.Path]::GetFullPath($ApplicationPath),[StringComparison]::OrdinalIgnoreCase)
             $sameStart = [long]$process.StartTime.ToUniversalTime().Ticks -eq [long]$entry.StartTicks
-            if ($samePath -and $sameStart) { $process.Kill($true); $process.WaitForExit(10000) }
+            if ($samePath -and $sameStart) { $process.Kill($true); $null = $process.WaitForExit(10000) }
             $process.Dispose()
         } catch { }
     }
@@ -338,7 +338,7 @@ function Start-WebDriverSession {
         if ($id -cnotmatch '^[A-Za-z0-9-]+$') { throw 'WebDriver session identifier is malformed.' }
         return [pscustomobject]@{ Driver = $driver; SessionId = $id }
     } catch {
-        try { if (-not $driver.HasExited) { $driver.Kill($true); $driver.WaitForExit(10000) } } catch { }
+        try { if (-not $driver.HasExited) { $driver.Kill($true); $null = $driver.WaitForExit(10000) } } catch { }
         $driver.Dispose()
         throw
     }
@@ -366,7 +366,7 @@ function Stop-WebDriverSession {
     if ($null -eq $Session) { return }
     $deadline = [datetime]::UtcNow.AddSeconds(10)
     try { $null = Invoke-LoopbackJson -Method DELETE -Path "/session/$($Session.SessionId)" -Deadline $deadline } catch { }
-    try { if (-not $Session.Driver.HasExited) { $Session.Driver.Kill($true); $Session.Driver.WaitForExit(10000) } } catch { }
+    try { if (-not $Session.Driver.HasExited) { $Session.Driver.Kill($true); $null = $Session.Driver.WaitForExit(10000) } } catch { }
     $Session.Driver.Dispose()
 }
 
@@ -375,7 +375,7 @@ function Open-UpdatesDialog {
     $homeScript = @'
 return {ready:document.readyState==='complete',title:document.title,menu:[...document.querySelectorAll('button')].filter(x=>x.textContent.trim()==='Menu').length};
 '@
-    $home = Wait-WebDriverValue -SessionId $SessionId -Deadline $Deadline -Kind 'Installed home UI' -Script $homeScript -Predicate { param($v) [bool]$v.ready -and [string]$v.title -ceq 'PDF Workstation' -and [int]$v.menu -eq 1 }
+    $homeUi = Wait-WebDriverValue -SessionId $SessionId -Deadline $Deadline -Kind 'Installed home UI' -Script $homeScript -Predicate { param($v) [bool]$v.ready -and [string]$v.title -ceq 'PDF Workstation' -and [int]$v.menu -eq 1 }
     $menuScript = @'
 const m=[...document.querySelectorAll('button')].filter(x=>x.textContent.trim()==='Menu'&&x.getAttribute('aria-expanded')==='false');if(m.length===1)m[0].click();return m.length===1;
 '@
@@ -384,7 +384,7 @@ const m=[...document.querySelectorAll('button')].filter(x=>x.textContent.trim()=
 const b=[...document.querySelectorAll('button')].filter(x=>x.textContent.trim()==='Check for updates…'&&!x.disabled);if(b.length===1)b[0].click();return b.length===1;
 '@
     if (-not (Invoke-WebDriverScript -SessionId $SessionId -Deadline $Deadline -Script $updateScript)) { throw 'Installed update control was unavailable.' }
-    return $home
+    return $homeUi
 }
 
 function Wait-AvailableUpdate {

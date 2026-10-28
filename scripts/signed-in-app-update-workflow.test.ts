@@ -199,6 +199,54 @@ describe('published in-app update verification infrastructure', () => {
     expect(script).not.toMatch(/Write-Host\s+\$json|Write-Output\s+\$json/);
   });
 
+  it('never assigns automatic variables or leaks WaitForExit output in the verifier and its dot-sourced helper', () => {
+    const source = String.raw`
+      $ErrorActionPreference='Stop'
+      Set-StrictMode -Version Latest
+      Set-Location -LiteralPath '${process.cwd().replaceAll("'", "''")}'
+      $automatic=@('_','args','ConsoleFileName','EnabledExperimentalFeatures','Error','Event','EventArgs','EventSubscriber','ExecutionContext','false','foreach','HOME','Host','input','IsCoreCLR','IsLinux','IsMacOS','IsWindows','LASTEXITCODE','Matches','MyInvocation','NestedPromptLevel','PID','PROFILE','PSBoundParameters','PSCmdlet','PSCommandPath','PSCulture','PSDebugContext','PSEdition','PSHOME','PSItem','PSScriptRoot','PSSenderInfo','PSUICulture','PSVersionTable','PWD','Sender','ShellId','StackTrace','switch','this','true')
+      function Get-ParsedAst([string]$text){
+        $tokens=$null;$errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseInput($text,[ref]$tokens,[ref]$errors)
+        if($errors.Count){throw 'Source did not parse.'}
+        return $ast
+      }
+      function Get-AutomaticAssignments($ast){
+        $nodes=$ast.FindAll({param($n)$n-is[Management.Automation.Language.AssignmentStatementAst]-or$n-is[Management.Automation.Language.ForEachStatementAst]-or$n-is[Management.Automation.Language.ParameterAst]},$true)
+        foreach($node in $nodes){
+          $target=if($node-is[Management.Automation.Language.AssignmentStatementAst]){$node.Left}elseif($node-is[Management.Automation.Language.ForEachStatementAst]){$node.Variable}else{$node.Name}
+          foreach($variable in @($target.FindAll({param($n)$n-is[Management.Automation.Language.VariableExpressionAst]},$true))){
+            if($automatic-contains$variable.VariablePath.UserPath){ 'line '+$variable.Extent.StartLineNumber+' $'+$variable.VariablePath.UserPath }
+          }
+        }
+      }
+      function Get-WaitForExitLeaks($ast){
+        @($ast.FindAll({param($n)
+          $n-is[Management.Automation.Language.PipelineAst]-and$n.PipelineElements.Count-eq1-and
+          $n.PipelineElements[0]-is[Management.Automation.Language.CommandExpressionAst]-and
+          $n.PipelineElements[0].Expression-is[Management.Automation.Language.InvokeMemberExpressionAst]-and
+          $n.PipelineElements[0].Expression.Member.Extent.Text-ceq'WaitForExit'-and
+          $null-ne$n.PipelineElements[0].Expression.Arguments-and
+          ($n.Parent-is[Management.Automation.Language.NamedBlockAst]-or$n.Parent-is[Management.Automation.Language.StatementBlockAst])
+        },$true)|ForEach-Object{'line '+$_.Extent.StartLineNumber})
+      }
+      $seed=Get-ParsedAst 'function f { $home = 1; [object[]]$Matches = @(); foreach ($input in 1) { } }; function g($PID) { }; function h($p) { $null = $p.WaitForExit(1); if ($p.WaitForExit(1)) { }; $p.WaitForExit(1) }'
+      $seeded=@(Get-AutomaticAssignments $seed)
+      if($seeded.Count-ne4){throw ('Automatic-variable scan missed seeded assignments: '+($seeded-join'; '))}
+      $seededLeaks=@(Get-WaitForExitLeaks $seed)
+      if($seededLeaks.Count-ne1){throw ('WaitForExit leak scan did not find exactly the seeded leak: '+($seededLeaks-join'; '))}
+      foreach($path in @('scripts/verify-in-app-update.ps1','scripts/installed-publisher-ui.ps1')){
+        $ast=Get-ParsedAst ([IO.File]::ReadAllText((Resolve-Path $path)))
+        $hits=@(Get-AutomaticAssignments $ast)
+        if($hits.Count){throw ($path+' assigns automatic variables: '+($hits-join'; '))}
+        $leaks=@(Get-WaitForExitLeaks $ast)
+        if($leaks.Count){throw ($path+' leaks WaitForExit output: '+($leaks-join'; '))}
+      }
+    `;
+    const result = spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', source], { encoding: 'utf8', timeout: 30_000 });
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
   it('parses and rejects ambiguous numeric and installed-file receipts', () => {
     const source = verifierHarness(
       ['ConvertTo-ExactUInt64', 'Get-TextReceipt', 'Get-InstallLocationForm', 'Test-InstallLocation', 'Get-SafeFactValue', 'Get-InstallFactMismatches', 'Assert-InstallFacts'],

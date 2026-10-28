@@ -435,23 +435,23 @@ function Get-PublisherUiExactElements {
         [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,$Name),
         [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty,$ControlType)
     ))
-    $matches = @($Root.FindAll($Scope,$condition) | ForEach-Object { $_ })
+    $found = @($Root.FindAll($Scope,$condition) | ForEach-Object { $_ })
     Assert-PublisherUiDeadline -Deadline $Deadline
-    if ($matches.Count -gt $script:PublisherUiPins.ElementMaximum) { throw 'Windows publisher UI exact-element result exceeded its bound.' }
-    foreach ($match in $matches) { $null = Get-PublisherUiElementName -Element $match }
-    return $matches
+    if ($found.Count -gt $script:PublisherUiPins.ElementMaximum) { throw 'Windows publisher UI exact-element result exceeded its bound.' }
+    foreach ($match in $found) { $null = Get-PublisherUiElementName -Element $match }
+    return $found
 }
 
 function Get-PublisherUiExactWindows {
     param([Parameter(Mandatory = $true)][string]$Title,[Parameter(Mandatory = $true)][datetime]$Deadline)
     Initialize-PublisherUiInterop
     $windows = @(Get-PublisherUiExactElements -Root ([Windows.Automation.AutomationElement]::RootElement) -Name $Title -ControlType ([Windows.Automation.ControlType]::Window) -Scope ([Windows.Automation.TreeScope]::Children) -Deadline $Deadline)
-    $matches = @($windows | Where-Object {
+    $found = @($windows | Where-Object {
         ([string]$_.Current.ClassName).Equals($script:PublisherUiPins.PropertyClass,[StringComparison]::Ordinal) -and
         [long]$_.Current.NativeWindowHandle -ne 0 -and [bool]$_.Current.IsEnabled -and -not [bool]$_.Current.IsOffscreen
     })
-    if ($matches.Count -gt $script:PublisherUiPins.ElementMaximum) { throw 'Windows publisher UI top-level result exceeded its bound.' }
-    return $matches
+    if ($found.Count -gt $script:PublisherUiPins.ElementMaximum) { throw 'Windows publisher UI top-level result exceeded its bound.' }
+    return $found
 }
 
 function Wait-PublisherUiExactWindow {
@@ -462,12 +462,12 @@ function Wait-PublisherUiExactWindow {
     )
     do {
         Assert-PublisherUiDeadline -Deadline $Deadline
-        $matches = @(Get-PublisherUiExactWindows -Title $Title -Deadline $Deadline)
+        $found = @(Get-PublisherUiExactWindows -Title $Title -Deadline $Deadline)
         if ($ExpectedOwner -ne 0) {
-            $matches = @($matches | Where-Object { [Smacrobat.PublisherUi.NativeShell]::OwnerOf([long]$_.Current.NativeWindowHandle) -eq $ExpectedOwner })
+            $found = @($found | Where-Object { [Smacrobat.PublisherUi.NativeShell]::OwnerOf([long]$_.Current.NativeWindowHandle) -eq $ExpectedOwner })
         }
-        if ($matches.Count -eq 1) { return $matches[0] }
-        if ($matches.Count -gt 1) { throw 'Windows publisher UI top-level identity was ambiguous.' }
+        if ($found.Count -eq 1) { return $found[0] }
+        if ($found.Count -gt 1) { throw 'Windows publisher UI top-level identity was ambiguous.' }
         Start-Sleep -Milliseconds $script:PublisherUiPins.PollMilliseconds
     } while ([datetime]::UtcNow -lt $Deadline)
     throw 'Windows publisher UI expected window did not appear before the deadline.'
@@ -516,9 +516,9 @@ function Wait-PublisherUiExactOwnedWindow {
             }
         }
         if ([datetime]::UtcNow -ge $Deadline) { break }
-        $matches = @(Get-PublisherUiExactOwnedWindows -Title $Title -ExpectedOwner $ExpectedOwner -Deadline $Deadline)
-        if ($matches.Count -eq 1) { return $matches[0] }
-        if ($matches.Count -gt 1) {
+        $found = @(Get-PublisherUiExactOwnedWindows -Title $Title -ExpectedOwner $ExpectedOwner -Deadline $Deadline)
+        if ($found.Count -eq 1) { return $found[0] }
+        if ($found.Count -gt 1) {
             Set-PublisherUiChildCategory -Category 'modal-ambiguous'
             throw 'Windows publisher UI owned-window identity was ambiguous.'
         }
@@ -781,10 +781,10 @@ function Invoke-PublisherUiExactCleanup {
         [Parameter(Mandatory = $true)][datetime]$Deadline
     )
     foreach ($title in @($script:PublisherUiPins.DetailsTitle,$PropertiesTitle)) {
-        $matches = @([Smacrobat.PublisherUiIsolation.NativeWindow]::Exact($title,$script:PublisherUiPins.PropertyClass))
-        if ($matches.Count -gt 1) { throw 'Windows publisher UI cleanup topology was ambiguous.' }
-        if ($matches.Count -eq 1) {
-            $identity = $matches[0]
+        $found = @([Smacrobat.PublisherUiIsolation.NativeWindow]::Exact($title,$script:PublisherUiPins.PropertyClass))
+        if ($found.Count -gt 1) { throw 'Windows publisher UI cleanup topology was ambiguous.' }
+        if ($found.Count -eq 1) {
+            $identity = $found[0]
             if (-not [Smacrobat.PublisherUiIsolation.NativeWindow]::CloseExact($identity)) { throw 'Windows publisher UI cleanup identity changed.' }
             while ([Smacrobat.PublisherUiIsolation.NativeWindow]::StillMatches($identity)) {
                 if ([datetime]::UtcNow -ge $Deadline) { throw 'Windows publisher UI cleanup exceeded its deadline.' }
