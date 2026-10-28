@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use lopdf::{content::{Content, Operation}, dictionary, Dictionary, Document, Object, Stream, StringFormat};
+use lopdf::{content::{Content, Operation}, dictionary, Dictionary, Document, Object, Stream};
 
 pub const MAX_SEARCHABLE_PAGES: usize = 4_096;
 pub const MAX_SEARCHABLE_PIXELS: u64 = 32 * 1024 * 1024;
@@ -42,6 +42,31 @@ pub fn is_supported_word_text(text: &str) -> bool {
         }
     }
     count > 0
+}
+
+/// The reopened-page check for a searchable copy (SM7 ruling, 2026-10-28).
+/// PDFium extracts in its own layout order, regroups rows and turns a
+/// line-end hyphen into U+0002, so the page text is compared as a multiset of
+/// characters against the characters of the page's recognised words (no
+/// separators). From the extraction exactly U+0020, CR and LF are dropped and
+/// U+0002 counts as `-`; any other character below U+0020, U+FFFD or U+FFFE
+/// fails the page. A page without words must extract to whitespace only.
+/// The saved bytes are separately required to equal the canonical rebuild.
+pub fn extraction_has_the_word_characters(extracted: &str, word_characters: &str) -> bool {
+    let mut found = Vec::new();
+    for character in extracted.chars() {
+        match character {
+            ' ' | '\r' | '\n' => {}
+            '\u{2}' => found.push('-'),
+            '\u{FFFD}' | '\u{FFFE}' => return false,
+            other if u32::from(other) < 0x20 => return false,
+            other => found.push(other),
+        }
+    }
+    let mut expected = word_characters.chars().collect::<Vec<_>>();
+    found.sort_unstable();
+    expected.sort_unstable();
+    found == expected
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -181,38 +206,16 @@ fn assemble(pages: &[SearchableRasterPage]) -> Result<Vec<u8>, String> {
         );
         image.compress().map_err(|error| format!("searchable image compression failed: {error}"))?;
         let image_id = document.add_object(image);
-        let mut operations = vec![
+        let operations = vec![
             Operation::new("q", vec![]),
             Operation::new("cm", vec![Object::Real(page.page_width), 0.into(), 0.into(), Object::Real(page.page_height), 0.into(), 0.into()]),
             Operation::new("Do", vec![Object::Name(b"Image".to_vec())]),
             Operation::new("Q", vec![]),
-            Operation::new("BT", vec![]),
-            Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), 1.into()]),
-            Operation::new("Tr", vec![3.into()]),
         ];
-        for word in &page.words {
-            let mut codes = Vec::with_capacity(word.text.len() * 2);
-            let mut glyphs = 0_u32;
-            for character in word.text.chars() {
-                let id = ids.id(character).ok_or("searchable word character has no font code")?;
-                codes.extend_from_slice(&id.to_be_bytes());
-                glyphs += 1;
-            }
-            let nominal_width = f64::from(glyphs) * GLYPH_ADVANCE as f64 / 1000.0;
-            let em_height = (FONT_ASCENT - FONT_DESCENT) as f64 / 1000.0;
-            let vertical_scale = word.height / em_height;
-            let horizontal_scale = word.width / nominal_width;
-            let baseline = f64::from(page.page_height) - word.y - word.height
-                - FONT_DESCENT as f64 / 1000.0 * vertical_scale;
-            operations.push(Operation::new("Tm", vec![
-                real(horizontal_scale)?, 0.into(), 0.into(), real(vertical_scale)?,
-                real(word.x)?, real(baseline)?,
-            ]));
-            operations.push(Operation::new("Tj", vec![Object::String(codes, StringFormat::Hexadecimal)]));
-        }
-        operations.push(Operation::new("ET", vec![]));
-        let content = Content { operations }.encode()
+        let mut content = Content { operations }.encode()
             .map_err(|error| format!("searchable page encoding failed: {error}"))?;
+        content.push(b'\n');
+        content.extend_from_slice(page_text_content(&page.words, f64::from(page.page_height), |character| ids.id(character))?.as_bytes());
         let mut content = Stream::new(Dictionary::new(), content);
         content.compress().map_err(|error| format!("searchable text compression failed: {error}"))?;
         let content_id = document.add_object(content);
@@ -238,16 +241,88 @@ fn assemble(pages: &[SearchableRasterPage]) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-fn real(value: f64) -> Result<Object, String> {
-    if !value.is_finite() || value < f64::from(f32::MIN) || value > f64::from(f32::MAX) {
+/// Font code for the word separator: one past the largest code a document
+/// character can get, mapped to U+0020 in /ToUnicode and drawn with the same
+/// invisible glyph. It never appears in a word.
+pub(crate) const SPACE_CODE: u16 = MAX_SEARCHABLE_DISTINCT_CHARS as u16 + 1;
+
+/// The CIDToGIDMap shared by both writers: every code from 1 to `SPACE_CODE`
+/// draws glyph 1, so the map does not depend on the document's characters.
+pub(crate) fn cid_to_gid_map() -> Vec<u8> {
+    let mut map = vec![0_u8; (usize::from(SPACE_CODE) + 1) * 2];
+    for pair in map.chunks_exact_mut(2).skip(1) {
+        pair[1] = 1;
+    }
+    map
+}
+
+fn text_number(value: f64) -> Result<String, String> {
+    if !value.is_finite() || value.abs() > 1.0e6 {
         return Err("searchable text transform is outside the supported range".to_string());
     }
     let converted = value as f32;
     if !converted.is_finite() || (value != 0.0 && converted == 0.0) {
         return Err("searchable text transform cannot be represented exactly enough".to_string());
     }
-    Ok(Object::Real(converted))
+    Ok(format!("{converted}"))
 }
+
+/// The invisible text of one page, shared by both writers. Each word is drawn
+/// stretched over its own box. A separator glyph mapped to U+0020 follows a
+/// word whenever the next word sits on the same row: within a line it fills
+/// the gap to the next word; after a line that the engine split from another
+/// on the same row it is a sliver. Extraction then keeps words apart even
+/// where their boxes touch. Line breaks between rows are PDFium's own, from
+/// the geometry (a code mapped to CR LF is reported as U+2002 by PDFium).
+/// Each word's codes are on their own `<...> Tj` line and separators are the
+/// exact line `<SPACE_CODE> Tj`, which the large writer's final check relies on.
+pub(crate) fn page_text_content(
+    words: &[SearchableWord],
+    page_height: f64,
+    code: impl Fn(char) -> Option<u16>,
+) -> Result<String, String> {
+    use std::fmt::Write;
+    if words.is_empty() {
+        return Ok(String::new());
+    }
+    let em_height = (FONT_ASCENT - FONT_DESCENT) as f64 / 1000.0;
+    let advance = GLYPH_ADVANCE as f64 / 1000.0;
+    let mut content = String::from("BT\n/F1 1 Tf\n3 Tr\n");
+    for (index, word) in words.iter().enumerate() {
+        let glyphs = word.text.chars().count() as f64;
+        let vertical = word.height / em_height;
+        let baseline = page_height - word.y - word.height - FONT_DESCENT as f64 / 1000.0 * vertical;
+        let _ = write!(content, "{} 0 0 {} {} {} Tm\n<", text_number(word.width / (glyphs * advance))?,
+            text_number(vertical)?, text_number(word.x)?, text_number(baseline)?);
+        for character in word.text.chars() {
+            let _ = write!(content, "{:04X}", code(character).ok_or("searchable word character has no font code")?);
+        }
+        content.push_str("> Tj\n");
+        if let Some(next) = words.get(index + 1) {
+            let end = word.x + word.width;
+            let same_line = next.y == word.y && next.height == word.height;
+            let same_row = next.y < word.y + word.height && word.y < next.y + next.height;
+            if !same_row {
+                continue;
+            }
+            let sliver = word.height * 0.05;
+            let (start, width) = if next.x - end >= sliver {
+                (end, if same_line { next.x - end } else { sliver })
+            } else if next.x <= word.x {
+                (end, sliver)
+            } else {
+                // Touching or overlapping boxes: end the separator where the
+                // next word starts, or PDFium drops it and joins the words.
+                ((next.x - sliver).max(word.x), sliver)
+            };
+            let _ = write!(content, "{} 0 0 {} {} {} Tm\n<{SPACE_CODE:04X}> Tj\n", text_number(width / advance)?,
+                text_number(vertical)?, text_number(start)?, text_number(baseline)?);
+        }
+    }
+    content.push_str("ET\n");
+    Ok(content)
+}
+
 
 /// Per-document two-byte character codes, assigned from 1 in first-use order so
 /// the output stays byte-for-byte reproducible for the canonical oracle.
@@ -291,11 +366,7 @@ fn add_invisible_font(document: &mut Document, ids: &CharacterIds) -> Result<lop
         "ItalicAngle" => 0, "Ascent" => FONT_ASCENT, "Descent" => FONT_DESCENT,
         "CapHeight" => FONT_ASCENT, "StemV" => 80, "FontFile2" => font_file_id,
     });
-    let mut gid_map = vec![0_u8; (ids.characters.len() + 1) * 2];
-    for pair in gid_map.chunks_exact_mut(2).skip(1) {
-        pair[1] = 1;
-    }
-    let mut gid_map = Stream::new(Dictionary::new(), gid_map);
+    let mut gid_map = Stream::new(Dictionary::new(), cid_to_gid_map());
     gid_map.compress().map_err(|error| format!("searchable font compression failed: {error}"))?;
     let gid_map_id = document.add_object(gid_map);
     let cid_font_id = document.add_object(dictionary! {
@@ -337,6 +408,7 @@ pub(crate) fn to_unicode_cmap(characters: &[char]) -> String {
         }
         cmap.push_str("endbfchar\n");
     }
+    let _ = writeln!(cmap, "1 beginbfchar\n<{SPACE_CODE:04X}> <0020>\nendbfchar");
     cmap.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
     cmap
 }

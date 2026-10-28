@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Searchable OCR text layer on real scans (SM4; `searchable_ocr.rs`, `searchable_pdf.rs`, `searchable_pdf_stream.rs`): overhanging word boxes and edge spaces no longer refuse a page (10 of 10 real pages parse, was 3); both writers draw a space between words, so words PDFium joined drop from 155 to 36 of 3,526. The 32-page copy's reopen check now compares each page's characters as a multiset (SM7 ruling): 8 of the 10 real pages save as searchable copies, was 0 (source build).
 - Installed comments/forms verifier: a fourth controlled fixture (multi-select list plus two editable combos) sets two list options, types a custom combo value and picks a listed one, saves, reopens in a fresh process and asserts the exact values; tests only, hosted run still to do (SM3).
 - Accessibility audit and fixes (SM5; branch `sm5/a11y-audit`; `App.tsx`, `Viewer.tsx`, `PageList.tsx`, `Workspace.module.css`): focus ring on search fields, toggle and selected state exposed (`aria-pressed`/`aria-current`), Menu Escape and `aria-controls`, keyboard-focusable page scroller, labelled landmarks, hidden document heading. Tests added; no screen-reader or browser pass yet.
 - Render-cancel review follow-ups (SM5; branch `sm5/render-p3s-2`; `service.rs`): epoch bump and enqueue now happen under one lock, a late cancelled ticket can no longer join and supersede a queued render, reusing a spare fails fast if the worker is gone, stale-epoch spares dropped at the bump. Local, unreviewed.
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - Child-process spawning (OCR and PDF helper) now holds a process-wide lock while its pipes are inheritable, and test processes started with `std::process::Command` take the same lock: fixes intermittent "OCR output pipes did not close" in parallel `cargo test` (SM4; test-visible only).
 - Release scripts: the installed print-dialog diagnostic keeps its last completed native-window receipt when the final poll is cut short by the deadline (fixes a CI flake), and the `WEBDRIVER_ERROR_DIAG` sanitizer now also redacts `file://server/share` and a UNC path glued to a word (SM6; scripts and tests only).
 - Text replacement and selected-text highlights now pass the same two-reader copy-permission check as search and copy (SM3).
-- In-app update test file gets a 60 s per-test timeout, so pwsh start-up on a busy CI runner no longer trips the 5 s default (SM0; test only).

@@ -530,7 +530,7 @@ impl PdfService {
                             let (session, _) = sessions.get(&id).ok_or("Document is closed")?;
                             let original = documents.get(&id).ok_or("Document is closed")?;
                             let page_count = checked_searchable_ocr_request(session, original, revision)?;
-                            if page_count != prepared.pages.len() || prepared.expected_text.len() != page_count { return Err("Searchable OCR output no longer matches the source document.".into()); }
+                            if page_count != prepared.pages.len() || prepared.expected_characters.len() != page_count { return Err("Searchable OCR output no longer matches the source document.".into()); }
                             crate::searchable_pdf::verify_searchable_pdf(&prepared.bytes, &prepared.pages)?;
                             ensure_active()?;
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
@@ -557,7 +557,7 @@ impl PdfService {
                                     TextError::Bounds(error) => error,
                                 })?;
                                 ensure_active()?;
-                                if text != prepared.expected_text[index] { return Err(format!("Searchable OCR page {} extraction differs from the OCR text.", index + 1)); }
+                                if !crate::searchable_pdf::extraction_has_the_word_characters(&text, &prepared.expected_characters[index]) { return Err(format!("Searchable OCR page {} extraction differs from the OCR text.", index + 1)); }
                             }
                             ensure_active()?;
                             if reply.is_closed() { return Err("OCR was cancelled.".into()); }
@@ -5881,7 +5881,7 @@ mod tests {
         assert_eq!(preflight.page_count, 1);
         let output_path = folder.path().join("searchable.pdf");
         let prepared = crate::searchable_ocr_job::PreparedSearchableOcr {
-            bytes: bytes.clone(), pages: vec![page.clone()], expected_text: vec!["Hello".into()],
+            bytes: bytes.clone(), pages: vec![page.clone()], expected_characters: vec!["Hello".into()],
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
             cancellation: crate::ocr_process::OcrCancellation::default(),
         };
@@ -5894,14 +5894,14 @@ mod tests {
         let cancellation = crate::ocr_process::OcrCancellation::default();
         assert!(cancellation.cancel());
         let cancelled = crate::searchable_ocr_job::PreparedSearchableOcr {
-            bytes: bytes.clone(), pages: vec![page.clone()], expected_text: vec!["Hello".into()],
+            bytes: bytes.clone(), pages: vec![page.clone()], expected_characters: vec!["Hello".into()],
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(30), cancellation,
         };
         assert!(call(&service, |reply| Request::PublishSearchableOcr(source.id, source.revision, cancelled_path.clone(), cancelled, reply)).err().unwrap().contains("cancelled"));
         assert!(!cancelled_path.exists());
         let expired_path = folder.path().join("expired.pdf");
         let expired = crate::searchable_ocr_job::PreparedSearchableOcr {
-            bytes, pages: vec![page], expected_text: vec!["Hello".into()],
+            bytes, pages: vec![page], expected_characters: vec!["Hello".into()],
             deadline: std::time::Instant::now() - std::time::Duration::from_secs(1),
             cancellation: crate::ocr_process::OcrCancellation::default(),
         };
