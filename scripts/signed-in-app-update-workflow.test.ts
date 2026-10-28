@@ -106,6 +106,91 @@ describe('published in-app update verification infrastructure', () => {
     expect(script).toContain('documentSentinelPreserved = $true');
   });
 
+  it('requires the automatic relaunch whenever an Explorer shell window exists and labels the verifier launch', () => {
+    const script = readFileSync(scriptPath, 'utf8');
+    expect(script).toMatch(/Assert-FirewallEnforcing\r?\n#[^\n]*RunAsUser[^\n]*\r?\n\$shellWindowBeforeUpdate = Test-ShellWindowPresent\r?\n\$session = \$null/);
+    expect(script).toContain('-ShellWindowAtRelaunch (Test-ShellWindowPresent)');
+    expect(script).toContain('automaticRelaunchVerified = [bool]$relaunchOutcome.verified');
+    expect(script).toContain('automaticRelaunchObserved = [bool]$relaunchOutcome.observed; automaticRelaunchNotObservedReason = $relaunchOutcome.notObservedReason');
+    expect(script).toContain("postUpdateLaunchedBy = 'verifier-webdriver'");
+    expect(script).not.toMatch(/automaticRelaunch(Verified|Observed)\s*=\s*\$true/);
+    expect(script.indexOf('Resolve-AutomaticRelaunch -Observed')).toBeLessThan(script.indexOf('$postSession = Start-WebDriverSession'));
+    const source = verifierHarness(
+      ['Test-ShellWindowPresent', 'Resolve-AutomaticRelaunch'],
+      String.raw`
+        $observed=Resolve-AutomaticRelaunch -Observed $true -ShellWindowBeforeUpdate $false -ShellWindowAtRelaunch $false
+        if(-not$observed.observed-or-not$observed.verified-or$null-ne$observed.notObservedReason){throw 'Observed relaunch was not recorded as verified.'}
+        $observed=Resolve-AutomaticRelaunch -Observed $true -ShellWindowBeforeUpdate $true -ShellWindowAtRelaunch $true
+        if(-not$observed.verified){throw 'Observed relaunch with a shell was not verified.'}
+        foreach($shell in @(@($true,$false),@($false,$true),@($true,$true))){
+          $message='';try{$null=Resolve-AutomaticRelaunch -Observed $false -ShellWindowBeforeUpdate $shell[0] -ShellWindowAtRelaunch $shell[1]}catch{$message=$_.Exception.Message}
+          if($message-cne'The updater did not automatically relaunch the exact installed target application.'){throw 'A missing relaunch was excused although a shell window existed.'}
+        }
+        $missing=Resolve-AutomaticRelaunch -Observed $false -ShellWindowBeforeUpdate $false -ShellWindowAtRelaunch $false
+        if($missing.observed-or$missing.verified-or$missing.notObservedReason-cne'github-hosted-no-explorer-shell'){throw 'No-shell outcome was not recorded honestly.'}
+        if((Test-ShellWindowPresent -Provider {$true})-ne$true-or(Test-ShellWindowPresent -Provider {$false})-ne$false){throw 'Shell probe provider was not honored.'}
+        $rejected=$false;try{$null=Test-ShellWindowPresent -Provider {'yes'}}catch{$rejected=$true};if(-not$rejected){throw 'Non-boolean shell probe was accepted.'}
+        if((Test-ShellWindowPresent)-isnot[bool]){throw 'Live shell probe did not return a boolean.'}
+      `,
+    );
+    const result = spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', source], { encoding: 'utf8', timeout: 30_000 });
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
+  it('drives WebDriver through the shared hosted-proven launch helpers', () => {
+    const script = readFileSync(scriptPath, 'utf8');
+    expect(script).toMatch(/Set-StrictMode -Version Latest\r?\n\r?\n\. \(Join-Path \$PSScriptRoot 'installed-app-launch\.ps1'\)/);
+    for (const helper of [
+      'Wait-FixedWebDriverPortsFree -Deadline', 'Start-BoundedDiscardProcess -Path $TauriDriverPath', '-Environment (Get-MinimalWindowsProcessEnvironment)',
+      "Invoke-BoundedLoopbackJson -Method GET -Path '/status'", 'Wait-NativeDriverStatus -ExpectedVersion $ExpectedEdgeDriverVersion',
+      "Invoke-BoundedLoopbackJson -Method POST -Path '/session'", 'Get-OwnedLaunchProcesses -RootProcessId $Driver.Id',
+      'Invoke-SessionDeleteOutcome -SessionId', 'Stop-OwnedLaunchProcesses -TauriDriver $Session.Driver', 'Assert-WebDriverReceipt -Receipt $driverReceipt',
+      '$script:LaunchPins.TotalTimeoutMilliseconds', '$script:LaunchPins.CleanupProcessTimeoutMilliseconds', 'PortHandoffTimeoutMilliseconds = 300000',
+      '[int]$baselineProcesses[0].Id -ne [int]$session.ApplicationProcessId',
+    ]) expect(script).toContain(helper);
+    expect(script).not.toMatch(/Invoke-RestMethod|Invoke-LoopbackJson|TimeoutSec|DriverDeadlineSeconds|NativeDriverPort = 9515|-ReturnProcess/);
+    expect(script.match(/-ExpectedEdgeDriverVersion \$expectedEdgeDriverVersion/g)).toHaveLength(2);
+    const launch = readFileSync('scripts/installed-app-launch.ps1', 'utf8');
+    expect(launch).toContain('RequestTimeoutMilliseconds = 10000');
+    expect(launch).toContain('SessionCreationTimeoutMilliseconds = 30000');
+    expect(launch).toContain('TotalTimeoutMilliseconds = 60000');
+  });
+
+  it('does not redefine shared helper functions and fails fast when the firewall cannot enforce the cutoff', () => {
+    const source = String.raw`
+      $ErrorActionPreference='Stop'
+      Set-StrictMode -Version Latest
+      Set-Location -LiteralPath '${process.cwd().replaceAll("'", "''")}'
+      function Get-FunctionNames([string]$path){
+        $tokens=$null;$errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path),[ref]$tokens,[ref]$errors)
+        if($errors.Count){throw ('Did not parse: '+$path)}
+        @($ast.FindAll({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]},$true)|ForEach-Object{$_.Name.ToLowerInvariant()})
+      }
+      $own=Get-FunctionNames 'scripts/verify-in-app-update.ps1'
+      foreach($shared in @('scripts/installed-app-launch.ps1','scripts/installed-publisher-ui.ps1')){
+        $overlap=@($own|Where-Object{(Get-FunctionNames $shared)-contains$_})
+        if($overlap.Count){throw ('Verifier redefines shared functions from '+$shared+': '+($overlap-join', '))}
+      }
+      . ./scripts/installed-app-launch.ps1
+      $tokens=$null;$errors=$null
+      $ast=[Management.Automation.Language.Parser]::ParseFile((Resolve-Path 'scripts/verify-in-app-update.ps1'),[ref]$tokens,[ref]$errors)
+      Invoke-Expression $ast.Find({param($n)$n-is[Management.Automation.Language.FunctionDefinitionAst]-and$n.Name-ceq'Assert-FirewallEnforcing'},$true).Extent.Text
+      $running={[pscustomobject]@{Status='Running'}}
+      $all={@('Domain','Private','Public')|ForEach-Object{[pscustomobject]@{Name=$_;Enabled='True'}}}
+      Assert-FirewallEnforcing -ServiceProvider $running -ProfileProvider $all
+      foreach($case in @(
+        @{service={[pscustomobject]@{Status='Stopped'}};profiles=$all;expect='service=Stopped'},
+        @{service=$running;profiles={@('Domain','Private','Public')|ForEach-Object{[pscustomobject]@{Name=$_;Enabled=$(if($_-ceq'Public'){'False'}else{'True'})}}};expect='disabled=Public'},
+        @{service=$running;profiles={@([pscustomobject]@{Name='Domain';Enabled='True'})};expect='profiles=1'})){
+        $message='';try{Assert-FirewallEnforcing -ServiceProvider $case.service -ProfileProvider $case.profiles}catch{$message=$_.Exception.Message}
+        if(-not$message.StartsWith('Windows Firewall is not enforcing on this runner')-or-not$message.Contains($case.expect)){throw ('Firewall precheck did not fail closed: '+$case.expect+' got '+$message)}
+      }
+    `;
+    const result = spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', source], { encoding: 'utf8', timeout: 30_000 });
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+  });
+
   it('requires hosted noninteractive publisher mode and records false shell-UI claims', () => {
     const script = readFileSync(scriptPath, 'utf8');
     expect(script).toContain("[ValidateSet('HostedNonInteractive')][string]$PublisherUiMode");
@@ -113,7 +198,7 @@ describe('published in-app update verification infrastructure', () => {
     expect(script).not.toContain('Invoke-InstalledPublisherUiProof');
     expect(script.match(/= New-HostedPublisherUiNotAttemptedEvidence -Path/g)).toHaveLength(2);
     expect(script.match(/Assert-HostedPublisherUiEvidence -Value \$/g)).toHaveLength(2);
-    expect(script).toContain('schemaVersion = 2');
+    expect(script).toContain('schemaVersion = 3');
     expect(script).toContain("mode = 'hosted-noninteractive'");
     expect(script).toContain("reason = 'github-hosted-noninteractive-session'");
     expect(script).toContain("publisherUiMode = 'hosted-noninteractive'; publisherUiAttempted = $false");
@@ -235,7 +320,7 @@ describe('published in-app update verification infrastructure', () => {
       if($seeded.Count-ne4){throw ('Automatic-variable scan missed seeded assignments: '+($seeded-join'; '))}
       $seededLeaks=@(Get-WaitForExitLeaks $seed)
       if($seededLeaks.Count-ne1){throw ('WaitForExit leak scan did not find exactly the seeded leak: '+($seededLeaks-join'; '))}
-      foreach($path in @('scripts/verify-in-app-update.ps1','scripts/installed-publisher-ui.ps1')){
+      foreach($path in @('scripts/verify-in-app-update.ps1','scripts/installed-publisher-ui.ps1','scripts/installed-app-launch.ps1')){
         $ast=Get-ParsedAst ([IO.File]::ReadAllText((Resolve-Path $path)))
         $hits=@(Get-AutomaticAssignments $ast)
         if($hits.Count){throw ($path+' assigns automatic variables: '+($hits-join'; '))}

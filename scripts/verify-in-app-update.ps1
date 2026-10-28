@@ -24,6 +24,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot 'installed-app-launch.ps1')
+
 $script:UpdatePins = [ordered]@{
     Repository = 'Joshua-Beel/PDF-Workstation'
     BaselineVersion = '0.2.0'
@@ -32,11 +34,9 @@ $script:UpdatePins = [ordered]@{
     BaselineSha256 = '17788CB82BB42DEAC35EA197A385A9BAFC8CD331422446A2B834E115A90C4D2E'
     BaselineUrl = 'https://github.com/Joshua-Beel/PDF-Workstation/releases/download/v0.2.0/PDF.Workstation_0.2.0_x64-setup.exe'
     LatestManifestUrl = 'https://github.com/Joshua-Beel/PDF-Workstation/releases/latest/download/latest.json'
-    WebDriverPort = 4444
-    NativeDriverPort = 9515
+    PortHandoffTimeoutMilliseconds = 300000
     NetworkBytesMaximum = [uint64](128MB)
     JsonBytesMaximum = [uint64](1MB)
-    DriverDeadlineSeconds = 45
     UpdateCheckDeadlineSeconds = 45
     FailedDownloadDeadlineSeconds = 135
     InstallDeadlineSeconds = 180
@@ -306,68 +306,71 @@ function Stop-ExactProcesses {
     }
 }
 
-function Invoke-LoopbackJson {
-    param([ValidateSet('GET','POST','DELETE')][string]$Method,[string]$Path,$Body,[datetime]$Deadline)
-    $remaining = [int][Math]::Floor(($Deadline - [datetime]::UtcNow).TotalSeconds)
-    if ($remaining -le 0) { throw 'WebDriver deadline expired.' }
-    $parameters = @{ Method = $Method; Uri = "http://127.0.0.1:$($script:UpdatePins.WebDriverPort)$Path"; TimeoutSec = [Math]::Max(1,[Math]::Min(10,$remaining)); NoProxy = $true }
-    if ($null -ne $Body) { $parameters.ContentType = 'application/json'; $parameters.Body = ($Body | ConvertTo-Json -Depth 12 -Compress) }
-    return Invoke-RestMethod @parameters
+function Wait-OwnedUpdateApplication {
+    param([Parameter(Mandatory = $true)]$Driver,[Parameter(Mandatory = $true)][datetime]$StartedAfter,[Parameter(Mandatory = $true)][string]$ApplicationPath,[Parameter(Mandatory = $true)][datetime]$Deadline)
+    do {
+        $owned = @(Get-OwnedLaunchProcesses -RootProcessId $Driver.Id -StartedAfter $StartedAfter)
+        $apps = @($owned | Where-Object { ([string]$_.Path).Equals($ApplicationPath,[StringComparison]::OrdinalIgnoreCase) })
+        if ($apps.Count -eq 1) { return [pscustomobject]@{ ProcessId = [int]$apps[0].ProcessId; ProcessStartUtcTicks = [long]$apps[0].StartTicks; Owned = $owned } }
+        if ($apps.Count -gt 1) { throw 'The WebDriver process tree contains multiple installed application processes.' }
+        Start-Sleep -Milliseconds 150
+    } while ([datetime]::UtcNow -lt $Deadline)
+    throw 'The exact installed application process did not appear before the shared deadline.'
 }
 
 function Start-WebDriverSession {
-    param([string]$ApplicationPath,[string]$TauriDriverPath,[string]$EdgeDriverPath,[string]$ProfileRoot)
+    param([string]$ApplicationPath,[string]$TauriDriverPath,[string]$EdgeDriverPath,[string]$ExpectedEdgeDriverVersion,[string]$ProfileRoot)
     if (Test-Path -LiteralPath $ProfileRoot) { throw 'WebDriver profile root must be fresh.' }
     [IO.Directory]::CreateDirectory($ProfileRoot) | Out-Null
-    $deadline = [datetime]::UtcNow.AddSeconds($script:UpdatePins.DriverDeadlineSeconds)
-    $driver = Invoke-BoundedProcess -Path $TauriDriverPath -Arguments @("--port=$($script:UpdatePins.WebDriverPort)","--native-port=$($script:UpdatePins.NativeDriverPort)","--native-driver=$EdgeDriverPath") -ReturnProcess
+    $null = Wait-FixedWebDriverPortsFree -Deadline ([datetime]::UtcNow.AddMilliseconds($script:UpdatePins.PortHandoffTimeoutMilliseconds))
+    $deadline = [datetime]::UtcNow.AddMilliseconds($script:LaunchPins.TotalTimeoutMilliseconds)
+    $startedAfter = [datetime]::UtcNow
+    $driverCapture = Start-BoundedDiscardProcess -Path $TauriDriverPath -Arguments @("--port=$($script:LaunchPins.WebDriverPort)","--native-port=$($script:LaunchPins.NativeDriverPort)","--native-driver=$EdgeDriverPath") -Environment (Get-MinimalWindowsProcessEnvironment)
+    $driverCapture.Start(); $driver = $driverCapture.Process
+    $sessionId = $null
     try {
-        $ready = $false
+        $status = $null
         do {
-            try { $status = Invoke-LoopbackJson -Method GET -Path '/status' -Deadline $deadline; $ready = [bool]$status.value.ready } catch { }
+            try { $status = Invoke-BoundedLoopbackJson -Method GET -Path '/status' -Deadline $deadline } catch { }
+            if ($null -ne $status -and [bool]$status.value.ready) { break }
             if ($driver.HasExited) { throw 'Pinned tauri-driver exited before readiness.' }
-            if (-not $ready) { Start-Sleep -Milliseconds 200 }
-        } while (-not $ready -and [datetime]::UtcNow -lt $deadline)
-        if (-not $ready) { throw 'Pinned tauri-driver did not become ready.' }
+            Start-Sleep -Milliseconds 200
+        } while ([datetime]::UtcNow -lt $deadline)
+        if ($null -eq $status -or -not [bool]$status.value.ready) { throw 'Pinned tauri-driver did not become ready.' }
+        $null = Wait-NativeDriverStatus -ExpectedVersion $ExpectedEdgeDriverVersion -Deadline $deadline -TauriDriver $driver
         $body = [ordered]@{ capabilities = [ordered]@{ alwaysMatch = [ordered]@{
             browserName = 'wry'
             'tauri:options' = [ordered]@{ application = $ApplicationPath; args = @(); webviewOptions = [ordered]@{ userDataFolder = $ProfileRoot } }
         } } }
-        $session = Invoke-LoopbackJson -Method POST -Path '/session' -Body $body -Deadline $deadline
-        $id = [string]$session.value.sessionId
-        if ($id -cnotmatch '^[A-Za-z0-9-]+$') { throw 'WebDriver session identifier is malformed.' }
-        return [pscustomobject]@{ Driver = $driver; SessionId = $id }
+        $session = Invoke-BoundedLoopbackJson -Method POST -Path '/session' -Body $body -Deadline $deadline
+        if ([string]$session.value.sessionId -cnotmatch '^[A-Za-z0-9-]+$') { throw 'WebDriver session identifier is malformed.' }
+        $sessionId = [string]$session.value.sessionId
+        $ownedApp = Wait-OwnedUpdateApplication -Driver $driver -StartedAfter $startedAfter -ApplicationPath $ApplicationPath -Deadline $deadline
+        return [pscustomobject]@{ DriverCapture = $driverCapture; Driver = $driver; SessionId = $sessionId; StartedAfter = $startedAfter; Captured = @($ownedApp.Owned); ApplicationProcessId = [int]$ownedApp.ProcessId; ApplicationProcessStartUtcTicks = [long]$ownedApp.ProcessStartUtcTicks }
     } catch {
-        try { if (-not $driver.HasExited) { $driver.Kill($true); $null = $driver.WaitForExit(10000) } } catch { }
-        $driver.Dispose()
+        Stop-WebDriverSession -Session ([pscustomobject]@{ DriverCapture = $driverCapture; Driver = $driver; SessionId = $sessionId; StartedAfter = $startedAfter; Captured = @() })
         throw
     }
 }
 
-function Invoke-WebDriverScript {
-    param([string]$SessionId,[string]$Script,[datetime]$Deadline)
-    if ($SessionId -cnotmatch '^[A-Za-z0-9-]+$' -or $Script.Length -gt 8192) { throw 'WebDriver script is outside its bounded contract.' }
-    $response = Invoke-LoopbackJson -Method POST -Path "/session/$SessionId/execute/sync" -Body ([ordered]@{ script = $Script; args = @() }) -Deadline $Deadline
-    return $response.value
-}
-
 function Wait-WebDriverValue {
     param([string]$SessionId,[string]$Script,[datetime]$Deadline,[scriptblock]$Predicate,[string]$Kind)
-    do {
+    while ([datetime]::UtcNow -lt $Deadline) {
         $value = Invoke-WebDriverScript -SessionId $SessionId -Script $Script -Deadline $Deadline
         if (& $Predicate $value) { return $value }
         Start-Sleep -Milliseconds 150
-    } while ([datetime]::UtcNow -lt $Deadline)
+    }
     throw "$Kind did not become true before its deadline."
 }
 
 function Stop-WebDriverSession {
     param($Session)
     if ($null -eq $Session) { return }
-    $deadline = [datetime]::UtcNow.AddSeconds(10)
-    try { $null = Invoke-LoopbackJson -Method DELETE -Path "/session/$($Session.SessionId)" -Deadline $deadline } catch { }
-    try { if (-not $Session.Driver.HasExited) { $Session.Driver.Kill($true); $null = $Session.Driver.WaitForExit(10000) } } catch { }
-    $Session.Driver.Dispose()
+    if ($Session.SessionId) { $null = Invoke-SessionDeleteOutcome -SessionId ([string]$Session.SessionId) -Deadline ([datetime]::UtcNow.AddSeconds(10)) }
+    $captured = @($Session.Captured)
+    try { $captured += @(Get-OwnedLaunchProcesses -RootProcessId $Session.Driver.Id -StartedAfter $Session.StartedAfter); $captured = @(Get-UniqueOwnedLaunchProcesses -Processes $captured) } catch { }
+    $null = Stop-OwnedLaunchProcesses -TauriDriver $Session.Driver -Captured $captured -Deadline ([datetime]::UtcNow.AddMilliseconds($script:LaunchPins.CleanupProcessTimeoutMilliseconds))
+    $Session.DriverCapture.Dispose()
 }
 
 function Open-UpdatesDialog {
@@ -451,6 +454,32 @@ function Assert-HostedPublisherUiEvidence {
         $Value.screenshotsUsed -isnot [bool] -or $Value.screenshotsUsed) {
         throw 'Hosted publisher evidence receipt is incomplete or malformed.'
     }
+}
+
+function Assert-FirewallEnforcing {
+    param([scriptblock]$ServiceProvider,[scriptblock]$ProfileProvider)
+    $service = if ($ServiceProvider) { & $ServiceProvider } else { Get-Service -Name 'MpsSvc' -ErrorAction Stop }
+    $profiles = @(if ($ProfileProvider) { & $ProfileProvider } else { Get-NetFirewallProfile -All -ErrorAction Stop })
+    $disabled = @($profiles | Where-Object { [string]$_.Enabled -cne 'True' } | ForEach-Object { [string]$_.Name })
+    if ([string]$service.Status -cne 'Running' -or $profiles.Count -ne 3 -or $disabled.Count -ne 0) {
+        throw ('Windows Firewall is not enforcing on this runner, so the deterministic download cutoff cannot be proven: service=' + [string]$service.Status + ', profiles=' + $profiles.Count + ', disabled=' + ($disabled -join '|') + '.')
+    }
+}
+
+function Test-ShellWindowPresent {
+    param([scriptblock]$Provider)
+    if ($Provider) { $value = & $Provider; if ($value -isnot [bool]) { throw 'Shell window probe returned a non-boolean.' }; return $value }
+    if (-not ('SmacrobatUpdateShellProbe' -as [type])) {
+        Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class SmacrobatUpdateShellProbe { [DllImport("user32.dll")] public static extern IntPtr GetShellWindow(); }'
+    }
+    return [SmacrobatUpdateShellProbe]::GetShellWindow() -ne [IntPtr]::Zero
+}
+
+function Resolve-AutomaticRelaunch {
+    param([bool]$Observed,[bool]$ShellWindowBeforeUpdate,[bool]$ShellWindowAtRelaunch)
+    if ($Observed) { return [ordered]@{ observed = $true; verified = $true; notObservedReason = $null } }
+    if ($ShellWindowBeforeUpdate -or $ShellWindowAtRelaunch) { throw 'The updater did not automatically relaunch the exact installed target application.' }
+    return [ordered]@{ observed = $false; verified = $false; notObservedReason = 'github-hosted-no-explorer-shell' }
 }
 
 function Assert-Sentinel {
@@ -557,22 +586,28 @@ $documentSentinel = Join-Path $work 'document-sentinel.pdf'
 $documentSentinelReceipt = [ordered]@{ bytes = [uint64](Get-Item -LiteralPath $documentSentinel).Length; sha256 = Get-ExactSha256 -Path $documentSentinel }
 
 $driverReceipt = Read-BoundedJson -Path (Join-Path $driverRoot 'webdriver-receipt.json')
+Assert-WebDriverReceipt -Receipt $driverReceipt
+$expectedEdgeDriverVersion = [string]$driverReceipt.edgeDriver.version
 $tauriDriver = Join-Path $driverRoot 'tauri-driver-install/bin/tauri-driver.exe'
 $edgeDriver = Join-Path $driverRoot 'edge-driver/msedgedriver.exe'
 Assert-FileReceipt -Path $tauriDriver -Bytes ([uint64]$driverReceipt.tauriDriver.bytes) -Sha256 ([string]$driverReceipt.tauriDriver.sha256) -Kind 'Pinned tauri-driver'
 Assert-FileReceipt -Path $edgeDriver -Bytes ([uint64]$driverReceipt.edgeDriver.bytes) -Sha256 ([string]$driverReceipt.edgeDriver.sha256) -Kind 'Pinned EdgeDriver'
 
+Assert-FirewallEnforcing
+# Tauri's NSIS /R relaunch runs nsis_tauri_utils::RunAsUser, which de-elevates through the Explorer shell window.
+$shellWindowBeforeUpdate = Test-ShellWindowPresent
 $session = $null
 $postSession = $null
 $firewallName = $null
 $automaticRelaunch = $null
 try {
-    $session = Start-WebDriverSession -ApplicationPath ([string]$baselineFacts.appPath) -TauriDriverPath $tauriDriver -EdgeDriverPath $edgeDriver -ProfileRoot (Join-Path $profileRoot 'baseline')
+    $session = Start-WebDriverSession -ApplicationPath ([string]$baselineFacts.appPath) -TauriDriverPath $tauriDriver -EdgeDriverPath $edgeDriver -ExpectedEdgeDriverVersion $expectedEdgeDriverVersion -ProfileRoot (Join-Path $profileRoot 'baseline')
     $checkDeadline = [datetime]::UtcNow.AddSeconds($script:UpdatePins.UpdateCheckDeadlineSeconds)
     $null = Open-UpdatesDialog -SessionId $session.SessionId -Deadline $checkDeadline
     $available = Wait-AvailableUpdate -SessionId $session.SessionId -Deadline $checkDeadline -Version $TargetVersion -Notes ([string]$manifest.notes)
     $baselineProcesses = @(Get-AppProcesses -ApplicationPath ([string]$baselineFacts.appPath))
-    if ($baselineProcesses.Count -ne 1) { throw 'WebDriver did not own exactly one installed baseline process.' }
+    if ($baselineProcesses.Count -ne 1 -or [int]$baselineProcesses[0].Id -ne [int]$session.ApplicationProcessId -or
+        [long]$baselineProcesses[0].StartTicks -ne [long]$session.ApplicationProcessStartUtcTicks) { throw 'WebDriver did not own exactly one installed baseline process.' }
     $baselineProcessId = [int]$baselineProcesses[0].Id
 
     $firewallName = 'PDF Workstation updater cutoff ' + [Guid]::NewGuid().ToString('N')
@@ -631,12 +666,12 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
         if ($relaunches.Count -gt 1) { throw 'Automatic updater relaunch was ambiguous.' }
         Start-Sleep -Milliseconds 200
     } while ([datetime]::UtcNow -lt $installDeadline)
-    if ($null -eq $automaticRelaunch) { throw 'The updater did not automatically relaunch the exact installed target application.' }
+    $relaunchOutcome = Resolve-AutomaticRelaunch -Observed ($null -ne $automaticRelaunch) -ShellWindowBeforeUpdate $shellWindowBeforeUpdate -ShellWindowAtRelaunch (Test-ShellWindowPresent)
     Stop-ExactProcesses -ApplicationPath ([string]$upgraded.appPath)
     Stop-WebDriverSession -Session $session
     $session = $null
 
-    $postSession = Start-WebDriverSession -ApplicationPath ([string]$upgraded.appPath) -TauriDriverPath $tauriDriver -EdgeDriverPath $edgeDriver -ProfileRoot (Join-Path $profileRoot 'target')
+    $postSession = Start-WebDriverSession -ApplicationPath ([string]$upgraded.appPath) -TauriDriverPath $tauriDriver -EdgeDriverPath $edgeDriver -ExpectedEdgeDriverVersion $expectedEdgeDriverVersion -ProfileRoot (Join-Path $profileRoot 'target')
     $postDeadline = [datetime]::UtcNow.AddSeconds($script:UpdatePins.UpdateCheckDeadlineSeconds)
     $null = Open-UpdatesDialog -SessionId $postSession.SessionId -Deadline $postDeadline
     $current = Wait-CurrentVersionUi -SessionId $postSession.SessionId -Deadline $postDeadline -Version $TargetVersion
@@ -674,8 +709,8 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
     Assert-HostedPublisherUiEvidence -Value $applicationPublisherUi -Kind 'installed-application' -FileName 'pdf-workstation.exe' -Bytes ([uint64]$targetApplicationReceipt.bytes) -Sha256 ([string]$targetApplicationReceipt.sha256) -Publisher $ExpectedPublisher
     [IO.Directory]::CreateDirectory($output) | Out-Null
     $record = [ordered]@{
-        schemaVersion = 2
-        scope = 'Ephemeral GitHub-hosted proof of the exact published 0.2.0 UI checking the public latest manifest, deterministic pre-download network failure and retry, signed target install, automatic relaunch, current-version recheck, exact Authenticode publisher and trusted-timestamp verification, sentinel preservation, and standalone signed-installer restoration of a controlled missing-application-executable state; the noninteractive hosted session does not attempt or verify Windows Explorer Digital Signatures UI, and partial-byte interruption and installer transactionality are not established.'
+        schemaVersion = 3
+        scope = 'Ephemeral GitHub-hosted proof of the exact published 0.2.0 UI checking the public latest manifest, deterministic pre-download network failure and retry, signed target install, automatic relaunch when the session has an Explorer shell window (otherwise recorded as not observed with its reason), a verifier-launched current-version recheck, exact Authenticode publisher and trusted-timestamp verification, sentinel preservation, and standalone signed-installer restoration of a controlled missing-application-executable state; the noninteractive hosted session does not attempt or verify Windows Explorer Digital Signatures UI, and partial-byte interruption and installer transactionality are not established.'
         mode = 'published-stable-in-app-update'
         workflowSourceRevision = $WorkflowSourceRevision
         targetSourceRevision = $TargetSourceRevision
@@ -707,7 +742,9 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
         updater = [ordered]@{
             baselineUiVersion = [string]$available.installed; offeredVersion = [string]$available.status; earlyFailureStatus = [string]$failed.status
             retryDownloadStateObserved = [bool]$sawDownloadState; updaterSessionClosedForInstall = [bool]$sessionClosedForInstall
-            automaticRelaunchObserved = $true; targetUiVersion = [string]$current.installed; targetUiStatus = [string]$current.status
+            automaticRelaunchObserved = [bool]$relaunchOutcome.observed; automaticRelaunchNotObservedReason = $relaunchOutcome.notObservedReason
+            shellWindowBeforeUpdate = [bool]$shellWindowBeforeUpdate
+            postUpdateLaunchedBy = 'verifier-webdriver'; targetUiVersion = [string]$current.installed; targetUiStatus = [string]$current.status
         }
         verification = [ordered]@{
             runner = 'github-hosted-windows-2022'; ephemeral = $true
@@ -715,7 +752,7 @@ const d=document.querySelector('dialog[aria-labelledby="updates-title"]');return
             exactPublishedBaselineInstalled = $true; inAppUpdateUiVerified = $true
             deterministicEarlyDownloadCutoffVerified = $true; failedDownloadLeftBaselineUnchanged = $true
             retryThroughSameUiVerified = $true; updaterSignatureVerified = $true; targetPublisherSignatureVerified = $true
-            registryVersionUpdated = $true; installedApplicationReceiptMatched = $true; automaticRelaunchVerified = $true
+            registryVersionUpdated = $true; installedApplicationReceiptMatched = $true; automaticRelaunchVerified = [bool]$relaunchOutcome.verified
             postUpdateLatestCheckVerified = $true; settingsSentinelPreserved = $true; documentSentinelPreserved = $true
             publisherUiMode = 'hosted-noninteractive'; publisherUiAttempted = $false
             installerShellPublisherUiVerified = $false; installedApplicationShellPublisherUiVerified = $false

@@ -119,6 +119,8 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 Full history: [docs/changelog.md](docs/changelog.md)
 
 - Save-copy prune: regression test that an indirect destination to a kept page survives (SM2); README recent changes trimmed to 15 lines (SM0). Full entries in [docs/changelog.md](docs/changelog.md).
+- In-app update check: automatic relaunch still required when an Explorer shell window exists; without one it is recorded as not observed, with its reason (schema v3) (SM6; script, tests, docs).
+- In-app update check: WebDriver lifecycle now uses the shared hosted-proven launch helpers (30 s session create, native-driver wait, owned-process cleanup); firewall precheck added (SM6; scripts and tests).
 - In-app update check: stopped assigning the read-only `$HOME` (run 40618989631) and `$Matches`; suppressed stray `WaitForExit` output; AST test guards both (SM6; scripts and tests).
 - Save-copy prune follow-ups (SM2): dead page links are dropped when the `/Dest` or GoTo `/D` is an indirect array too; links that never had a destination stay; `/Annots` null cleanup tested.
 - In-app update check: the installed-facts check now expects Tauri's quoted InstallLocation and names any mismatched field (no paths). Run 40596111704 failed there (SM6; script and tests).
@@ -131,5 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - Rehearsal fixes, round 8: final cleanup waits for the silent uninstaller to finish (it relaunches itself and returns at once) and names what remains if it does not (SM6; scripts and tests only).
 - Rehearsal fixes, round 7: two structural-check scripts sent truncated JavaScript because of PowerShell quoting, and every WebDriver HTTP error now logs a sanitized error code and message (SM6; scripts and tests only).
 - Rehearsal fixes, round 6: the structural page-tools check accepts and fully verifies the signed PDFium resource record and the pinned WebDriver records the earlier stages pass to it (SM6; scripts and tests only).
-- Rehearsal fixes, round 5: the default page-tools check writes the settings sentinel the organizer expects, and the split check drives the real folder picker (Folder box, existing parent, `Split PDFs` inside) (SM6; scripts and tests only).
-- Intermittent native-dialog test failures fixed: tests that needed one observation before a 20–250 ms wall-clock deadline now warm up first and use budgets that slow runners can meet (SM6; tests only).
