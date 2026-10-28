@@ -110,12 +110,39 @@ struct Inner {
     service: PdfService,
     available: bool,
     active: Mutex<Option<ActiveJob>>,
+    /// The saved job from an earlier session, read once (status is polled).
+    interrupted: Mutex<Option<Option<LargeOcrJobStatus>>>,
+}
+
+const STALE_FOLDER_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+fn is_job_folder_name(name: &str) -> bool { name.len() == 24 && name.bytes().all(|byte| byte.is_ascii_hexdigit()) }
+
+/// Startup cleanup: job folders whose description no longer reads (and that
+/// are older than a day) are removed; a temporary copy left next to a
+/// destination by an interrupted cross-volume publish is removed.
+fn sweep(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let named = entry.file_name().to_str().is_some_and(is_job_folder_name);
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else { continue };
+        if !named || !metadata.is_dir() || metadata.file_type().is_symlink() { continue; }
+        match crate::searchable_pdf_stream::read_manifest(&path) {
+            Ok(manifest) => crate::searchable_pdf_stream::remove_stale_publish_temp(&path, &manifest),
+            Err(_) => {
+                let old = metadata.modified().ok().and_then(|modified| modified.elapsed().ok()).is_some_and(|age| age > STALE_FOLDER_AGE);
+                if old { let _ = std::fs::remove_dir_all(&path); }
+            }
+        }
+    }
 }
 
 impl LargeOcrJobs {
     pub(crate) fn new(service: PdfService, resource_dir: PathBuf, root: PathBuf) -> Self {
         let available = matches!(crate::ocr_commands::configured_runner(&resource_dir), Ok(Some(_)));
-        Self { inner: Arc::new(Inner { root, resource_dir, service, available, active: Mutex::new(None) }) }
+        sweep(&root);
+        Self { inner: Arc::new(Inner { root, resource_dir, service, available, active: Mutex::new(None), interrupted: Mutex::new(None) }) }
     }
 
     pub(crate) fn service(&self) -> PdfService { self.inner.service.clone() }
@@ -125,12 +152,17 @@ impl LargeOcrJobs {
             let active = self.inner.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             active.as_ref().map(|job| job.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone())
         };
-        let job = job.or_else(|| self.interrupted_job().map(|(directory, manifest)| interrupted_status(&directory, &manifest)));
+        let job = job.or_else(|| {
+            let mut cached = self.inner.interrupted.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            cached.get_or_insert_with(|| self.interrupted_job().map(|(directory, manifest)| interrupted_status(&directory, &manifest))).clone()
+        });
         LargeOcrStatus {
             available: self.inner.available, reason: (!self.inner.available).then(|| UNAVAILABLE.into()),
             max_pages: crate::searchable_pdf_stream::MAX_STREAM_PAGES, job,
         }
     }
+
+    fn forget_interrupted(&self) { *self.inner.interrupted.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None; }
 
     fn interrupted_job(&self) -> Option<(PathBuf, JobManifest)> {
         unfinished_jobs(&self.inner.root).into_iter().next()
@@ -141,12 +173,18 @@ impl LargeOcrJobs {
         active.as_ref().is_some_and(|job| job.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).running)
     }
 
+    /// A destination must be an absolute `.pdf` path in an existing folder,
+    /// outside the app data folder, and must not exist yet.
+    fn validate_destination(&self, destination: &Path) -> Result<(), String> {
+        validate_destination(destination, self.inner.root.parent().unwrap_or(&self.inner.root))
+    }
+
     /// Starts a new job for the open document. Blocking: call off the UI thread.
     pub(crate) fn start(&self, document_id: u64, revision: u64, source: OcrJobSource, destination: PathBuf) -> Result<LargeOcrStatus, String> {
         if !self.inner.available { return Err(UNAVAILABLE.into()); }
         if self.running() { return Err("OCR is already running.".into()); }
         if self.interrupted_job().is_some() { return Err("Another OCR job has saved progress. Resume or discard it first.".into()); }
-        if destination.exists() { return Err("That file already exists. Choose a new filename; Save a Copy never overwrites an existing file.".into()); }
+        self.validate_destination(&destination)?;
         std::fs::create_dir_all(&self.inner.root).map_err(|error| format!("Could not create the OCR work folder: {error}"))?;
         let name = hex(&sha256(format!("{}|{}|{:?}", source.identity, destination.display(), std::time::SystemTime::now()).as_bytes())[..12]);
         let manifest = JobManifest {
@@ -161,11 +199,32 @@ impl LargeOcrJobs {
     pub(crate) fn resume(&self, document_id: u64, revision: u64, source: OcrJobSource) -> Result<LargeOcrStatus, String> {
         if self.running() { return Err("OCR is already running.".into()); }
         let (directory, manifest) = self.interrupted_job().ok_or("There is no saved OCR progress to resume.")?;
+        self.validate_destination(Path::new(&manifest.destination)).map_err(|error| format!("{error} Use Save elsewhere to choose another location."))?;
         if manifest.source_identity != source.identity || manifest.page_count != source.page_count {
             return Err("The document has changed since OCR started, so the saved progress can't be used.".into());
         }
         self.launch(directory, JobStart::Resume, &manifest, document_id, revision, source)
     }
+
+    /// Changes where the saved job will be published, then resumes it. When
+    /// every page is already done the source document is not needed.
+    pub(crate) fn relocate(&self, destination: PathBuf, document: Option<(u64, u64, OcrJobSource)>) -> Result<LargeOcrStatus, String> {
+        if self.running() { return Err("OCR is already running.".into()); }
+        let (directory, manifest) = self.interrupted_job().ok_or("There is no saved OCR progress to resume.")?;
+        self.validate_destination(&destination)?;
+        let all_done = crate::searchable_pdf_stream::saved_pages(&directory) == manifest.page_count;
+        let (document_id, revision, source) = match document {
+            Some((document_id, revision, source)) if all_done || (manifest.source_identity == source.identity && manifest.page_count == source.page_count) => (document_id, revision, source),
+            _ if all_done => (0, 0, OcrJobSource { page_count: manifest.page_count, page_sizes: Vec::new(), identity: manifest.source_identity.clone(), suggested_name: String::new(), source_name: manifest.source_name.clone() }),
+            Some(_) => return Err("The document has changed since OCR started, so the saved progress can't be used.".into()),
+            None => return Err("Open the document this OCR job was started from, then choose Save elsewhere again.".into()),
+        };
+        let manifest = crate::searchable_pdf_stream::set_destination(&directory, &destination.to_string_lossy()).map_err(|error| error.to_string())?;
+        self.launch(directory, JobStart::Resume, &manifest, document_id, revision, source)
+    }
+
+    /// The saved job's destination, for the Save elsewhere dialog.
+    pub(crate) fn saved_destination(&self) -> Option<PathBuf> { self.interrupted_job().map(|(_, manifest)| PathBuf::from(manifest.destination)) }
 
     pub(crate) fn pause(&self) {
         let active = self.inner.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -174,19 +233,20 @@ impl LargeOcrJobs {
 
     /// Cancels a running job, or discards saved progress. The source is never touched.
     pub(crate) fn cancel(&self) {
+        self.forget_interrupted();
         let mut active = self.inner.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(job) = active.as_ref() {
             let running = job.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).running;
             job.control.cancel();
             if !running {
-                let _ = std::fs::remove_dir_all(&job.directory);
+                discard(&job.directory);
                 *active = None;
             }
             return;
         }
         drop(active);
         if let Some((directory, _)) = self.interrupted_job() {
-            if directory.parent() == Some(self.inner.root.as_path()) { let _ = std::fs::remove_dir_all(directory); }
+            if directory.parent() == Some(self.inner.root.as_path()) { discard(&directory); }
         }
     }
 
@@ -233,27 +293,53 @@ impl LargeOcrJobs {
             let mut active = self.inner.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             *active = Some(ActiveJob { directory: directory.clone(), control: control.clone(), status: status.clone() });
         }
+        self.forget_interrupted();
         let spawned = std::thread::Builder::new().name("ocr-job".into()).spawn(move || {
-            let outcome = run_job(settings, page_source, recognizer, thread_control, progress);
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_job(settings, page_source, recognizer, thread_control, progress)));
             drop(operation);
-            let mut status = thread_status.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            status.running = false;
-            match outcome {
-                JobOutcome::Published { report, .. } => { status.progress.state = JobState::Published; status.report = report; }
-                JobOutcome::Paused { reason, next_page, report } => {
-                    status.progress.state = JobState::Paused;
-                    status.progress.pages_done = next_page;
-                    status.pause_reason = Some(reason);
-                    status.report = report;
-                }
-                JobOutcome::Cancelled => { status.progress.state = JobState::Cancelled; }
-            }
+            apply_outcome(&thread_status, outcome);
         });
         if let Err(error) = spawned {
             *self.inner.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
             return Err(format!("Could not start OCR: {error}"));
         }
         Ok(self.status())
+    }
+}
+
+fn discard(directory: &Path) {
+    if let Ok(manifest) = crate::searchable_pdf_stream::read_manifest(directory) { crate::searchable_pdf_stream::remove_stale_publish_temp(directory, &manifest); }
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+pub(crate) fn validate_destination(destination: &Path, app_data: &Path) -> Result<(), String> {
+    if !destination.is_absolute() { return Err("Choose a full path for the OCR copy.".into()); }
+    if !destination.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("pdf")) { return Err("The output filename must end in .pdf.".into()); }
+    let parent = destination.parent().filter(|parent| parent.is_dir()).ok_or("The folder for the OCR copy does not exist.")?;
+    let canonical_inside = std::fs::canonicalize(parent).ok().zip(std::fs::canonicalize(app_data).ok()).is_some_and(|(parent, app_data)| parent.starts_with(app_data));
+    if parent.starts_with(app_data) || canonical_inside { return Err("Choose a folder outside PDF Workstation's app data for the OCR copy.".into()); }
+    if destination.exists() { return Err("That file already exists. Choose a new filename; Save a Copy never overwrites an existing file.".into()); }
+    Ok(())
+}
+
+/// Records how a job ended. A panic in the job thread becomes a pause with a
+/// message, so the panel never shows a job that runs forever.
+fn apply_outcome(status: &Mutex<LargeOcrJobStatus>, outcome: std::thread::Result<JobOutcome>) {
+    let mut status = status.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    status.running = false;
+    match outcome {
+        Ok(JobOutcome::Published { report, .. }) => { status.progress.state = JobState::Published; status.report = report; }
+        Ok(JobOutcome::Paused { reason, next_page, report }) => {
+            status.progress.state = JobState::Paused;
+            status.progress.pages_done = next_page;
+            status.pause_reason = Some(reason);
+            status.report = report;
+        }
+        Ok(JobOutcome::Cancelled) => { status.progress.state = JobState::Cancelled; }
+        Err(_) => {
+            status.progress.state = JobState::Paused;
+            status.pause_reason = Some(PauseReason::Publish("OCR stopped after an internal error. Saved pages are kept; resume or discard them.".into()));
+        }
     }
 }
 
@@ -302,6 +388,54 @@ mod tests {
         let mut bytes = Vec::new();
         document.save_to(&mut bytes).unwrap();
         bytes
+    }
+
+    #[test]
+    fn a_panic_in_the_job_thread_ends_as_a_pause_not_a_running_job() {
+        let status = Mutex::new(LargeOcrJobStatus {
+            job: "a".repeat(24), source_name: "big.pdf".into(), destination: "E:/x.pdf".into(), running: true,
+            progress: JobProgress { state: JobState::Running, pages_done: 3, page_count: 9, workers: 1, issues: 0, bytes_written: 0, projected_bytes: None, size_warning: false, seconds_left: None },
+            pause_reason: None, report: Vec::new(), interrupted: false,
+        });
+        let outcome = std::panic::catch_unwind(|| -> JobOutcome { panic!("simulated job bug") });
+        apply_outcome(&status, outcome);
+        let status = status.into_inner().unwrap();
+        assert!(!status.running);
+        assert_eq!(status.progress.state, JobState::Paused);
+        assert!(matches!(status.pause_reason, Some(PauseReason::Publish(_))));
+    }
+
+    #[test]
+    fn destinations_must_be_new_absolute_pdfs_outside_app_data() {
+        let folder = tempfile::tempdir().unwrap();
+        let app_data = folder.path().join("appdata");
+        std::fs::create_dir_all(app_data.join("ocr-jobs")).unwrap();
+        assert!(validate_destination(&folder.path().join("copy.pdf"), &app_data).is_ok());
+        assert!(validate_destination(Path::new("copy.pdf"), &app_data).is_err());
+        assert!(validate_destination(&folder.path().join("copy.txt"), &app_data).is_err());
+        assert!(validate_destination(&folder.path().join("missing").join("copy.pdf"), &app_data).is_err());
+        assert!(validate_destination(&app_data.join("ocr-jobs").join("copy.pdf"), &app_data).is_err());
+        std::fs::write(folder.path().join("taken.pdf"), b"x").unwrap();
+        assert!(validate_destination(&folder.path().join("taken.pdf"), &app_data).is_err());
+    }
+
+    #[test]
+    fn startup_sweep_removes_only_old_unreadable_job_folders() {
+        let folder = tempfile::tempdir().unwrap();
+        let root = folder.path().join("ocr-jobs");
+        let fresh = root.join("b".repeat(24));
+        let old = root.join("c".repeat(24));
+        let foreign = root.join("keep-me");
+        for path in [&fresh, &old, &foreign] { std::fs::create_dir_all(path).unwrap(); }
+        let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(25 * 60 * 60);
+        let age = |path: &Path| {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new().write(true).custom_flags(0x0200_0000).open(path).unwrap().set_modified(day_ago).unwrap();
+        };
+        age(&old);
+        age(&foreign);
+        sweep(&root);
+        assert!(fresh.exists() && foreign.exists() && !old.exists());
     }
 
     /// End to end with the real engine and the in-process renderer. Needs

@@ -157,6 +157,21 @@ async fn resume_large_ocr(jobs: State<'_, large_ocr_commands::LargeOcrJobs>, doc
 }
 #[cfg(windows)]
 #[tauri::command]
+async fn relocate_large_ocr(app: tauri::AppHandle, jobs: State<'_, large_ocr_commands::LargeOcrJobs>, document_id: Option<u64>, revision: Option<u64>) -> Result<Option<large_ocr_commands::LargeOcrStatus>, String> {
+    let saved = jobs.saved_destination().ok_or("There is no saved OCR progress to resume.")?;
+    let window = app.get_webview_window("main").ok_or("Application window is unavailable")?;
+    let suggested = saved.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let path = tauri::async_runtime::spawn_blocking(move || rfd::FileDialog::new().set_parent(&window).set_title("Save the searchable OCR copy elsewhere").add_filter("PDF documents", &["pdf"]).set_file_name(suggested).save_file()).await.map_err(|error| error.to_string())?;
+    let Some(path) = path else { return Ok(None) };
+    let document = match (document_id, revision) {
+        (Some(document_id), Some(revision)) => large_ocr_source(&jobs, document_id, revision).await.ok().map(|source| (document_id, revision, source)),
+        _ => None,
+    };
+    let jobs = jobs.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || jobs.relocate(path, document)).await.map_err(|error| error.to_string())?.map(Some)
+}
+#[cfg(windows)]
+#[tauri::command]
 fn pause_large_ocr(jobs: State<'_, large_ocr_commands::LargeOcrJobs>) -> large_ocr_commands::LargeOcrStatus { jobs.pause(); jobs.status() }
 #[cfg(windows)]
 #[tauri::command]
@@ -445,6 +460,6 @@ fn main() {
         app.manage(text_edit_commands::TextReplacementSelections::default());
         app.manage(recovery_commands::RecoveryCommands::default());
         Ok(())
-    }).invoke_handler(tauri::generate_handler![recovery_commands::checkpoint_recovery, recovery_commands::restore_recovery, recovery_commands::keep_recovered_edits, recovery_commands::open_original, recovery_commands::discard_recovery, read_update_attempt, write_update_attempt, clear_update_attempt, update_commands::check_for_update, update_commands::download_update, update_commands::install_update, update_commands::release_update, document_form_fields, fill_form_copy, open_document, reopen_document, open_example, render_page, export_page_image, retry_pdf_engine, close_document, edit_pages, crop_page, crop_pages, reset_crops, create_pdf_from_image, choose_image_pdf_sources, create_pdf_from_images, cancel_image_pdf_sources, inspect_image_replacement_target, replace_pdf_image_copy, cancel_image_replacement, inspect_text_replacement_target, replace_pdf_text_copy, cancel_text_replacement, create_comment, update_comment, delete_comment, document_comments, document_annotations, create_highlight, create_text_highlight, update_highlight, delete_highlight, save_copy, redact_document, split_document, combine_documents, insert_pages_copy, replace_pages_copy, page_text, page_text_geometry, document_bookmarks, document_page_labels, document_properties, dependency_notices, unlock_document, cancel_password_request, ocr_capability, recognize_page_ocr, create_searchable_ocr_copy, cancel_page_ocr, large_ocr_status, start_large_ocr, resume_large_ocr, pause_large_ocr, cancel_large_ocr, dismiss_large_ocr, print_commands::print_document, print_commands::cancel_print])
+    }).invoke_handler(tauri::generate_handler![recovery_commands::checkpoint_recovery, recovery_commands::restore_recovery, recovery_commands::keep_recovered_edits, recovery_commands::open_original, recovery_commands::discard_recovery, read_update_attempt, write_update_attempt, clear_update_attempt, update_commands::check_for_update, update_commands::download_update, update_commands::install_update, update_commands::release_update, document_form_fields, fill_form_copy, open_document, reopen_document, open_example, render_page, export_page_image, retry_pdf_engine, close_document, edit_pages, crop_page, crop_pages, reset_crops, create_pdf_from_image, choose_image_pdf_sources, create_pdf_from_images, cancel_image_pdf_sources, inspect_image_replacement_target, replace_pdf_image_copy, cancel_image_replacement, inspect_text_replacement_target, replace_pdf_text_copy, cancel_text_replacement, create_comment, update_comment, delete_comment, document_comments, document_annotations, create_highlight, create_text_highlight, update_highlight, delete_highlight, save_copy, redact_document, split_document, combine_documents, insert_pages_copy, replace_pages_copy, page_text, page_text_geometry, document_bookmarks, document_page_labels, document_properties, dependency_notices, unlock_document, cancel_password_request, ocr_capability, recognize_page_ocr, create_searchable_ocr_copy, cancel_page_ocr, large_ocr_status, start_large_ocr, resume_large_ocr, relocate_large_ocr, pause_large_ocr, cancel_large_ocr, dismiss_large_ocr, print_commands::print_document, print_commands::cancel_print])
       .run(context).expect("Desktop application failed");
 }

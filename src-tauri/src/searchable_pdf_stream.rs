@@ -41,9 +41,11 @@ const RECORD_MAGIC: &[u8; 4] = b"PJR1";
 const RECORD_FIXED_PAYLOAD: usize = 4 + 1 + 1 + 1 + 8 * 4 + 32 + 32 + 4 + 4 + 4;
 const RECORD_MAX_PAYLOAD: usize = RECORD_FIXED_PAYLOAD + 4 * MAX_SEARCHABLE_DISTINCT_CHARS;
 const MANIFEST_LIMIT: u64 = 64 * 1024;
-/// Pages are flushed to the OS after every page (a killed app loses nothing
-/// that was written), and made durable with at most two disk flushes per this
-/// interval: the part file first, then the journal records that point into it.
+/// Page bytes are flushed to the OS after every page, but their journal
+/// records are buffered in memory and written at most once per this interval:
+/// the part file is flushed to disk first, then the records that point into it
+/// are appended and flushed. A killed app or a power loss therefore loses at
+/// most about this interval of pages, which resume redoes.
 const SYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 pub(crate) const MANIFEST_FORMAT: u32 = 1;
 
@@ -73,6 +75,8 @@ pub(crate) enum PageIssue {
     EngineOutputRefused,
     RenderFailed,
     TooManyCharacters,
+    /// The app hit an unexpected error on this page (a bug); the page is blank.
+    InternalError,
 }
 
 impl PageOutcome {
@@ -82,10 +86,10 @@ impl PageOutcome {
 
 impl PageIssue {
     fn code(self) -> u8 {
-        match self { Self::None => 0, Self::TimedOut => 1, Self::EngineStopped => 2, Self::EngineOutputRefused => 3, Self::RenderFailed => 4, Self::TooManyCharacters => 5 }
+        match self { Self::None => 0, Self::TimedOut => 1, Self::EngineStopped => 2, Self::EngineOutputRefused => 3, Self::RenderFailed => 4, Self::TooManyCharacters => 5, Self::InternalError => 6 }
     }
     fn from_code(code: u8) -> Option<Self> {
-        [Self::None, Self::TimedOut, Self::EngineStopped, Self::EngineOutputRefused, Self::RenderFailed, Self::TooManyCharacters].get(usize::from(code)).copied()
+        [Self::None, Self::TimedOut, Self::EngineStopped, Self::EngineOutputRefused, Self::RenderFailed, Self::TooManyCharacters, Self::InternalError].get(usize::from(code)).copied()
     }
 }
 
@@ -308,7 +312,8 @@ impl PartialWriter {
         let mut header = [0_u8; 16];
         if part_len < header.len() as u64 { return Err(StreamError::Unusable("the partial copy is too short".into())); }
         part.read_exact(&mut header).map_err(io)?;
-        if &header != PARTIAL_HEADER { return Err(StreamError::Unusable("the partial copy has an unexpected header".into())); }
+        let was_finalized = &header == FINAL_HEADER;
+        if &header != PARTIAL_HEADER && !was_finalized { return Err(StreamError::Unusable("the partial copy has an unexpected header".into())); }
         let journal_len = journal.metadata().map_err(io)?.len();
         if journal_len > (manifest.page_count as u64 + 1) * (RECORD_MAX_PAYLOAD as u64 + 16) {
             return Err(StreamError::Unusable("the journal is too large".into()));
@@ -344,6 +349,10 @@ impl PartialWriter {
         journal.set_len(cursor as u64).map_err(io)?;
         journal.sync_all().map_err(io)?;
         part.set_len(position).map_err(io)?;
+        if was_finalized {
+            part.seek(SeekFrom::Start(0)).map_err(io)?;
+            part.write_all(PARTIAL_HEADER).map_err(io)?;
+        }
         part.sync_all().map_err(io)?;
         part.seek(SeekFrom::Start(position)).map_err(io)?;
         journal.seek(SeekFrom::End(0)).map_err(io)?;
@@ -419,7 +428,7 @@ impl PartialWriter {
             }
             Err(error) => {
                 for character in self.characters.drain(saved_characters..) { self.ids.remove(&character); }
-                let _ = self.rollback(start);
+                if self.rollback(start).is_err() { self.poisoned = true; }
                 return Err(error);
             }
         }
@@ -724,11 +733,14 @@ fn check_finished(path: &Path, records: &[PageRecord], characters: &[char], offs
         let header_text = String::from_utf8_lossy(&image_bytes[..image_bytes.len().min(400)]).into_owned();
         let field = |name: &str| header_text.split(name).nth(1).and_then(|rest| rest.split_whitespace().next()).and_then(|value| value.parse::<usize>().ok());
         let (width, height, bits) = (field("/Width ").ok_or_else(|| fail(format!("page {} width", index + 1)))?, field("/Height ").ok_or_else(|| fail(format!("page {} height", index + 1)))?, field("/BitsPerComponent ").ok_or_else(|| fail(format!("page {} bits", index + 1)))?);
+        let edge = 1..=crate::ocr_process::OCR_MAX_EDGE;
+        if !edge.contains(&width) || !edge.contains(&height) || !matches!(bits, 1 | 8) { return Err(fail(format!("page {} image size", index + 1))); }
         let colors = if header_text.contains("/DeviceRGB") { 3 } else { 1 };
-        let row_bytes = if bits == 1 { width.div_ceil(8) } else { width * colors };
+        let row_bytes = if bits == 1 { width.div_ceil(8) } else { width.checked_mul(colors).ok_or_else(|| fail(format!("page {} image size", index + 1)))? };
+        let image_bytes_expected = row_bytes.checked_mul(height).filter(|bytes| *bytes <= MAX_PAGE_PIXEL_BYTES).ok_or_else(|| fail(format!("page {} image size", index + 1)))?;
         let image = stream_of(&image_bytes, id)?;
         let raw = image.decompressed_content_with_limit(MAX_PAGE_PIXEL_BYTES + height).map_err(|error| fail(format!("page {} image: {error}", index + 1)))?;
-        if raw.len() != row_bytes * height { return Err(fail(format!("page {} image length", index + 1))); }
+        if raw.len() != image_bytes_expected { return Err(fail(format!("page {} image length", index + 1))); }
         let mut hasher = Sha256::new();
         let mut row_rgb = Vec::with_capacity(width * 3);
         for row in raw.chunks_exact(row_bytes) {
@@ -789,13 +801,52 @@ pub(crate) fn publish_noclobber(
         return move_noclobber(finished, destination);
     }
     let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(io)?;
+    let marker = finished.with_file_name(PUBLISH_TEMP_MARKER);
+    std::fs::write(&marker, temporary.path().as_os_str().as_encoded_bytes()).map_err(io)?;
     let mut source = File::open(finished).map_err(io)?;
     std::io::copy(&mut source, temporary.as_file_mut()).map_err(io)?;
     temporary.as_file().sync_all().map_err(io)?;
     commit().map_err(StreamError::NotCommitted)?;
     temporary.persist_noclobber(destination).map_err(|error| if error.error.kind() == std::io::ErrorKind::AlreadyExists { StreamError::DestinationExists } else { io(error.error) })?;
+    let _ = std::fs::remove_file(&marker);
     let _ = std::fs::remove_file(finished);
     Ok(())
+}
+
+/// The name of the file that records where a cross-volume publish put its
+/// temporary copy, so a crash before the rename does not leave it behind.
+pub(crate) const PUBLISH_TEMP_MARKER: &str = "publish-temp";
+
+/// Removes a temporary copy left by an interrupted cross-volume publish. Only
+/// a `.tmp*` file directly in the destination's folder is ever removed.
+pub(crate) fn remove_stale_publish_temp(directory: &Path, manifest: &JobManifest) {
+    let marker = directory.join(PUBLISH_TEMP_MARKER);
+    let Ok(file) = File::open(&marker) else { return };
+    let mut bytes = Vec::new();
+    if file.take(8 * 1024).read_to_end(&mut bytes).is_err() { return; }
+    let Ok(text) = String::from_utf8(bytes) else { let _ = std::fs::remove_file(&marker); return };
+    let temporary = PathBuf::from(text);
+    let expected_folder = Path::new(&manifest.destination).parent();
+    let safe = temporary.is_absolute() && temporary.parent().is_some() && temporary.parent() == expected_folder
+        && temporary.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with(".tmp"))
+        && std::fs::symlink_metadata(&temporary).is_ok_and(|metadata| metadata.is_file());
+    if safe { let _ = std::fs::remove_file(&temporary); }
+    let _ = std::fs::remove_file(&marker);
+}
+
+/// Points a saved job at a new destination (Save elsewhere).
+pub(crate) fn set_destination(directory: &Path, destination: &str) -> Result<JobManifest, StreamError> {
+    let mut manifest = read_manifest(directory)?;
+    manifest.destination = destination.to_owned();
+    validate_manifest(&manifest)?;
+    let bytes = serde_json::to_vec_pretty(&manifest).map_err(|error| StreamError::Invalid(error.to_string()))?;
+    let temporary = directory.join("manifest.json.new");
+    let mut file = File::create(&temporary).map_err(io)?;
+    file.write_all(&bytes).map_err(io)?;
+    file.sync_all().map_err(io)?;
+    drop(file);
+    std::fs::rename(&temporary, directory.join(MANIFEST_FILE)).map_err(io)?;
+    Ok(manifest)
 }
 
 fn volume_of(path: &Path) -> Option<std::ffi::OsString> {
@@ -968,6 +1019,59 @@ pub(crate) mod tests {
         std::fs::write(directory.join(PART_FILE), part).unwrap();
         let resumed = PartialWriter::resume(&directory).unwrap();
         assert!(matches!(resumed.finalize(), Err(StreamError::CheckFailed(_))));
+    }
+
+    #[test]
+    fn a_crash_after_finalize_before_publish_resumes_to_identical_bytes() {
+        let folder = tempfile::tempdir().unwrap();
+        let directory = folder.path().join("job");
+        let mut writer = PartialWriter::create(&directory, manifest(12, Path::new("E:/unused.pdf"))).unwrap();
+        for index in 0..12 { writer.append(&synthetic_page(index)).unwrap(); }
+        let finished = writer.finalize().unwrap();
+        let clean = std::fs::read(&finished.path).unwrap();
+        assert!(clean.starts_with(b"%PDF-1.7"));
+        let resumed = PartialWriter::resume(&directory).unwrap();
+        assert_eq!(resumed.next_page(), 12);
+        assert!(std::fs::read(directory.join(PART_FILE)).unwrap().starts_with(PARTIAL_HEADER));
+        assert!(std::fs::read(resumed.finalize().unwrap().path).unwrap() == clean);
+    }
+
+    #[test]
+    fn an_impossible_image_size_on_disk_fails_the_check_without_panicking() {
+        let folder = tempfile::tempdir().unwrap();
+        let directory = folder.path().join("job");
+        let mut writer = PartialWriter::create(&directory, manifest(2, Path::new("E:/unused.pdf"))).unwrap();
+        for index in 0..2 { writer.append(&synthetic_page(index)).unwrap(); }
+        writer.checkpoint().unwrap();
+        drop(writer);
+        let mut part = std::fs::read(directory.join(PART_FILE)).unwrap();
+        let at = find(&part, b"/Width 64").unwrap();
+        part[at + 7..at + 9].copy_from_slice(b"00");
+        std::fs::write(directory.join(PART_FILE), part).unwrap();
+        let resumed = PartialWriter::resume(&directory).unwrap();
+        assert!(matches!(resumed.finalize(), Err(StreamError::CheckFailed(_))));
+    }
+
+    #[test]
+    fn a_stale_publish_temp_is_removed_only_next_to_the_destination() {
+        let folder = tempfile::tempdir().unwrap();
+        let directory = folder.path().join("job");
+        let destination = folder.path().join("out").join("copy.pdf");
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        let writer = PartialWriter::create(&directory, manifest(1, &destination)).unwrap();
+        drop(writer);
+        let leftover = destination.parent().unwrap().join(".tmpAB12");
+        std::fs::write(&leftover, b"partial").unwrap();
+        let elsewhere = folder.path().join(".tmpCD34");
+        std::fs::write(&elsewhere, b"keep").unwrap();
+        std::fs::write(directory.join(PUBLISH_TEMP_MARKER), elsewhere.to_string_lossy().as_bytes()).unwrap();
+        remove_stale_publish_temp(&directory, &read_manifest(&directory).unwrap());
+        assert!(elsewhere.exists(), "a file outside the destination folder is never removed");
+        std::fs::write(directory.join(PUBLISH_TEMP_MARKER), leftover.to_string_lossy().as_bytes()).unwrap();
+        remove_stale_publish_temp(&directory, &read_manifest(&directory).unwrap());
+        assert!(!leftover.exists() && !directory.join(PUBLISH_TEMP_MARKER).exists());
+        let moved = set_destination(&directory, &folder.path().join("other.pdf").to_string_lossy()).unwrap();
+        assert_eq!(read_manifest(&directory).unwrap(), moved);
     }
 
     #[test]

@@ -38,6 +38,10 @@ const MAX_ATTEMPTS: u32 = 2;
 const BREAKER_PAGES: u32 = 5;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 const PROJECTION_AFTER_PAGES: u32 = 10;
+/// How long a stop waits for workers. A worker stuck in a render that cannot
+/// be interrupted (in-process PDFium) is left behind; its late result is
+/// ignored, so pause and cancel still answer promptly.
+const STOP_WAIT: Duration = Duration::from_secs(2);
 
 /// A rendered page: P6 bytes (header included) of the white-composited raster.
 pub(crate) struct RenderedPage {
@@ -381,7 +385,16 @@ pub(crate) fn run_job(
     }
     signal.notify_all();
     if stop_reason.is_some() { control.cancellation().cancel(); }
-    for handle in handles.into_iter().flatten() { let _ = handle.join(); }
+    {
+        let deadline = Instant::now() + STOP_WAIT;
+        let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        while state.workers_running > 0 && Instant::now() < deadline {
+            state = signal.wait_timeout(state, Duration::from_millis(20)).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
+        }
+    }
+    for handle in handles.into_iter().flatten() {
+        if handle.is_finished() { let _ = handle.join(); }
+    }
 
     if control.requested() == REQUEST_CANCEL {
         drop(writer);
@@ -423,7 +436,35 @@ pub(crate) fn run_job(
     }
 }
 
+/// Counts a worker out even if it unwinds, so the coordinator never waits for
+/// a worker that no longer exists.
+struct WorkerExit<'a>(&'a (Mutex<Shared>, Condvar));
+impl Drop for WorkerExit<'_> {
+    fn drop(&mut self) {
+        let (lock, signal) = self.0;
+        lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).workers_running -= 1;
+        signal.notify_all();
+    }
+}
+
+/// `process_page` with a panic turned into a degraded page: a white
+/// placeholder of the page's size, reported as an internal error.
+fn process_page_guarded(page: u32, source: &dyn PageSource, recognizer: &dyn PageRecognizer, cancellation: &OcrCancellation) -> WorkResult {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    if let Ok(result) = catch_unwind(AssertUnwindSafe(|| process_page(page, source, recognizer, cancellation))) { return result; }
+    match catch_unwind(AssertUnwindSafe(|| source.page_size(page))) {
+        Ok(Ok((page_width, page_height))) => WorkResult::Page(StreamPage {
+            page_width, page_height, image: placeholder_image(), words: Vec::new(),
+            outcome: PageOutcome::Placeholder, issue: PageIssue::InternalError, reduced_resolution: false,
+        }, LivePage::new()),
+        Ok(Err(PageError::Cancelled)) => WorkResult::Cancelled,
+        Ok(Err(PageError::Job(reason))) => WorkResult::Pause(reason),
+        _ => WorkResult::Pause(PauseReason::Publish(format!("page {} hit an internal error", page + 1))),
+    }
+}
+
 fn worker_loop(shared: &(Mutex<Shared>, Condvar), source: &dyn PageSource, recognizer: &dyn PageRecognizer, control: &JobControl, page_count: u32, window: u32) {
+    let _exit = WorkerExit(shared);
     let (lock, signal) = shared;
     loop {
         let page = {
@@ -439,7 +480,7 @@ fn worker_loop(shared: &(Mutex<Shared>, Condvar), source: &dyn PageSource, recog
             }
         };
         let Some(page) = page else { break };
-        let result = process_page(page, source, recognizer, control.cancellation());
+        let result = process_page_guarded(page, source, recognizer, control.cancellation());
         let terminal = !matches!(result, WorkResult::Page(..));
         {
             let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -448,10 +489,6 @@ fn worker_loop(shared: &(Mutex<Shared>, Condvar), source: &dyn PageSource, recog
         signal.notify_all();
         if terminal { break; }
     }
-    let mut state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    state.workers_running -= 1;
-    drop(state);
-    signal.notify_all();
 }
 
 fn process_page(page: u32, source: &dyn PageSource, recognizer: &dyn PageRecognizer, cancellation: &OcrCancellation) -> WorkResult {
@@ -466,6 +503,7 @@ fn process_page(page: u32, source: &dyn PageSource, recognizer: &dyn PageRecogni
             Err(PageError::Cancelled) => return WorkResult::Cancelled,
         }
     }
+    if cancellation.is_cancelled() { return WorkResult::Cancelled; }
     let live = LivePage::new();
     let prepared = rendered.and_then(|raster| {
         let header = format!("P6\n{} {}\n255\n", raster.width, raster.height);
@@ -540,10 +578,12 @@ pub(crate) mod tests {
         fail_render: Vec<u32>,
         render_calls: AtomicU32,
         stop_document_at: Option<u32>,
+        panic_at: Option<u32>,
+        hang_at: Option<u32>,
     }
 
     impl FakeSource {
-        fn new() -> Self { Self { fail_render: Vec::new(), render_calls: AtomicU32::new(0), stop_document_at: None } }
+        fn new() -> Self { Self { fail_render: Vec::new(), render_calls: AtomicU32::new(0), stop_document_at: None, panic_at: None, hang_at: None } }
     }
 
     fn raster(page: u32) -> Vec<u8> {
@@ -573,6 +613,8 @@ pub(crate) mod tests {
             if cancellation.is_cancelled() { return Err(PageError::Cancelled); }
             if self.stop_document_at == Some(page) { return Err(PageError::Job(PauseReason::Document("Document changed. Start OCR again.".into()))); }
             if self.fail_render.contains(&page) { return Err(PageError::Page(PageIssue::RenderFailed, "render crashed".into())); }
+            if self.panic_at == Some(page) { panic!("simulated bug while rendering page {page}"); }
+            if self.hang_at == Some(page) { std::thread::sleep(Duration::from_secs(8)); }
             Ok(RenderedPage { width: 200, height: 260, page_width: 96.0, page_height: 124.8, p6: raster(page), reduced_resolution: page % 97 == 5 })
         }
     }
@@ -872,6 +914,39 @@ pub(crate) mod tests {
         std::fs::remove_file(&destination).unwrap();
         let outcome = run_job(settings(&directory, 20, &destination, 2, true), Arc::new(FakeSource::new()), Arc::new(FakeEngine::new()), JobControl::default(), silent());
         assert!(matches!(outcome, JobOutcome::Published { .. }), "{outcome:?}");
+    }
+
+    #[test]
+    fn a_panicking_page_becomes_a_reported_blank_page_and_the_job_finishes() {
+        let _serial = JOB_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let folder = tempfile::tempdir().unwrap();
+        let mut source = FakeSource::new();
+        source.panic_at = Some(17);
+        let outcome = run(&folder.path().join("job"), 40, &folder.path().join("out.pdf"), 3, source, FakeEngine::new());
+        let JobOutcome::Published { report, .. } = outcome else { panic!("{outcome:?}") };
+        let failures = report.iter().filter(|entry| !entry.reduced_resolution).map(|entry| (entry.page, entry.outcome, entry.issue)).collect::<Vec<_>>();
+        assert_eq!(failures, vec![(17, PageOutcome::Placeholder, PageIssue::InternalError)]);
+    }
+
+    #[test]
+    fn pause_answers_promptly_even_when_a_render_cannot_be_interrupted() {
+        let _serial = JOB_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let folder = tempfile::tempdir().unwrap();
+        let mut source = FakeSource::new();
+        source.hang_at = Some(6);
+        let engine = Arc::new(FakeEngine::new());
+        let control = JobControl::default();
+        let paused_at = Arc::new(Mutex::new(None::<Instant>));
+        let watcher = when_calls_reach(engine.clone(), 6, {
+            let (control, paused_at) = (control.clone(), paused_at.clone());
+            move || { std::thread::sleep(Duration::from_millis(300)); *paused_at.lock().unwrap() = Some(Instant::now()); control.pause(); }
+        });
+        let outcome = run_job(settings(&folder.path().join("job"), 30, &folder.path().join("out.pdf"), 1, false), Arc::new(source), engine, control, silent());
+        let stopped = Instant::now();
+        watcher.join().unwrap();
+        assert!(matches!(outcome, JobOutcome::Paused { reason: PauseReason::User, next_page: 6, .. }), "{outcome:?}");
+        let waited = stopped.saturating_duration_since(paused_at.lock().unwrap().unwrap());
+        assert!(waited < STOP_WAIT + Duration::from_secs(1), "{waited:?}");
     }
 
     #[test]

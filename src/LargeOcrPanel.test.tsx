@@ -11,7 +11,7 @@ const job = (overrides: Partial<LargeOcrJob> = {}, progress: Partial<LargeOcrJob
 const status = (value: LargeOcrJob | null): LargeOcrStatus => ({ available: true, reason: null, maxPages: 10_000, job: value });
 const api = (current: LargeOcrStatus): LargeOcrApi & { [key: string]: ReturnType<typeof vi.fn> } => ({
   status: vi.fn().mockResolvedValue(current), pause: vi.fn().mockResolvedValue(current), cancel: vi.fn().mockResolvedValue(status(null)),
-  resume: vi.fn().mockResolvedValue(current), dismiss: vi.fn().mockResolvedValue(status(null)),
+  resume: vi.fn().mockResolvedValue(current), dismiss: vi.fn().mockResolvedValue(status(null)), relocate: vi.fn().mockResolvedValue(null),
 });
 const flatten = (node: unknown): string => typeof node === 'string' ? node : Array.isArray(node) ? node.map(flatten).join('') : node && typeof node === 'object' && 'children' in node ? flatten((node as { children: unknown }).children) : '';
 const text = (ui: ReactTestRenderer) => flatten(ui.toJSON());
@@ -57,6 +57,9 @@ it('resumes a paused job with the open document and offers discard', async () =>
   expect(text(ui)).toContain('5 pages in a row could not be read');
   await act(async () => { button(ui, 'Resume').props.onClick(); });
   expect(calls.resume).toHaveBeenCalledWith(3, 9);
+  expect(text(ui)).toContain('The copy will be saved as E:/out/big-searchable.pdf.');
+  await act(async () => { button(ui, 'Save elsewhere…').props.onClick(); });
+  expect(calls.relocate).toHaveBeenCalledWith(3, 9);
   await act(async () => { button(ui, 'Discard progress').props.onClick(); });
   expect(calls.cancel).toHaveBeenCalledOnce();
 });

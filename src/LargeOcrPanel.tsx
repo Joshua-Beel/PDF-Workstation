@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { cancelLargeOcr, dismissLargeOcr, largeOcrStatus, pauseLargeOcr, resumeLargeOcr, type LargeOcrJob, type LargeOcrPageReport, type LargeOcrPauseReason, type LargeOcrStatus } from './bridge';
+import { cancelLargeOcr, dismissLargeOcr, largeOcrStatus, pauseLargeOcr, relocateLargeOcr, resumeLargeOcr, type LargeOcrJob, type LargeOcrPageReport, type LargeOcrPauseReason, type LargeOcrStatus } from './bridge';
 import s from './LargeOcrPanel.module.css';
 
 export type LargeOcrApi = {
@@ -8,9 +8,10 @@ export type LargeOcrApi = {
   cancel: () => Promise<LargeOcrStatus>;
   resume: (documentId: number, revision: number) => Promise<LargeOcrStatus>;
   dismiss: () => Promise<LargeOcrStatus>;
+  relocate: (documentId: number | null, revision: number | null) => Promise<LargeOcrStatus | null>;
 };
 
-const defaultApi: LargeOcrApi = { status: () => largeOcrStatus(), pause: () => pauseLargeOcr(), cancel: () => cancelLargeOcr(), resume: (documentId, revision) => resumeLargeOcr(documentId, revision), dismiss: () => dismissLargeOcr() };
+const defaultApi: LargeOcrApi = { status: () => largeOcrStatus(), pause: () => pauseLargeOcr(), cancel: () => cancelLargeOcr(), resume: (documentId, revision) => resumeLargeOcr(documentId, revision), dismiss: () => dismissLargeOcr(), relocate: (documentId, revision) => relocateLargeOcr(documentId, revision) };
 
 const issueText: Record<LargeOcrPageReport['issue'], string> = {
   none: 'reduced resolution',
@@ -19,6 +20,7 @@ const issueText: Record<LargeOcrPageReport['issue'], string> = {
   engineOutputRefused: 'the OCR result could not be used',
   renderFailed: 'could not be displayed and is blank in the copy',
   tooManyCharacters: 'some words had characters past the 8,192-character limit',
+  internalError: 'an internal error; the page is blank in the copy',
 };
 
 export function timeLeft(seconds: number | null): string {
@@ -101,8 +103,10 @@ export default function LargeOcrPanel({ document, refresh, openCopy, api = defau
   } else {
     body = <>
       <p>{pauseText(job.pauseReason, job)}</p>
+      <p>The copy will be saved as <strong>{job.destination}</strong>.</p>
       <div className={s.actions}>
         <button disabled={!document} title={document ? undefined : 'Open the document this OCR job was started from.'} onClick={() => document && void act(() => api.resume(document.id, document.revision))}>Resume</button>
+        <button onClick={() => void act(async () => (await api.relocate(document?.id ?? null, document?.revision ?? null)) ?? await api.status())}>Save elsewhere…</button>
         <button onClick={() => void act(api.cancel)}>Discard progress</button>
       </div>
     </>;
