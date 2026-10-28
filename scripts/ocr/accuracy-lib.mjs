@@ -384,7 +384,9 @@ export async function runManifest(manifestPath, engine, hooks = {}) {
     const truth = await readFile(truthPath, 'utf8');
     const image = resampleToDpi(decodeImage(imagePath, await readFile(imagePath)), entry.sourceDpi);
     const started = Date.now();
-    const text = await (hooks.recognize ?? recognize)(engine, toP6(image));
+    const text = hooks.textDir
+      ? await readFile(resolveInside(hooks.textDir, `${entry.image.replace(/^.*[\\/]/, '').replace(/\.[^.]*$/, '')}.ocr.txt`), 'utf8')
+      : await (hooks.recognize ?? recognize)(engine, toP6(image));
     results.push({ id: entry.id, note: entry.note, sourceDpi: entry.sourceDpi, ocrWidth: image.width, ocrHeight: image.height, ms: Date.now() - started, ...scoreText(truth, text), text: hooks.keepText ? text : undefined });
   }
   return { scope: manifest.scope, results, total: aggregate(results) };

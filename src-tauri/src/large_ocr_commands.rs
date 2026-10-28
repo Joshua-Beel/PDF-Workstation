@@ -56,9 +56,9 @@ struct TesseractRecognizer {
 }
 
 impl PageRecognizer for TesseractRecognizer {
-    fn recognize_tsv(&self, p6: &[u8], _cancellation: &OcrCancellation) -> Result<String, PageError> {
+    fn recognize_tsv(&self, p6: &[u8], _cancellation: &OcrCancellation) -> Result<(String, crate::ocr_preprocess::Skew), PageError> {
         match self.runner.recognize_p6_tsv_background(p6, &self.operation) {
-            Ok(output) => Ok(output.text),
+            Ok(output) => Ok((output.text, output.skew)),
             Err(OcrProcessError::Cancelled) => Err(PageError::Cancelled),
             Err(OcrProcessError::TimedOut) => Err(PageError::Page(PageIssue::TimedOut, "timed out".into())),
             Err(OcrProcessError::InvalidInput(message)) => Err(PageError::Page(PageIssue::EngineOutputRefused, message)),

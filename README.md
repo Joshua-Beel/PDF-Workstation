@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- OCR input preprocessing (SM4; `ocr_preprocess.rs`): background flattening and 1-5 degree deskew on a copy of the page before Tesseract; text layer mapped back onto the unrotated page. 10 real pages, unverified draft truth: CER 27.05% to 25.29% (source build).
 - Render-cancel review follow-ups (SM5; branch `sm5/render-p3s-2`; `service.rs`): epoch bump and enqueue now happen under one lock, a late cancelled ticket can no longer join and supersede a queued render, reusing a spare fails fast if the worker is gone, stale-epoch spares dropped at the bump. Local, unreviewed.
 - Render-cancel follow-ups and page-size check (SM5; branch `sm5/render-p3s`; `service.rs`, `pdf_engine.rs`, `viewer_perf.rs`): a cancelled viewer render's channel marker is reused by the next render (markers stay at the 32-render limit), a cancel that beats its render sticks (256 recent tickets remembered); `page_sizes` was already on `FPDF_GetPageSizeByIndexF` (`bb09ea1`): 65,536 pages 0.5-0.6 s vs 11-15 s loading each page. Local, unreviewed.
 - Bookmark alias refusal, round 2 (SM1; branch `sm1/bookmark-editing`; `outline_edit.rs`): a reference to the outline root from anywhere but the catalog's /Outlines, or a path from an item's own /A, /SE etc. to any item, is refused; link annotations and named destinations pointing at pages still edit and save (source build).
