@@ -87,7 +87,8 @@ pub fn with_page_reference(document: &Document, value: &Object, page: ObjectId, 
     }
 }
 
-/// Whether `value` is the name `/GoTo`, directly or through references (PDFium follows them too).
+/// Whether `value` is the name `/GoTo`, directly or through references. The bundled PDFium does not follow a
+/// reference here (it gives such an action no page); other readers may, so structural copies treat it as GoTo.
 pub fn is_goto_name(document: &Document, value: &Object) -> bool {
     matches!(follow(document, value), Some(Object::Name(name)) if name == b"GoTo")
 }
