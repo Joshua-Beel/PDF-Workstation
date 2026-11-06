@@ -1211,12 +1211,13 @@ public static class PrintSpoolWriterFixture {
       $print=New-HostedTopElement 31 302 'ControlType.Button' 'Print'
       $currentPage=New-HostedTopElement 32 303 'ControlType.RadioButton' 'Current Page'
       $printerCombo=New-HostedTopElement 33 304 'ControlType.ComboBox' ''
-      $script:hostedNativeState='baseline';$script:hostedRootQueries=0;$script:hostedChildless=$false;$script:hostedRootDelayMilliseconds=0;$script:hostedStraddle=$false;$script:hostedTopCalls=0;$script:hostedStraddleDeadline=[datetime]::MinValue
+      $script:hostedNativeState='baseline';$script:hostedRootQueries=0;$script:hostedChildless=$false;$script:hostedRootDelayMilliseconds=0;$script:hostedStraddle=$false;$script:hostedTopCalls=0;$script:hostedStraddleDeadline=[datetime]::MinValue;$script:hostedRootStraddle=$false;$script:hostedRootStraddleCalls=0
       $provider={param($requestedProcessId,[long]$rootHandle,[bool]$topLevelOnly)
         if($rootHandle-eq0-and$script:hostedStraddle){$script:hostedTopCalls++;if($script:hostedTopCalls-ge2){while([datetime]::UtcNow-lt$script:hostedStraddleDeadline){Start-Sleep -Milliseconds 20}}}
         if($rootHandle-ne0){
           $script:hostedRootQueries++
           if($rootHandle-ne202){throw 'Hosted topology selected a generic or invisible top-level HWND.'}
+          if($script:hostedRootStraddle){$script:hostedRootStraddleCalls++;if($script:hostedRootStraddleCalls-ge2){while([datetime]::UtcNow-lt$script:hostedStraddleDeadline){Start-Sleep -Milliseconds 20}}}
           if($script:hostedRootDelayMilliseconds-gt0){Start-Sleep -Milliseconds $script:hostedRootDelayMilliseconds}
           if($script:hostedChildless){return @([pscustomobject]@{HandleValue=202L;ParentHandleValue=0L;ClassName='#32770';ControlId=0;IsVisible=$true;IsEnabled=$true;Element=$candidateRecords[2].Element})}
           return @(
@@ -1249,6 +1250,8 @@ public static class PrintSpoolWriterFixture {
       if($childlessMessage-cnotmatch'"nativeEnumerationStage":"native-enumeration-complete"'-or$childlessMessage-cnotmatch'"childCount":0'-or$childlessMessage-cmatch'Private|HandleValue|ParentHandleValue|202'){throw 'Childless hosted save dialog did not retain a bounded sanitized completed native-enumeration receipt.'}
       $script:hostedStraddle=$true;$script:hostedTopCalls=0;$script:hostedStraddleDeadline=[datetime]::UtcNow.AddSeconds(3);$straddleMessage='';try{Wait-NewProcessNativeWindowSurface -ProcessId 7319 -Baseline $baseline -AnchorNames @('Save') -AnchorControlTypes @('ControlType.Button') -Stage 'save-output-dialog' -Deadline $script:hostedStraddleDeadline -WindowProvider $provider|Out-Null}catch{$straddleMessage=$_.Exception.Message};$script:hostedStraddle=$false
       if($script:hostedTopCalls-lt2-or$straddleMessage-cnotmatch'"nativeEnumerationStage":"native-enumeration-complete"'-or$straddleMessage-cnotmatch'"topLevelOwnedCount":11'-or$straddleMessage-cnotmatch'"childCount":0'-or$straddleMessage-cmatch'Private|HandleValue|ParentHandleValue|202'){throw 'A final enumeration cut short by the deadline replaced the last completed native-enumeration receipt.'}
+      $script:hostedRootStraddle=$true;$script:hostedRootStraddleCalls=0;$script:hostedStraddleDeadline=[datetime]::UtcNow.AddSeconds(6);$rootStraddleMessage='';try{Wait-NewProcessNativeWindowSurface -ProcessId 7319 -Baseline $baseline -AnchorNames @('Save') -AnchorControlTypes @('ControlType.Button') -Stage 'save-output-dialog' -Deadline $script:hostedStraddleDeadline -WindowProvider $provider|Out-Null}catch{$rootStraddleMessage=$_.Exception.Message};$script:hostedRootStraddle=$false
+      if($script:hostedRootStraddleCalls-lt2-or$rootStraddleMessage-cnotmatch'"nativeEnumerationStage":"native-enumeration-complete"'-or$rootStraddleMessage-cnotmatch'"topLevelOwnedCount":11'-or$rootStraddleMessage-cnotmatch'"childCount":0'-or$rootStraddleMessage-cmatch'Private|HandleValue|ParentHandleValue|202'){throw ('A later top-level-only pass replaced the last completed native-enumeration receipt before its rooted enumeration was cut short by the deadline: '+$rootStraddleMessage)}
       $script:hostedChildless=$false
       $script:hostedRootDelayMilliseconds=400;$lateRootMessage='';try{Wait-NewProcessNativeWindowSurface -ProcessId 7319 -Baseline $baseline -AnchorNames @('Save') -AnchorControlTypes @('ControlType.Button') -Stage 'save-output-dialog' -Deadline ([datetime]::UtcNow.AddMilliseconds(250)) -WindowProvider $provider|Out-Null}catch{$lateRootMessage=$_.Exception.Message};$script:hostedRootDelayMilliseconds=0
       if($lateRootMessage-cnotmatch'"nativeEnumerationStage":"native-enumeration-started"'-or$lateRootMessage-cnotmatch'"childCount":0'-or$lateRootMessage-cmatch'Private|HandleValue|ParentHandleValue|202'){throw 'Late rooted native enumeration did not preserve its bounded sanitized in-progress phase.'}
@@ -1257,7 +1260,7 @@ public static class PrintSpoolWriterFixture {
       if(-not$rejected-or$script:hostedRootQueries-ne$queriesBefore){throw 'Multiple visible dialog-class HWNDs reached a rooted UIA query.'}
     `);
     expect(result.status, result.stderr || result.stdout).toBe(0);
-  }, 15_000);
+  }, 60_000);
 
   it('maps every native wait callsite to its exact diagnostic stage', () => {
     const result = runPowerShell7(String.raw`

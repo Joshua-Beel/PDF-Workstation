@@ -1569,7 +1569,7 @@ function Wait-NewProcessNativeWindowSurface {
             $topLevelRecords = @(Get-ProcessNativeWindowRecords -ProcessId $ProcessId -Deadline $Deadline -TopLevelOnly -WindowProvider $WindowProvider -EnumerationStage ([ref]$topLevelEnumerationStage))
             $candidateRecords = @($topLevelRecords | Where-Object { -not $baselineHandleValues.Contains([long]$_.HandleValue) })
             $candidateTopLevelRecords = @(Get-NativeTopLevelCandidateDiagnosticRecords -TopLevelRecords $topLevelRecords -BaselineHandleValues $baselineHandleValues -Deadline $Deadline)
-            if ([datetime]::UtcNow -lt $Deadline) { $structure = Get-SanitizedNativeWindowTopologyJson -TopLevelRecords $topLevelRecords -CandidateTopLevelRecords $candidateTopLevelRecords -SurfaceRecords @() -NativeEnumerationStage $rootedEnumerationStage }
+            if ([datetime]::UtcNow -lt $Deadline -and (Get-NativeWindowReceiptRank -TopLevelCount $topLevelRecords.Count -Stage $rootedEnumerationStage) -ge (Get-NativeWindowReceiptRank -ReceiptJson $structure)) { $structure = Get-SanitizedNativeWindowTopologyJson -TopLevelRecords $topLevelRecords -CandidateTopLevelRecords $candidateTopLevelRecords -SurfaceRecords @() -NativeEnumerationStage $rootedEnumerationStage }
             $visibleDialogRecords = @($candidateRecords | Where-Object {
                 $classProperty = $_.PSObject.Properties['ClassName']; $visibleProperty = $_.PSObject.Properties['IsVisible']
                 $null -ne $classProperty -and ([string]$classProperty.Value).Equals('#32770',[StringComparison]::OrdinalIgnoreCase) -and
