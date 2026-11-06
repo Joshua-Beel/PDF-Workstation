@@ -15,6 +15,13 @@ function runPowerShell(source: string) {
 }
 
 describe('manual signed OCR artifact workflow', () => {
+  it('installs dependencies without any restored Actions cache', () => {
+    const workflow = readFileSync('.github/workflows/ocr-signed-artifact.yml', 'utf8').replace(/\r\n/g, '\n');
+    expect(workflow).not.toMatch(/^\s*cache:/m);
+    expect(workflow).toContain("node-version: '22'\n          package-manager-cache: false\n");
+    expect(workflow).not.toMatch(/actions\/cache|rust-cache/);
+  });
+
   it('is manual, master-bound, read-only, exact-revision, and isolated from releases and updater secrets', () => {
     const workflow = readFileSync('.github/workflows/ocr-signed-artifact.yml', 'utf8').replace(/\r\n/g, '\n');
     const release = readFileSync('.github/workflows/release.yml', 'utf8');

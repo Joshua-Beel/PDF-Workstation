@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Signed OCR artifact workflow restores no Actions cache: setup-node's `cache: npm` becomes `package-manager-cache: false`, pinned by a test (SM7 recommendation; SM6; `ocr-signed-artifact.yml`). Not yet exercised in a hosted run.
 - Release workflow restores no Actions cache: the signing job's `cache: npm` is replaced with `package-manager-cache: false`, pinned by a test (SM7 recommendation; `release.yml`, `release-workflow.test.ts`). Not yet exercised in a release run.
 - Dev dependency: vite 6.4.4 to 6.4.5, clearing the dev-server advisory GHSA-8g5g-mxqh-grgj (SM0; `package.json`, `package-lock.json`, notices inventory hash). Build tooling only; `npm audit` 0.
 - Test: with only a bookmark edit pending, form fill, redaction, image/text replacement and searchable/large OCR all refuse with the overlay message, and Undo lifts it (SM1; `outline_edit_tests.rs`; source build; mutation-checked).
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - Searchable OCR text layer on real scans (SM4; `searchable_ocr.rs`, `searchable_pdf.rs`, `searchable_pdf_stream.rs`): overhanging word boxes and edge spaces no longer refuse a page (10 of 10 real pages parse, was 3); both writers draw a space between words, so words PDFium joined drop from 155 to 36 of 3,526. The 32-page copy's reopen check now compares each page's characters as a multiset (SM7 ruling): 8 of the 10 real pages save as searchable copies, was 0. Paragraph and line boxes now only need to overlap their parents (automatic layout), and the large-job manifest is format 2 (source build).
 - Native integration test targets compile again after the spawn-lock change, and CI now compiles every test target (SM0; tests and CI only).
 - Installed comments/forms verifier: a fourth controlled fixture (multi-select list plus two editable combos) sets two list options, types a custom combo value and picks a listed one, saves, reopens in a fresh process and asserts the exact values; tests only, hosted run still to do (SM3).
-- Accessibility audit and fixes (SM5; branch `sm5/a11y-audit`; `App.tsx`, `Viewer.tsx`, `PageList.tsx`, `Workspace.module.css`): focus ring on search fields, toggle and selected state exposed (`aria-pressed`/`aria-current`), Menu Escape and `aria-controls`, keyboard-focusable page scroller, labelled landmarks, hidden document heading. Tests added; no screen-reader or browser pass yet.
