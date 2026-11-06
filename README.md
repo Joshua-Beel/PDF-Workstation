@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Test: every PowerShell-spawning test in the installed-app launch contract file now has a 60 s bound, matching its child's own 60 s limit, so a busy machine no longer fails them at 15 s (SM6; tests only).
 - Signed OCR artifact workflow restores no Actions cache: setup-node's `cache: npm` becomes `package-manager-cache: false`, pinned by a test (SM7 recommendation; SM6; `ocr-signed-artifact.yml`). Not yet exercised in a hosted run.
 - Release workflow restores no Actions cache: the signing job's `cache: npm` is replaced with `package-manager-cache: false`, pinned by a test (SM7 recommendation; `release.yml`, `release-workflow.test.ts`). Not yet exercised in a release run.
 - Dev dependency: vite 6.4.4 to 6.4.5, clearing the dev-server advisory GHSA-8g5g-mxqh-grgj (SM0; `package.json`, `package-lock.json`, notices inventory hash). Build tooling only; `npm audit` 0.
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - OCR input preprocessing (SM4; `ocr_preprocess.rs`): background flattening and 1-5 degree deskew on a copy of the page before Tesseract; text layer mapped back onto the unrotated page. Review fixes: rotation onto a padded canvas keeps page corners, dark regions are no longer stretched, raw-image fallback. 10 real pages, unverified draft truth: CER 27.05% to 25.38% (source build).
 - Searchable OCR text layer on real scans (SM4; `searchable_ocr.rs`, `searchable_pdf.rs`, `searchable_pdf_stream.rs`): overhanging word boxes and edge spaces no longer refuse a page (10 of 10 real pages parse, was 3); both writers draw a space between words, so words PDFium joined drop from 155 to 36 of 3,526. The 32-page copy's reopen check now compares each page's characters as a multiset (SM7 ruling): 8 of the 10 real pages save as searchable copies, was 0. Paragraph and line boxes now only need to overlap their parents (automatic layout), and the large-job manifest is format 2 (source build).
 - Native integration test targets compile again after the spawn-lock change, and CI now compiles every test target (SM0; tests and CI only).
-- Installed comments/forms verifier: a fourth controlled fixture (multi-select list plus two editable combos) sets two list options, types a custom combo value and picks a listed one, saves, reopens in a fresh process and asserts the exact values; tests only, hosted run still to do (SM3).
