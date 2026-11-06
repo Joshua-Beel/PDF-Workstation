@@ -258,3 +258,42 @@ fn split_writes_added_bookmarks_into_the_part_that_holds_their_page() {
     assert_eq!(titles(&lopdf_rows(&second)), ["Two", "Three"]);
     assert!(added.view.changed);
 }
+
+const OVERLAY_REFUSAL: &str = "Save a copy with your bookmark and page-label edits first, or discard them.";
+fn rect() -> Vec<crate::raster_redaction::RasterRedactionRect> { vec![crate::raster_redaction::RasterRedactionRect { x: 0.1, y: 0.1, width: 0.2, height: 0.2 }] }
+
+#[test]
+fn every_overlay_guarded_operation_refuses_while_only_a_bookmark_edit_is_pending_and_undo_lifts_it() {
+    let service = service(); let folder = tempfile::tempdir().unwrap();
+    let (info, _, _) = outlined(folder.path(), "guarded.pdf", &service);
+    let start = view(&service, &info);
+    let changed = edit(&service, &info, start.view.version, BookmarkOp::Delete { uid: uid(&start, "C") }).unwrap();
+    assert!(changed.view.changed && changed.document.dirty);
+
+    let error = direct(&service, |reply| Request::CheckFormCopy(info.id, info.revision, Vec::new(), reply)).unwrap_err();
+    assert_eq!(error, OVERLAY_REFUSAL);
+    let error = direct(&service, |reply| Request::FillFormCopy(info.id, info.revision, Vec::new(), folder.path().join("form-copy.pdf"), reply)).err().unwrap();
+    assert_eq!(error, OVERLAY_REFUSAL);
+    let error = direct(&service, |reply| Request::PreflightRasterRedaction(info.id, info.revision, 0, rect(), reply)).err().unwrap();
+    assert_eq!(error, OVERLAY_REFUSAL);
+    let target = folder.path().join("redacted.pdf");
+    let error = direct(&service, |reply| Request::RasterRedact(info.id, info.revision, 0, rect(), target.clone(), reply)).err().unwrap();
+    assert_eq!(error, OVERLAY_REFUSAL);
+    assert!(!target.exists());
+    #[cfg(windows)]
+    {
+        let error = direct(&service, |reply| Request::PreflightSearchableOcr(info.id, info.revision, reply)).err().unwrap();
+        assert_eq!(error, OVERLAY_REFUSAL);
+        let error = direct(&service, |reply| Request::OcrJobSource(info.id, info.revision, reply)).err().unwrap();
+        assert_eq!(error, OVERLAY_REFUSAL);
+        let error = direct(&service, |reply| Request::InspectImageReplacement(info.id, info.revision, 0, reply)).err().unwrap();
+        assert_eq!(error, OVERLAY_REFUSAL);
+        let error = direct(&service, |reply| Request::InspectTextReplacement(info.id, info.revision, 0, reply)).err().unwrap();
+        assert_eq!(error, OVERLAY_REFUSAL);
+    }
+
+    let undone = edit(&service, &info, changed.view.version, BookmarkOp::Undo).unwrap();
+    assert!(!undone.view.changed && !undone.document.dirty);
+    let outcome = direct(&service, |reply| Request::PreflightRasterRedaction(info.id, info.revision, 0, rect(), reply));
+    assert!(outcome.is_ok(), "{outcome:?}");
+}
