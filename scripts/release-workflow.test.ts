@@ -29,6 +29,12 @@ function validateFixture(root: string) {
 }
 
 describe('release workflow contract', () => {
+  it('installs release dependencies without any restored Actions cache', () => {
+    expect(workflow).not.toMatch(/^\s*cache:/m);
+    expect(workflow).toContain("node-version: '22'\n          package-manager-cache: false\n");
+    expect(workflow).not.toMatch(/actions\/cache|rust-cache/);
+  });
+
   it('pins every action to an immutable full commit SHA', () => {
     const uses = [...workflow.matchAll(/^\s*-?\s*uses:\s*([^\s#]+)\s*(?:#.*)?$/gm)].map(match => match[1]);
     expect(uses).toEqual([

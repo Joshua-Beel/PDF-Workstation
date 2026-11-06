@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Release workflow restores no Actions cache: the signing job's `cache: npm` is replaced with `package-manager-cache: false`, pinned by a test (SM7 recommendation; `release.yml`, `release-workflow.test.ts`). Not yet exercised in a release run.
 - Dev dependency: vite 6.4.4 to 6.4.5, clearing the dev-server advisory GHSA-8g5g-mxqh-grgj (SM0; `package.json`, `package-lock.json`, notices inventory hash). Build tooling only; `npm audit` 0.
 - Test: with only a bookmark edit pending, form fill, redaction, image/text replacement and searchable/large OCR all refuse with the overlay message, and Undo lifts it (SM1; `outline_edit_tests.rs`; source build; mutation-checked).
 - Dev dependency: vitest and its @vitest packages 4.1.11 to 4.1.12 (SM0; `package.json`, `package-lock.json`, notices inventory hash). Test runner only; nothing in the app changes.
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - Native integration test targets compile again after the spawn-lock change, and CI now compiles every test target (SM0; tests and CI only).
 - Installed comments/forms verifier: a fourth controlled fixture (multi-select list plus two editable combos) sets two list options, types a custom combo value and picks a listed one, saves, reopens in a fresh process and asserts the exact values; tests only, hosted run still to do (SM3).
 - Accessibility audit and fixes (SM5; branch `sm5/a11y-audit`; `App.tsx`, `Viewer.tsx`, `PageList.tsx`, `Workspace.module.css`): focus ring on search fields, toggle and selected state exposed (`aria-pressed`/`aria-current`), Menu Escape and `aria-controls`, keyboard-focusable page scroller, labelled landmarks, hidden document heading. Tests added; no screen-reader or browser pass yet.
-- Render-cancel review follow-ups (SM5; branch `sm5/render-p3s-2`; `service.rs`): epoch bump and enqueue now happen under one lock, a late cancelled ticket can no longer join and supersede a queued render, reusing a spare fails fast if the worker is gone, stale-epoch spares dropped at the bump. Local, unreviewed.
