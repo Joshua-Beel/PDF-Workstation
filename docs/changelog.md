@@ -2,6 +2,12 @@
 
 The full change log, newest first, moved verbatim from the README's "Recent changes" section (only relative link paths were adjusted for this folder); the [README](../README.md#recent-changes) keeps one-line summaries of the newest entries.
 
+- Fix for master CI run 42415981960, which was red on `5c98dc7` (SM3; branch `sm3/annot-p2-5`; `scripts/setup-qpdf.test.ts`; tests only).
+  - `setup-qpdf.test.ts`'s "fresh extract" test failed on the hosted runner at `exe.startsWith(work)`. It passed locally.
+  - **Cause, reproduced locally and read-only:** the runner's TEMP is an 8.3 short path (`C:\Users\RUNNER~1\...`), so the test's `work` keeps `RUNNER~1`. The script normalises `-WorkRoot` with `[IO.Path]::GetFullPath`, which in PowerShell 7 (.NET) expands short names. For example, `GetFullPath('C:\PROGRA~1\Git')` returns `C:\Program Files\Git`. So the script printed `QPDF_EXE=` with the long form. Local runs use an E: TEMP with no 8.3 names, so they never saw it.
+  - The script's output was already canonical (long form) and is unchanged.
+  - **Fix:** the test compares both paths through `fs.realpathSync.native` (the long form), case-insensitively, with a separator check. The scratch folder itself stays the raw TEMP path, so CI still exercises a short `-WorkRoot`.
+  - Tests: `setup-qpdf.test.ts` 7/7; `tsc -b` clean. The path helper was checked against a real short path (`C:\PROGRA~1\Git`) and gives the right result in both directions.
 - P2-5 qpdf pins recorded, SM7 C-1, and the code-review P3s (SM3; branch `sm3/annot-p2-5`; `scripts/qpdf/pins.json`, `scripts/setup-qpdf.ps1`, `scripts/setup-qpdf.test.ts`, `src-tauri/src/qpdf_check.rs`). SM7 cleared `e6b1b8b..a8b5b24` and approved one recording fetch. E2 is still not in CI (C-2 is a later commit).
   - **Recording fetch, 2026-11-07.** `setup-qpdf.ps1 -RecordFileHashes` was run with its work root under the E: tmp folder and no zip cache. The zip matched the pinned size and SHA-256 before anything was extracted. `qpdf.exe` was not run. The 12 `.exe` and `.dll` hashes in `bin` are now the `files` pins. The zip, the extract and the checksum file were deleted and never committed.
   - **Signature.** The release's `qpdf-12.4.2.sha256` matched its pinned size (2,906) and SHA-256. It lists `db87077e…5de25d` for `qpdf-12.4.2-msvc64.zip`, and it is PGP clear-signed.

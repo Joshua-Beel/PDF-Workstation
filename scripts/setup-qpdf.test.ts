@@ -2,7 +2,7 @@
 // each case builds a small stand-in zip and its own pins file, and passes it with -ZipPath and -PinsPath.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -12,6 +12,13 @@ const folders: string[] = [];
 afterEach(() => { for (const folder of folders.splice(0)) rmSync(folder, { recursive: true, force: true }); });
 const scratch = () => { const folder = mkdtempSync(join(tmpdir(), 'sm3-setup-qpdf-')); folders.push(folder); return folder; };
 const sha256 = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex');
+// The hosted runner's TEMP is an 8.3 short path (C:\Users\RUNNER~1\...), and the script's GetFullPath expands it
+// to the long form, so paths are compared by their real long form, case-insensitively, as Windows does.
+const inside = (path: string, folder: string) => {
+  const child = realpathSync.native(path).toLowerCase();
+  const parent = realpathSync.native(folder).toLowerCase().replace(/\\+$/, '');
+  return child.startsWith(`${parent}\\`);
+};
 
 /** Builds a zip whose entries are the given names, each holding its own name as text. */
 function zip(folder: string, entries: string[]): string {
@@ -48,7 +55,7 @@ describe('setup-qpdf.ps1', { timeout: 240_000 }, () => {
     const line = result.out.split(/\r?\n/).find(text => text.startsWith('QPDF_EXE='));
     expect(line).toBeDefined();
     const exe = line!.slice('QPDF_EXE='.length);
-    expect(exe.startsWith(work)).toBe(true);
+    expect(inside(exe, work), `${exe} is not under ${work}`).toBe(true);
     expect(readFileSync(exe, 'utf8')).toBe('qpdf-test/bin/qpdf.exe');
     const again = run(['-PinsPath', pins(folder, archive, binHashes(folder, names.slice(0, 2))), '-ZipPath', archive, '-WorkRoot', work]);
     expect(again.status, again.err).toBe(0);

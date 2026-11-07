@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Test fix: the qpdf setup-script test compares paths by their real long form, so the hosted runner's short `RUNNER~1` temp path no longer fails master CI (SM3; `setup-qpdf.test.ts`; tests only).
 - Tests (not in CI yet): qpdf 12.4.2's binaries are now pinned by hash, and the release checksum file's PGP signature was verified. The test harness re-checks and locks every pinned binary before each run; qpdf has not been run yet (SM3; `pins.json`, `qpdf_check.rs`).
 - Tests (not yet used): pinned qpdf 12.4.2 setup script and a hardened, fixtures-only test harness, waiting on SM7 review; nothing downloaded, not in CI (SM3; `setup-qpdf.ps1`, `qpdf_check.rs`).
 - Tests: pdf.js (dev dependency `pdfjs-dist` 6.4.299, not shipped; its canvas package pinned to 1.0.10) independently reads the annotations the app writes and the other apps' annotations it keeps, from two committed synthetic fixtures (SM3; tests only).
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - Print-dialog verifier: a later top-level pass no longer overwrites the last completed native-enumeration receipt before its rooted pass finishes, fixing the childless-save-dialog test flake under load (SM6; `installed-print-dialog.ps1`; diagnostics only).
 - Test: every PowerShell-spawning test in the installed-app launch contract file now has a 60 s bound, matching its child's own 60 s limit, so a busy machine no longer fails them at 15 s (SM6; tests only).
 - Signed OCR artifact workflow restores no Actions cache: setup-node's `cache: npm` becomes `package-manager-cache: false`, pinned by a test (SM7 recommendation; SM6; `ocr-signed-artifact.yml`). Not yet exercised in a hosted run.
-- Release workflow restores no Actions cache: the signing job's `cache: npm` is replaced with `package-manager-cache: false`, pinned by a test (SM7 recommendation; `release.yml`, `release-workflow.test.ts`). Not yet exercised in a release run.
