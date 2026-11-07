@@ -134,6 +134,7 @@ enum Request {
     DiscardRecovery(u64, u64, Reply<()>),
     BeginOpen(PathBuf, Reply<ReplyLease<OpenResult>>),
     Unlock(u64, String, Reply<ReplyLease<OpenResult>>),
+    OwnerUnlock(u64, u64, String, Reply<()>),
     CancelPassword(u64, Reply<()>),
     BeginPrint(u64, u64, Reply<PrintSnapshotInfo>),
     PrintRender(u64, usize, u32, u32, Reply<PrintBitmap>),
@@ -732,6 +733,28 @@ impl PdfService {
                             if let Ok(value) = &result { if let OpenResult::Opened { document, .. } = &**value { documents.remove(&document.id); sessions.remove(&document.id); } }
                         }
                     }
+                    Request::OwnerUnlock(id, revision, password, reply) => {
+                        if reply.is_closed() { continue; }
+                        let result = (|| {
+                            let engine = pdfium.as_ref().map_err(Clone::clone)?;
+                            let (session, info) = sessions.get(&id).ok_or("Document is closed")?;
+                            if session.revision != revision { return Err("Document changed. Open the unlock prompt again.".to_owned()); }
+                            if session.revision != 0 || session.unsaved() { return Err("Save a copy or discard your changes before unlocking this PDF.".to_owned()); }
+                            if documents.get(&id).ok_or("Document is closed")?.is_unprotected() { return Err(crate::owner_unlock::NOT_PROTECTED.to_owned()); }
+                            let stripped = crate::editor::SourceBytes::from(crate::owner_unlock::remove_security(&session.source, &password).map_err(|error| if error == crate::owner_unlock::NOT_PROTECTED { crate::owner_unlock::UNREADABLE.to_owned() } else { error })?);
+                            let parsed = crate::pdf_load::load_for_open(&stripped)?;
+                            let unlocked = engine.load_shared(&stripped, None).map_err(|error| format!("The unlocked copy could not be opened: {error}"))?;
+                            let pages = unlocked.page_sizes()?;
+                            if !unlocked.is_unprotected() || pages.len() != info.pages.len() || pages.iter().zip(&info.pages).any(|(a, b)| a.width != b.width || a.height != b.height) { return Err("The unlocked copy did not match the open document, so nothing was changed.".to_owned()); }
+                            let mut next = EditSession::opened(stripped, parsed, pages.len(), None);
+                            next.mark_owner_unlocked(session.original_size());
+                            sessions.insert(id, (next, info.clone()));
+                            documents.insert(id, std::rc::Rc::new(unlocked));
+                            note_documents.remove(&id); cache.close(id); page_labels.close(id);
+                            Ok(())
+                        })();
+                        let _ = reply.send(result);
+                    }
                     Request::Open(path, reply) => {
                         if reply.is_closed() { continue; }
                         let result = (|| {
@@ -752,6 +775,7 @@ impl PdfService {
                         if reply.is_closed() { continue; }
                         let mut result = (|| {
                             let (session, original) = sessions.get(&id).ok_or("Document is closed")?;
+                            if session.owner_unlocked() { return Err("Recovery points are not available after unlocking with the owner password. Save a copy to keep your edits.".into()); }
                             if recovery_locked.contains_key(&id) { return Err(format!("{RECOVERY_COMMITTED_REOPEN_REQUIRED}: Close and reopen this PDF before updating recovery.")); }
                             if session.revision != revision { return Err("Document changed. Save recovery again.".into()); }
                             if !session.dirty() { return Err(if session.outline.changed() { "Bookmark edits are not included in recovery points. Save a copy to keep them." } else if session.labels.changed() { "Page-label edits are not included in recovery points. Save a copy to keep them." } else { "Only unsaved edits can be stored for recovery." }.into()); }
@@ -913,7 +937,7 @@ impl PdfService {
                             if session.revision != revision { return Err("Document changed. Reopen document properties.".into()); }
                             let document = documents.get(&id).ok_or("Document is closed")?;
                             let dimensions = current_info(session, original, document)?.pages.iter().map(|page| (page.width, page.height)).collect::<Vec<_>>();
-                            document.properties(session.source.len(), &dimensions)
+                            document.properties(session.original_size(), &dimensions)
                         })();
                         let _ = reply.send(result);
                     }
@@ -1568,6 +1592,12 @@ impl PdfService {
     pub async fn unlock(&self, id: u64, password: String) -> Result<OpenResult, String> {
         if password.len() > MAX_PASSWORD_BYTES { return Err("Passwords cannot be longer than 1 KiB.".into()); }
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::Unlock(id, password, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?.map(ReplyLease::accept)
+    }
+    /// Acrobat's "No Security": a correct owner password lifts the open document's restrictions and encryption for
+    /// this session, and Save a Copy then writes it unencrypted. A wrong password changes nothing.
+    pub async fn owner_unlock(&self, id: u64, revision: u64, password: String) -> Result<(), String> {
+        if password.len() > MAX_PASSWORD_BYTES { return Err("Passwords cannot be longer than 1 KiB.".into()); }
+        let (tx, rx) = oneshot::channel(); self.sender.send(Request::OwnerUnlock(id, revision, password, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?
     }
     pub async fn cancel_password(&self, id: u64) -> Result<(), String> {
         let (tx, rx) = oneshot::channel(); self.sender.send(Request::CancelPassword(id, tx)).map_err(|e| e.to_string())?; rx.await.map_err(|e| e.to_string())?

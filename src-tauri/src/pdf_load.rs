@@ -190,18 +190,21 @@ fn budget_filter(id: ObjectId, object: &mut Object) -> Option<(ObjectId, Object)
 }
 
 /// Loads a document source within the open-time work limits.
-pub fn load(bytes: &[u8]) -> Result<Document, LoadFailure> { load_limited(bytes, true) }
+pub fn load(bytes: &[u8]) -> Result<Document, LoadFailure> { load_limited(bytes, true, None) }
+
+/// The same limits, decrypting with a password lopdf has already been given reason to accept (owner-password unlock).
+pub(crate) fn load_with_password(bytes: &[u8], password: &str) -> Result<Document, LoadFailure> { load_limited(bytes, true, Some(password)) }
 
 /// lopdf's own resolution within the same limits, for the read-only checks of a source `xref_resolve` refused.
-pub(crate) fn load_unreconciled(bytes: &[u8]) -> Result<Document, LoadFailure> { load_limited(bytes, false) }
+pub(crate) fn load_unreconciled(bytes: &[u8]) -> Result<Document, LoadFailure> { load_limited(bytes, false, None) }
 
-fn load_limited(bytes: &[u8], reconcile: bool) -> Result<Document, LoadFailure> {
+fn load_limited(bytes: &[u8], reconcile: bool, password: Option<&str>) -> Result<Document, LoadFailure> {
     if count_object_headers(bytes, MAX_LOAD_OBJECTS) > MAX_LOAD_OBJECTS { return Err(LoadFailure::Limit(objects_message())); }
     let _gate = GATE.lock().unwrap_or_else(PoisonError::into_inner);
     OBJECTS.store(0, Ordering::Relaxed);
     DECODED.store(0, Ordering::Relaxed);
     TRIP.store(TRIP_NONE, Ordering::Release);
-    let options = LoadOptions { filter: Some(budget_filter), max_decompressed_size: Some(MAX_LOAD_STREAM_DECODE_BYTES), ..Default::default() };
+    let options = LoadOptions { filter: Some(budget_filter), max_decompressed_size: Some(MAX_LOAD_STREAM_DECODE_BYTES), password: password.map(str::to_owned), ..Default::default() };
     let loaded = Document::load_mem_with_options(bytes, options);
     let reason = TRIP.swap(TRIP_NONE, Ordering::AcqRel);
     if reason != TRIP_NONE { return Err(LoadFailure::Limit(trip_message(reason))); }
