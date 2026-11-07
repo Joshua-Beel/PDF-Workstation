@@ -2,6 +2,17 @@
 
 The full change log, newest first, moved verbatim from the README's "Recent changes" section (only relative link paths were adjusted for this folder); the [README](../README.md#recent-changes) keeps one-line summaries of the newest entries.
 
+- Slice 1c review fixes (SM3; branch `sm3/annot-p1c`; `comments.rs`). Both reviews of `ba4fb9d` returned CHANGES: SM7 `_log/sm7-review-annot-p1c-ba4fb9d.md` (F1, F2, L-1) and the code review (F2 reproduced, plus a P3).
+  - **F1:** `read_owned` walks each indirect `/Annots` array once, and borrows the array instead of cloning it. An array used by more than one page makes all its entries foreign.
+    - A new document-wide cap of 262,144 entries (`annotations::MAX_ENTRIES_TOTAL`) fails closed. Commenting is refused with a reason, but the file still opens, displays and lists through the bounded survey.
+  - **F2:** inline entries of every `/Annots` array, direct or indirect, are now scanned for references. An inline reply (`/IRT`) or popup (`/Parent`) pointing at an app note keeps that note foreign, so a write can no longer leave the inline entry pointing at a deleted object.
+  - **L-1:** an indirect `/Annots` array that any other object refers to keeps its entries foreign.
+  - **Code review P3:** `app_number` resolves an indirect `/NM`, so new IDs cannot collide with one.
+  - **Tests:**
+    - `a_shared_annots_array_is_read_once_and_open_and_write_stay_fast`: 100,000 pages share one 65,536-entry array. Release, two runs: `read_owned` 0.70-0.95 s, session open 2.2-2.4 s (parse excluded; includes the survey and the 100,000-page plan), write 1.1-1.2 s. Debug: 5.3-5.8 s, 10.4 s and 6.1-7.3 s. Budgets are 1 s release and 20 s debug, times 2 for read and write and times 4 for open. Each grows linearly with the page count; the old per-page rescan would take minutes.
+    - `more_entries_than_the_document_cap_refuse_commenting_but_still_open_and_list`.
+    - `an_inline_reply_or_another_referrer_of_the_annots_array_keeps_an_app_note_view_only`: inline `/IRT` and `/Parent`, each in a direct and an indirect array; an array referenced from `/Info`; an indirect `/NM` counted in the highest app ID.
+  - Focused filters `annotations::`, `comments::` and `editor::`: 50 passed, 2 ignored (debug). Release timing filter: 3 passed. The full suite was not re-run, since the change is confined to `comments.rs` and its tests.
 - Annotation interchange phase 1, slice 1c: the writer keeps other apps' annotations, and commenting on such files is allowed (SM3; branch `sm3/annot-p1c` off `44a8d0c`; `comments.rs`, `editor.rs`, `annotations.rs`, `service.rs`, `CommentsPanel.tsx` and its test, `docs/tools/comments.md`).
   - **Reader:** the whole-file refusal for foreign annotations is gone. `comments::read_owned` checks each `/Annots` entry against the app's strict format (`app_note`, unchanged rules). It accepts a direct or an indirect `/Annots` array, and an empty one.
     - An entry is the app's editable annotation only if it passes `app_note`, is referenced once from one page, has a unique `/NM` and an appearance stream of its own, and no other object or the trailer refers to it or its appearance.

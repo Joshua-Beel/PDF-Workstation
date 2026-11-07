@@ -180,12 +180,12 @@ fn effective_version(document: &Document) -> Result<(u8, u8), String> {
 
 /// The page's `/Annots` array, direct or one reference deep, with the id of the array object when indirect.
 /// `None` when the page has no `/Annots`; an error when it is something other than an array.
-fn page_annots(document: &Document, page_id: ObjectId) -> Result<Option<(Option<ObjectId>, Vec<Object>)>, String> {
+fn page_annots(document: &Document, page_id: ObjectId) -> Result<Option<(Option<ObjectId>, &[Object])>, String> {
     let page = document.get_dictionary(page_id).map_err(|error| error.to_string())?;
     match page.get(b"Annots") {
         Err(_) => Ok(None),
-        Ok(Object::Reference(id)) => document.get_object(*id).ok().and_then(|value| value.as_array().ok()).map(|values| Some((Some(*id), values.clone()))).ok_or_else(|| "The PDF has a malformed annotation array. Commenting is unavailable.".into()),
-        Ok(Object::Array(values)) => Ok(Some((None, values.clone()))),
+        Ok(Object::Reference(id)) => document.get_object(*id).ok().and_then(|value| value.as_array().ok()).map(|values| Some((Some(*id), values.as_slice()))).ok_or_else(|| "The PDF has a malformed annotation array. Commenting is unavailable.".into()),
+        Ok(Object::Array(values)) => Ok(Some((None, values.as_slice()))),
         Ok(_) => Err("The PDF has a malformed annotation array. Commenting is unavailable.".into()),
     }
 }
@@ -244,7 +244,7 @@ fn app_note(document: &Document, page_id: ObjectId, annotation: &Dictionary) -> 
 /// The app number in an annotation's `/NM`, when it carries the app's prefix (valid or not otherwise).
 fn app_number(document: &Document, entry: &Object) -> Option<u64> {
     let dict = match entry { Object::Reference(id) => document.get_dictionary(*id).ok()?, Object::Dictionary(dict) => dict, _ => return None };
-    let bytes = dict.get(b"NM").ok()?.as_str().ok()?;
+    let bytes = match dict.get(b"NM").ok()? { Object::Reference(id) => document.get_object(*id).ok()?, value => value }.as_str().ok()?;
     if bytes.len() > HIGHLIGHT_PREFIX.len() + 20 { return None; }
     number(std::str::from_utf8(bytes).ok()?).ok()
 }
@@ -262,45 +262,60 @@ pub fn read_owned(document: &Document) -> Result<Owned, String> {
     if catalog.has(b"Perms") || document.objects.values().any(|object| object.as_dict().is_ok_and(|dict| dict.has(b"ByteRange") || dict.get(b"Type").is_ok_and(|value| value.as_name().ok() == Some(b"Sig")))) { return Err("Signed or certified PDFs cannot be commented on in this build.".into()); }
     if [b"AcroForm".as_slice(), b"StructTreeRoot", b"PageLabels", b"Threads"].iter().any(|key| catalog.has(key)) { return Err("Commenting on forms, tagged PDFs, page labels, or article threads is not supported in this build.".into()); }
     let pages = document.get_pages().into_values().collect::<Vec<_>>();
-    let mut candidates: Vec<(usize, ObjectId, Note, ObjectId)> = Vec::new();
+    // (page index, annotation id, note, appearance id, indirect /Annots array it came from)
+    let mut candidates: Vec<(usize, ObjectId, Note, ObjectId, Option<ObjectId>)> = Vec::new();
     let (mut entries_total, mut max_number) = (0usize, 0u64);
     let mut reference_counts: std::collections::HashMap<ObjectId, usize> = std::collections::HashMap::new();
-    let mut annots_arrays = HashSet::new();
+    // How many pages use each indirect /Annots array. A shared array is walked once; its entries are on
+    // several pages, so none of them is editable.
+    let mut array_pages: std::collections::HashMap<ObjectId, usize> = std::collections::HashMap::new();
+    let mut inline_entries: Vec<&Object> = Vec::new();
     for (index, page_id) in pages.iter().enumerate() {
         let Some((array_id, entries)) = page_annots(document, *page_id)? else { continue };
-        annots_arrays.extend(array_id);
-        for entry in &entries {
-            entries_total += 1;
+        if let Some(array_id) = array_id {
+            let uses = array_pages.entry(array_id).or_insert(0); *uses += 1;
+            if *uses > 1 { continue; }
+        }
+        entries_total += entries.len();
+        if entries_total > crate::annotations::MAX_ENTRIES_TOTAL { return Err("The PDF has more annotation entries than this build edits (262,144). Annotations are shown but commenting is unavailable.".into()); }
+        for entry in entries {
             if let Some(value) = app_number(document, entry) { max_number = max_number.max(value); }
-            let Object::Reference(id) = entry else { continue };
+            let Object::Reference(id) = entry else { inline_entries.push(entry); continue };
             *reference_counts.entry(*id).or_insert(0) += 1;
             if reference_counts[id] > 1 { continue; }
             if let Ok((note, appearance)) = document.get_dictionary(*id).map_err(|error| error.to_string()).and_then(|dict| app_note(document, *page_id, dict)) {
-                candidates.push((index, *id, note, appearance));
+                candidates.push((index, *id, note, appearance, array_id));
             }
         }
     }
-    // Keep a candidate only if nothing else could depend on it: one `/Annots` reference, a unique `/NM`, an
-    // appearance of its own, and no reference to either from any other object or the trailer.
+    // Keep a candidate only if nothing else could depend on it: one `/Annots` reference, from an array no
+    // other page or object uses, a unique `/NM`, an appearance of its own, and no reference to either from
+    // any other object, inline annotation or the trailer.
     let mut names = std::collections::HashMap::new();
     let mut appearances = std::collections::HashMap::new();
-    for (_, _, note, appearance) in &candidates { *names.entry(note.id.clone()).or_insert(0usize) += 1; *appearances.entry(*appearance).or_insert(0usize) += 1; }
-    candidates.retain(|(_, id, note, appearance)| reference_counts[id] == 1 && names[&note.id] == 1 && appearances[appearance] == 1 && !reference_counts.contains_key(appearance));
-    let owned_ids: HashSet<ObjectId> = candidates.iter().flat_map(|(_, id, _, appearance)| [*id, *appearance]).collect();
+    for (_, _, note, appearance, _) in &candidates { *names.entry(note.id.clone()).or_insert(0usize) += 1; *appearances.entry(*appearance).or_insert(0usize) += 1; }
+    candidates.retain(|(_, id, note, appearance, array)| reference_counts[id] == 1 && names[&note.id] == 1 && appearances[appearance] == 1 && !reference_counts.contains_key(appearance) && array.is_none_or(|array| array_pages[&array] == 1));
+    let mut targets: HashSet<ObjectId> = candidates.iter().flat_map(|(_, id, _, appearance, _)| [*id, *appearance]).collect();
+    targets.extend(candidates.iter().filter_map(|(_, _, _, _, array)| *array));
     let page_set: HashSet<ObjectId> = pages.iter().copied().collect();
     let mut referenced = HashSet::new();
     for (id, object) in &document.objects {
-        if owned_ids.contains(id) || annots_arrays.contains(id) { continue; }
+        if targets.contains(id) { continue; }
         if page_set.contains(id) {
-            if let Ok(page) = object.as_dict() { for (key, value) in page.iter() { if key != b"Annots" { collect_references(value, &owned_ids, &mut referenced); } } }
-        } else { collect_references(object, &owned_ids, &mut referenced); }
+            if let Ok(page) = object.as_dict() { for (key, value) in page.iter() { if key != b"Annots" { collect_references(value, &targets, &mut referenced); } } }
+        } else if array_pages.contains_key(id) {
+            // Another page's /Annots array: its reference entries are counted above, but an inline
+            // dictionary in it can still point at a candidate.
+            if let Ok(values) = object.as_array() { for value in values.iter().filter(|value| !matches!(value, Object::Reference(_))) { collect_references(value, &targets, &mut referenced); } }
+        } else { collect_references(object, &targets, &mut referenced); }
     }
-    collect_references(&Object::Dictionary(document.trailer.clone()), &owned_ids, &mut referenced);
-    candidates.retain(|(_, id, _, appearance)| !referenced.contains(id) && !referenced.contains(appearance));
+    for entry in inline_entries { collect_references(entry, &targets, &mut referenced); }
+    collect_references(&Object::Dictionary(document.trailer.clone()), &targets, &mut referenced);
+    candidates.retain(|(_, id, _, appearance, array)| !referenced.contains(id) && !referenced.contains(appearance) && array.is_none_or(|array| !referenced.contains(&array)));
     let (mut count, mut text_bytes, mut geometry_slots) = (0usize, 0usize, 0usize);
     let mut notes = vec![Vec::new(); pages.len()];
     let mut app = std::collections::HashMap::new();
-    for (index, id, note, appearance) in candidates {
+    for (index, id, note, appearance, _) in candidates {
         count += 1; text_bytes += note.contents.len(); geometry_slots += note.quads.as_ref().map_or(1, Vec::len);
         if geometry_slots > MAX_GEOMETRY_SLOTS { return Err("The PDF exceeds the 4,096 annotation geometry-slot limit. Annotations are unavailable.".into()); }
         if count > MAX_NOTES || text_bytes > MAX_TOTAL_BYTES { return Err("The PDF exceeds the 1,000-note or 1 MiB total note-text limit.".into()); }
@@ -354,7 +369,7 @@ pub fn write(document: &mut Document, plan: &[PageSpec]) -> Result<(), String> {
     for (index, page_id) in page_ids.iter().copied().enumerate() {
         let Some(notes) = planned.get(&index).copied() else { continue };
         if notes == owned.notes[index].as_slice() { continue; }
-        let entries = page_annots(document, page_id)?.map(|(_, entries)| entries).unwrap_or_default();
+        let entries = page_annots(document, page_id)?.map(|(_, entries)| entries.to_vec()).unwrap_or_default();
         let mut emitted = HashSet::new();
         let mut output = Vec::with_capacity(entries.len() + notes.len());
         for entry in entries {
@@ -461,12 +476,101 @@ mod tests {
         let mut plan: Vec<PageSpec> = owned.notes.iter().enumerate().map(|(source, notes)| PageSpec { source, turns: 0, crop: None, notes: notes.clone() }).collect();
         plan[page].notes.push(Note { id: self::id(owned.max_number + 1), rect: CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 }, contents: "added".into(), kind: AnnotationKind::Note, quads: None });
         let before = document.get_object(id).unwrap().clone();
-        let entries = |document: &Document| page_annots(document, document.get_pages().into_values().nth(page).unwrap()).unwrap().unwrap().1;
+        let entries = |document: &Document| page_annots(document, document.get_pages().into_values().nth(page).unwrap()).unwrap().unwrap().1.to_vec();
         let position = entries(document).iter().position(|entry| entry == &Object::Reference(id)).unwrap();
         let mut written = document.clone();
         write(&mut written, &plan).unwrap();
         // Compared through Debug so a NaN value (not equal to itself) still counts as unchanged.
         written.get_object(id).ok().map(|object| format!("{object:?}")) == Some(format!("{before:?}")) && entries(&written).iter().position(|entry| entry == &Object::Reference(id)) == Some(position)
+    }
+    /// 1 s in a release build (`cargo test --release`); 20 s in the unoptimised test build, which runs this
+    /// 165,000-object fixture about 10 times slower. Either way it catches the per-page rescan SM7 measured.
+    const BUDGET: std::time::Duration = std::time::Duration::from_secs(if cfg!(debug_assertions) { 20 } else { 1 });
+
+    /// `pages` pages, each with `/Annots` taken from `annots(page_index)`.
+    fn many_pages(pages: usize, mut annots: impl FnMut(&mut Document, usize) -> Object, extra: impl FnOnce(&mut Document)) -> Document {
+        let mut document = Document::with_version("1.7");
+        let tree = document.new_object_id();
+        let kids: Vec<Object> = (0..pages).map(|index| { let annots = annots(&mut document, index); document.add_object(dictionary! { "Type" => "Page", "Parent" => tree, "MediaBox" => vec![0.into(), 0.into(), 200.into(), 200.into()], "Annots" => annots }).into() }).collect();
+        document.objects.insert(tree, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => pages as i64 }));
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => tree });
+        document.trailer.set("Root", catalog);
+        extra(&mut document);
+        document
+    }
+
+    #[test]
+    fn a_shared_annots_array_is_read_once_and_open_and_write_stay_fast() {
+        let mut shared = None;
+        let document = many_pages(100_000, |document, _| {
+            let id = *shared.get_or_insert_with(|| { let entries: Vec<Object> = (0..65_536).map(|_| document.add_object(dictionary! { "Type" => "Annot", "Subtype" => "Link", "Rect" => vec![0.into(), 0.into(), 1.into(), 1.into()] }).into()).collect(); document.add_object(Object::Array(entries)) });
+            Object::Reference(id)
+        }, |_| {});
+        let started = std::time::Instant::now();
+        let owned = read_owned(&document).unwrap();
+        let read_time = started.elapsed();
+        assert!(owned.app.is_empty() && owned.foreign == 65_536, "the shared array is walked once");
+        let started = std::time::Instant::now();
+        let session = EditSession::opened(Vec::<u8>::new(), Ok(document.clone()), 100_000, None);
+        let open_time = started.elapsed();
+        assert!(session.comments_reason().is_none());
+        let mut plan: Vec<PageSpec> = (0..100_000).map(|source| PageSpec { source, turns: 0, crop: None, notes: Vec::new() }).collect();
+        plan[0].notes.push(Note { id: id(1), rect: CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 }, contents: "added".into(), kind: AnnotationKind::Note, quads: None });
+        let mut written = document;
+        let started = std::time::Instant::now();
+        write(&mut written, &plan).unwrap();
+        let write_time = started.elapsed();
+        println!("100,000 pages sharing a 65,536-entry /Annots: read_owned {read_time:?}, session open (parse excluded) {open_time:?}, write {write_time:?}");
+        // Every step is linear in the 100,000 pages now (release, two runs: read 0.70-0.95 s, open 2.2-2.4 s
+        // including the survey and the 100,000-page plan, write 1.1-1.2 s); the per-page rescan SM7 measured
+        // would take minutes. Budgets: read and write 2x, open 4x the base budget.
+        for (elapsed, factor) in [(read_time, 2), (write_time, 2), (open_time, 4)] { assert!(elapsed < BUDGET * factor, "took {elapsed:?}"); }
+        assert!(matches!(written.get_dictionary(written.get_pages()[&2]).unwrap().get(b"Annots").unwrap(), Object::Reference(_)), "other pages keep the shared array");
+        assert_eq!(page_annots(&written, written.get_pages()[&1]).unwrap().unwrap().1.len(), 65_537);
+    }
+
+    #[test]
+    fn more_entries_than_the_document_cap_refuse_commenting_but_still_open_and_list() {
+        let document = many_pages(5, |document, _| { let link = document.add_object(dictionary! { "Type" => "Annot", "Subtype" => "Square", "Rect" => vec![0.into(), 0.into(), 1.into(), 1.into()] }); Object::Array(vec![Object::Reference(link); 65_536]) }, |_| {});
+        assert!(read_owned(&document).err().unwrap().contains("262,144"));
+        let session = EditSession::opened(Vec::<u8>::new(), Ok(document), 5, None);
+        assert!(session.comments_reason().unwrap().contains("262,144"));
+        assert!(session.view_only_annotations().unwrap().pages.iter().map(Vec::len).sum::<usize>() > 0, "the bounded survey still lists them");
+    }
+
+    #[test]
+    fn an_inline_reply_or_another_referrer_of_the_annots_array_keeps_an_app_note_view_only() {
+        let (_, bytes) = annotated();
+        let base = Document::load_mem(&bytes).unwrap();
+        let page = base.get_pages()[&1];
+        let note = base.get_dictionary(page).unwrap().get(b"Annots").unwrap().as_array().unwrap()[0].as_reference().unwrap();
+        assert!(read_owned(&base).unwrap().app.contains_key(&note));
+        // An inline reply (/IRT) or inline popup (/Parent) in /Annots pointing at the note, in a direct and in an
+        // indirect array: the note stays foreign, so the inline entry never points at a deleted object.
+        for (key, subtype) in [("IRT", "Text"), ("Parent", "Popup")] {
+            let mut inline = base.clone();
+            inline.get_dictionary_mut(page).unwrap().get_mut(b"Annots").unwrap().as_array_mut().unwrap().push(Object::Dictionary(dictionary! { "Type" => "Annot", "Subtype" => subtype, key => note }));
+            assert!(preserved(&inline, note), "direct array, inline /{key}");
+            let entries = inline.get_dictionary(page).unwrap().get(b"Annots").unwrap().clone();
+            let array = inline.add_object(entries);
+            inline.get_dictionary_mut(page).unwrap().set("Annots", array);
+            assert!(preserved(&inline, note), "indirect array, inline /{key}");
+        }
+        // An indirect /NM on another annotation still counts toward the highest app ID.
+        let mut indirect_name = base.clone();
+        let name = indirect_name.add_object(Object::string_literal(id(4_242)));
+        let other = indirect_name.add_object(dictionary! { "Type" => "Annot", "Subtype" => "Square", "NM" => name });
+        indirect_name.get_dictionary_mut(page).unwrap().get_mut(b"Annots").unwrap().as_array_mut().unwrap().push(other.into());
+        assert_eq!(read_owned(&indirect_name).unwrap().max_number, 4_242);
+        // An indirect /Annots array that another object also refers to.
+        let mut shared = base.clone();
+        let entries = shared.get_dictionary(page).unwrap().get(b"Annots").unwrap().clone();
+        let array = shared.add_object(entries);
+        shared.get_dictionary_mut(page).unwrap().set("Annots", array);
+        assert!(read_owned(&shared).unwrap().app.contains_key(&note), "an indirect array used by one page only is fine");
+        let info = shared.add_object(dictionary! { "Annotations" => array });
+        shared.trailer.set("Info", info);
+        assert!(preserved(&shared, note), "an /Annots array another object refers to keeps its entries foreign");
     }
     fn annotated() -> (EditSession, Vec<u8>) {
         let source = sample(); let mut session = EditSession::new(source.clone(), 6);
