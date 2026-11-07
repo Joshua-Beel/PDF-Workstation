@@ -150,8 +150,6 @@ fn pdfium_with_a_form_handle_runs_no_action_and_starts_no_process() {
     }
     let job = OwnJob::enter();
     assert_eq!(job.total_processes(), 1, "the job holds only this test process");
-    struct RemoveOnDrop(PathBuf);
-    impl Drop for RemoveOnDrop { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
     let folder = RemoveOnDrop(std::env::temp_dir().join(format!("sm3-annot-lockdown-{}", std::process::id())));
     std::fs::create_dir_all(&folder.0).unwrap();
     let marker = folder.0.join("launched.txt");
@@ -283,9 +281,14 @@ fn is_reparse_point(metadata: &std::fs::Metadata) -> bool { use std::os::windows
 #[cfg(not(windows))]
 fn is_reparse_point(metadata: &std::fs::Metadata) -> bool { metadata.file_type().is_symlink() }
 
+/// Removes a scratch folder when the test ends, passing or failing.
+struct RemoveOnDrop(PathBuf);
+impl Drop for RemoveOnDrop { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+
 #[test]
 fn census_walk_skips_reparse_points() {
-    let folder = std::env::temp_dir().join(format!("sm3-census-walk-{}", std::process::id()));
+    let guard = RemoveOnDrop(std::env::temp_dir().join(format!("sm3-census-walk-{}", std::process::id())));
+    let folder = guard.0.clone();
     std::fs::create_dir_all(folder.join("real")).unwrap();
     let plain = std::fs::metadata(folder.join("real")).unwrap();
     assert!(!is_reparse_point(&plain), "an ordinary folder is walked");
@@ -297,7 +300,16 @@ fn census_walk_skips_reparse_points() {
         let entry = std::fs::read_dir(&folder).unwrap().flatten().find(|entry| entry.file_name() == "junction").unwrap();
         assert!(is_reparse_point(&entry.metadata().unwrap()), "a junction is skipped");
     }
-    std::fs::remove_dir_all(&folder).unwrap();
+    drop(guard);
+    assert!(!folder.exists());
+}
+
+/// Reads at most `limit + 1` bytes, so a file that grew after its size was checked is still bounded.
+fn read_bounded(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?.take(limit + 1).read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Read-only census of annotations in a folder of real PDFs (design E7, E12). Prints counts and fixed
@@ -324,7 +336,8 @@ fn annotation_census_real_files() {
             if !path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("pdf")) { continue; }
             files += 1;
             if metadata.len() > 512 * 1024 * 1024 { add("skipped: over 512 MiB".into(), 1); continue; }
-            let Ok(bytes) = std::fs::read(&path) else { unreadable += 1; continue };
+            let Ok(bytes) = read_bounded(&path, 512 * 1024 * 1024) else { unreadable += 1; continue };
+            if bytes.len() > 512 * 1024 * 1024 { add("skipped: over 512 MiB".into(), 1); continue; }
             let Ok(document) = crate::pdf_load::load(&bytes) else { add("files: refused by pdf_load".into(), 1); continue };
             loaded += 1;
             let family = producer_family(&document);

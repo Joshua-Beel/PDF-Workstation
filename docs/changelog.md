@@ -2,6 +2,20 @@
 
 The full change log, newest first, moved verbatim from the README's "Recent changes" section (only relative link paths were adjusted for this folder); the [README](../README.md#recent-changes) keeps one-line summaries of the newest entries.
 
+- Slice 1b review fixes (SM3; branch `sm3/annot-p1b`; `annotations.rs`, `annotation_lockdown_tests.rs`). The SM7 review `_log/sm7-review-annot-p1b-26f60b5.md` (F1 high, F2 medium, L-1 to L-4) and the code review's P1 both returned CHANGES on `26f60b5`. The reviewers measured 214 s to open, in a release build, a file with 4,096 annotations sharing one 1 MB string of control characters.
+  - **F1 / P1:** `annotations::text` now examines at most 4 raw bytes per allowed character after the BOM, whatever it keeps. The UTF-8 path no longer collects the whole string into a `Vec<char>`; a split final character becomes U+FFFD. An indirect string shared by many annotations is decoded once per field limit (`Decoded` cache), so total decoding work stays within the file's size.
+  - **F2:** a new document-wide cap of 262,144 `/Annots` entries examined (`MAX_ENTRIES_TOTAL`), on top of 65,536 per page. An indirect `/Annots` array, or an annotation object, that several pages share is surveyed once.
+  - **L-1:** labels (`/T`, `/Subj`) drop zero-width and invisible characters (U+200B-U+200F, U+2060-U+2064) and line and paragraph separators. In bodies, U+2028 and U+2029 become newlines.
+  - **L-2:** labels now count against the same 4 MiB text budget as bodies (`MAX_TOTAL_TEXT_BYTES`).
+  - **L-3:** the census reads through `File::take(512 MiB + 1)`, so a file that grows after its size check is still bounded.
+  - **L-4:** the junction test removes its folder with a drop guard, even on failure.
+  - **Timing tests.** Budgets: 1 s in a release build, 5 s in the test build. Measured release / debug:
+    - `reviewer_probe_4096_annotations_sharing_one_1_mb_control_string_opens_quickly` (the reviewers' exact shape): the whole session open, including parse, 452 / 767 ms; the survey alone 7 / 166 ms;
+    - 16,384 annotations on 4 pages sharing a 1 MiB control string: 162 / 637 ms;
+    - a 64 MiB UTF-8 `/T`, `/Subj`, `/Contents` and `/M`: 36 / 135 ms;
+    - 100,000 pages sharing one 65,536-entry `/Annots`: 212 ms release;
+    - eight distinct 65,536-entry arrays: the entries past the 262,144 cap are only counted.
+  - The `annotations::` and `comments::` filters pass 23 with 2 ignored in debug; the release filter passes 11.
 - Annotation interchange phase 1, slice 1b: highlight quad order and a read-only list of annotations the app does not edit (SM3; branch `sm3/annot-p1b` off master `90f2880`; `comments.rs`, new `annotations.rs`, `editor.rs`, `service.rs`, one module line in `main.rs`, `bridge.ts`, `CommentsPanel.tsx` and its CSS and tests, `docs/tools/comments.md`; review P3s of 1a in `annotation_lockdown_tests.rs`).
   - **Shipped bug fixed: highlight QuadPoints.** Through 0.3.1 the app wrote each quad BL, BR, TR, TL. The bundled PDFium draws nothing for that order once `/AP` is gone (slice 1a probe: 0.000 coverage), so any reader that rebuilds the appearance showed our highlights blank.
     - `comments::quad` now writes TL, TR, BL, BR for text and area highlights. That is the order of all 204 markup quads in the real-file census (0 in any other order).

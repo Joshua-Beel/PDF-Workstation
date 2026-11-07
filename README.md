@@ -118,7 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
-- Highlights are saved with their corners in the order Acrobat and PDFium use, so readers that rebuild a highlight's appearance no longer draw it blank; older files still open. Comments lists other apps' annotations as view only (SM3, source build).
+- Highlights are saved with their corners in the order Acrobat and PDFium use, so readers that rebuild a highlight's appearance no longer draw it blank; older files still open. Comments lists other apps' annotations as view only, bounded against huge or shared strings and arrays (SM3, source build).
 - Tests: the bundled PDFium is checked as the non-V8, non-XFA build, and a file full of Launch, URI and JavaScript actions starts no process when loaded, rendered or printed with a form handle; a highlight probe and a read-only annotation census (SM3; tests only).
 - Unlock with the owner password (SM1, source build; `owner_unlock.rs`, `DocumentProperties.tsx`): checked natively for R2-R4 (RC4, AES-128) and R6 (AES-256); restrictions lift for the session and Save a Copy writes no /Encrypt.
 - New manual `updater-secret-check.yml` (`release` environment, master only): signs a throwaway file with the updater secrets as `release.yml` passes them and verifies it against `releaseSigningPublicKey`; uploads nothing (SM6). Not yet run on a hosted runner.
