@@ -2,6 +2,12 @@
 
 The full change log, newest first, moved verbatim from the README's "Recent changes" section (only relative link paths were adjusted for this folder); the [README](../README.md#recent-changes) keeps one-line summaries of the newest entries.
 
+- P2-5 part one review fix: pin pdf.js's canvas dependency to a release older than two weeks (SM3; branch `sm3/annot-p2-5`; `package.json`, `package-lock.json`, notices `inventory.json` hashes, `scripts/pdfjs-annotations.test.ts`). SM7 B-1 and the code review blocked `e6b1b8b`.
+  - `pdfjs-dist` 6.4.299 asks for `@napi-rs/canvas` `^1.0.10`, and that range resolved to 1.1.0, published 2026-10-30, which breaks the two-week hold. pdf.js also loads the canvas module when it starts in Node, so `canvas-win32-x64-msvc` really runs inside vitest.
+  - New npm `overrides` pin `@napi-rs/canvas` and all eleven `@napi-rs/canvas-*` platform packages to 1.0.10. The lock was regenerated with the npm cache on E:, and every one resolves to 1.0.10, all published on 2026-10-01. None has an install script.
+  - Notices: hashes regenerated; 368 packages; `--check` passes.
+  - Code-review P3s: the pdf.js test now checks the highlight rectangles and the fixture's exact dates (`D:20261107192834Z`) instead of a pattern.
+  - Tests: pdf.js test 2 passed; `tsc -b` clean.
 - Annotation interchange Phase 2, slice P2-5 (part one): pdf.js as an independent reader in the tests (SM3; branch `sm3/annot-p2-5`; `package.json`, `package-lock.json`, notices `inventory.json` hashes, new `scripts/pdfjs-annotations.test.ts`, new fixtures `src-tauri/tests/fixtures/annotations/`, `annotations.rs` tests). Dev-only; nothing in the app changes.
   - **Dependency.** `pdfjs-dist` 6.4.299 (Apache-2.0, published 2026-10-03) is an exact-pinned devDependency. It has no install scripts. Its optional `@napi-rs/canvas` comes as prebuilt platform packages (MIT, no install scripts) and is unused here, since nothing is rendered. Requires Node 22.13 or later; CI uses Node 22.
     - Notices: `dependency-notices.mjs` regenerated. Only the `package.json` and `package-lock.json` input hashes changed, since dev dependencies are not bundled. Still 368 packages, 0 review items; `--check` passes.

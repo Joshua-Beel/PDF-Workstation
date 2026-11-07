@@ -30,5 +30,19 @@
     "typescript": "5.8.3",
     "vite": "6.4.5",
     "vitest": "4.1.12"
+  },
+  "overrides": {
+    "@napi-rs/canvas": "1.0.10",
+    "@napi-rs/canvas-android-arm64": "1.0.10",
+    "@napi-rs/canvas-darwin-arm64": "1.0.10",
+    "@napi-rs/canvas-darwin-x64": "1.0.10",
+    "@napi-rs/canvas-linux-arm-gnueabihf": "1.0.10",
+    "@napi-rs/canvas-linux-arm64-gnu": "1.0.10",
+    "@napi-rs/canvas-linux-arm64-musl": "1.0.10",
+    "@napi-rs/canvas-linux-riscv64-gnu": "1.0.10",
+    "@napi-rs/canvas-linux-x64-gnu": "1.0.10",
+    "@napi-rs/canvas-linux-x64-musl": "1.0.10",
+    "@napi-rs/canvas-win32-arm64-msvc": "1.0.10",
+    "@napi-rs/canvas-win32-x64-msvc": "1.0.10"
   }
 }

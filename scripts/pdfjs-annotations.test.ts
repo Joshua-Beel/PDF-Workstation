@@ -33,12 +33,17 @@ describe('pdf.js reads the annotations the app writes', () => {
     near(note.rect, [20, 150, 40, 170]);
     expect(note.popupRef).toBe(popup.id);
     near(popup.rect, [20, 50, 200, 170]);
-    expect(note.creationDate).toMatch(/^D:\d{14}Z$/);
-    expect(note.modificationDate).toMatch(/^D:\d{14}Z$/);
+    // The committed fixture's dates, written when it was generated.
+    for (const annotation of [note, area, text]) {
+      expect(annotation.creationDate).toBe('D:20261107192834Z');
+      expect(annotation.modificationDate).toBe('D:20261107192834Z');
+    }
     expect(note.titleObj?.str ?? '').toBe('');
     expect(area.contentsObj?.str).toBe('Area');
+    near(area.rect, [60, 100, 140, 130]);
     near(area.quadPoints ?? [], [60, 130, 140, 130, 60, 100, 140, 100]);
     expect(text.contentsObj?.str).toBe('Text');
+    near(text.rect, [20, 40, 120, 72]);
     near(text.quadPoints ?? [], [20, 72, 120, 72, 20, 60, 120, 60, 20, 52, 80, 52, 20, 40, 80, 40]);
   });
 
