@@ -1910,7 +1910,7 @@ fn recovery_record(session: &EditSession, source: crate::recovery_journal::Sourc
                 (crate::comments::AnnotationKind::Highlight, true) => crate::recovery_journal::RecoveryAnnotationKind::TextHighlight,
                 _ => return Err("Recovery annotation state is invalid.".into()),
             };
-            Ok(crate::recovery_journal::RecoveryAnnotation { id: note.id.clone(), kind, rect: recovery_rect(note.rect), contents: note.contents.clone(), quads: note.quads.as_deref().unwrap_or(&[]).iter().copied().map(recovery_rect).collect() })
+            Ok(crate::recovery_journal::RecoveryAnnotation { id: note.id.clone(), kind, rect: recovery_rect(note.rect), contents: note.contents.clone(), quads: note.quads.as_deref().unwrap_or(&[]).iter().copied().map(recovery_rect).collect(), created: note.created.clone(), modified: note.modified.clone() })
         }).collect::<Result<Vec<_>, String>>()?;
         Ok(crate::recovery_journal::RecoveryPage { source: u32::try_from(page.source).map_err(|_| "Recovery page mapping is too large.")?, turns: u8::try_from(page.turns).map_err(|_| "Recovery rotation is invalid.")?, crop: page.crop.map(recovery_rect), annotations })
     }).collect::<Result<Vec<_>, String>>()?;
@@ -1999,7 +1999,7 @@ fn restore_recovery_session(session: &mut EditSession, record: &crate::recovery_
                 crate::recovery_journal::RecoveryAnnotationKind::AreaHighlight => (crate::comments::AnnotationKind::Highlight, None),
                 crate::recovery_journal::RecoveryAnnotationKind::TextHighlight => (crate::comments::AnnotationKind::Highlight, Some(annotation.quads.iter().copied().map(restore_crop).collect())),
             };
-            crate::comments::Note { id: annotation.id.clone(), rect: restore_crop(annotation.rect), contents: annotation.contents.clone(), kind, quads }
+            crate::comments::Note { id: annotation.id.clone(), rect: restore_crop(annotation.rect), contents: annotation.contents.clone(), kind, quads, created: annotation.created.clone(), modified: annotation.modified.clone() }
         }).collect();
         Ok(PageSpec { source: usize::try_from(page.source).map_err(|_| "Recovery page mapping is invalid.")?, turns: i32::from(page.turns), crop: page.crop.map(restore_crop), notes })
     }).collect::<Result<Vec<_>, String>>()?;

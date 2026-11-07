@@ -2,6 +2,23 @@
 
 The full change log, newest first, moved verbatim from the README's "Recent changes" section (only relative link paths were adjusted for this folder); the [README](../README.md#recent-changes) keeps one-line summaries of the newest entries.
 
+- Annotation interchange Phase 2, slice P2-4 (part one): Acrobat-style metadata on the app's own annotations (SM3; branch `sm3/annot-p2-4` off `3c49aed`; `comments.rs`, `editor.rs`, `service.rs`, `recovery_journal.rs` (SM5's seam, one field pair and one validation line)).
+  - **Written:** every new note and highlight gets `/CreationDate` and `/M` as PDF dates in UTC (`D:YYYYMMDDHHmmSSZ`, so no time-zone offset is recorded), and `/Subj` "Sticky Note" or "Highlight", Acrobat's subjects. Dates are computed by `comments::pdf_date`, a civil-date conversion with no new dependency.
+  - **Author:** no `/T` is written. The author name stays blank until Joshua rules on Q1, and the Windows user name is never read.
+  - **Edits:** a real content change sets `/M` and keeps `/CreationDate`; an unchanged edit touches nothing, so the revision stays put. Notes from 0.3.x and 1c have no dates and still read and edit; an edit gives them `/M` only.
+  - **Reader:** `app_note` accepts the three keys only in the app's exact form. Any other date form (for example Acrobat's `-06'00'` offset) or another subject makes the annotation foreign: kept, not edited.
+  - **Plan:** `validate_plan` checks the date form.
+  - **Recovery:** `RecoveryAnnotation` gains optional `created` and `modified`. They are omitted when absent, so dateless records stay byte-identical, and validated when present. The record version stays 2: an older app that meets a dated record refuses it as malformed, which is safe.
+    - `recovery_journal.rs` is also compiled alone by `tests/recovery_journal.rs`, so it keeps its own copy of the date check (`valid_annotation_date`). A comments test asserts that the two copies agree.
+    - The two `RecoveryAnnotation` literals in that SM5 test file gain `created: None, modified: None`.
+  - **Not in this part** (P2-4 part two, next): Acrobat-style random `/NM` IDs, the typed model split and popups.
+  - **Tests:**
+    - `pdf_dates_are_utc_civil_dates_in_the_app_form`: epoch, a century leap day, a fixed date, the year 2100, and invalid forms;
+    - `new_app_annotations_carry_acrobat_style_dates_and_subject_but_no_author`: keys written and round-tripped, no `/T`, an unchanged edit is a no-op, a real edit keeps the creation date, altered date or subject forms are kept as foreign, and a dateless legacy note gets `/M` only;
+    - `recovery_records_keep_annotation_dates_and_dateless_records_stay_canonical`.
+  - **Measured:**
+    - filters `annotations::`, `comments::`, `editor::` and `recovery`: 64 passed, 10 ignored;
+    - `cargo test --bins`: 610 passed, 0 failed, 42 ignored, before the copy of the date check was split out. After it: `--no-run` builds every target, the `recovery_journal` and `recovery_store` integration tests pass 7 and 10 (2 ignored), and the date tests pass.
 - Test: ceilings and totals for the baseline-ratio timing tests (SM3; branch `sm3/annot-p2-4`; `forms_hardening_tests.rs`, `comments.rs` tests only). Both P2-0 reviews left agreeing P3s, and SM7 added L-2.
   - Every baseline-ratio timing now also has an absolute ceiling: 60 s in a release build, 300 s in the test build. A regression that slows the baseline as well therefore fails instead of hanging CI; Cargo has no test timeout. This covers the shared-`/Annots` test, and each forms refusal together with its `pdf_load::load` baseline (L-2).
   - Each forms-hardening test now keeps totals (`Scaled`): the summed refusal time must stay under 10 times the summed load time plus 5 s. Many moderate slowdowns that add up are still caught.

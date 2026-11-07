@@ -11,8 +11,8 @@ fn record() -> RecoveryRecord {
         active: true,
         generation: 7, revision: 4, current_page: 1, source_pages: 3, source: identity(),
         edit_state: RecoveryEditState { pages: vec![
-            RecoveryPage { source: 2, turns: 1, crop: Some(RecoveryRect { left: 1.0, bottom: 2.0, right: 611.0, top: 790.0 }), annotations: vec![RecoveryAnnotation { id: "pdf-workstation-note-1".into(), kind: RecoveryAnnotationKind::Note, rect: rect(10.0), contents: "Private note text".into(), quads: vec![] }] },
-            RecoveryPage { source: 0, turns: 0, crop: None, annotations: vec![RecoveryAnnotation { id: "pdf-workstation-highlight-2".into(), kind: RecoveryAnnotationKind::TextHighlight, rect: text_highlight_rect(), contents: String::new(), quads: vec![rect(40.0), rect(70.0)] }] },
+            RecoveryPage { source: 2, turns: 1, crop: Some(RecoveryRect { left: 1.0, bottom: 2.0, right: 611.0, top: 790.0 }), annotations: vec![RecoveryAnnotation { id: "pdf-workstation-note-1".into(), kind: RecoveryAnnotationKind::Note, rect: rect(10.0), contents: "Private note text".into(), quads: vec![], created: None, modified: None }] },
+            RecoveryPage { source: 0, turns: 0, crop: None, annotations: vec![RecoveryAnnotation { id: "pdf-workstation-highlight-2".into(), kind: RecoveryAnnotationKind::TextHighlight, rect: text_highlight_rect(), contents: String::new(), quads: vec![rect(40.0), rect(70.0)], created: None, modified: None }] },
         ] },
     }
 }

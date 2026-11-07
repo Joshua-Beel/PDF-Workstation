@@ -33,6 +33,13 @@ pub struct RecoveryAnnotation {
     pub rect: RecoveryRect,
     pub contents: String,
     pub quads: Vec<RecoveryRect>,
+    /// `/CreationDate` and `/M` of the app's annotation (SM3 P2-4), in the app's PDF date form. Absent in
+    /// version 1 and 2 records and for notes that never had them; omitted when absent, so those records
+    /// stay byte-identical (the canonical-encoding check).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -57,6 +64,15 @@ pub struct RecoveryRecord {
     pub source_pages: u32,
     pub source: SourceIdentity,
     pub edit_state: RecoveryEditState,
+}
+
+/// The annotation date form `D:YYYYMMDDHHmmSSZ`. This file is also compiled alone by `tests/recovery_journal.rs`,
+/// so it keeps its own copy of `comments::valid_pdf_date`; a comments test checks that the two agree.
+pub fn valid_annotation_date(value: &str) -> bool {
+    let Some(digits) = value.strip_prefix("D:").and_then(|rest| rest.strip_suffix('Z')) else { return false };
+    if digits.len() != 14 || !digits.bytes().all(|byte| byte.is_ascii_digit()) { return false; }
+    let field = |range: std::ops::Range<usize>| digits[range].parse::<u32>().unwrap_or(u32::MAX);
+    (1..=9999).contains(&field(0..4)) && (1..=12).contains(&field(4..6)) && (1..=31).contains(&field(6..8)) && field(8..10) <= 23 && field(10..12) <= 59 && field(12..14) <= 59
 }
 
 fn positive_rect(rect: RecoveryRect) -> bool {
@@ -103,6 +119,7 @@ fn validate(record: &RecoveryRecord) -> Result<(), String> {
         annotations = annotations.checked_add(page.annotations.len()).ok_or("Recovery annotation count is invalid.")?;
         if annotations > MAX_ANNOTATIONS { return Err("Recovery annotation count is invalid.".into()); }
         for annotation in &page.annotations {
+            if [&annotation.created, &annotation.modified].into_iter().flatten().any(|date| !valid_annotation_date(date)) { return Err("Recovery annotation state is invalid.".into()); }
             if !ids.insert(&annotation.id) || !positive_rect(annotation.rect) || annotation.contents.contains('\0') || annotation.contents.len() > MAX_TEXT_BYTES { return Err("Recovery annotation state is invalid.".into()); }
             text_bytes = text_bytes.checked_add(annotation.contents.len()).ok_or("Recovery annotation text is invalid.")?;
             if text_bytes > MAX_TOTAL_TEXT_BYTES { return Err("Recovery annotation text is invalid.".into()); }
