@@ -43,10 +43,10 @@ describe('push and pull request CI workflow', () => {
       'run: npm test -- --pool=threads --maxWorkers=1 --no-file-parallelism',
       'run: npm run build',
       'run: cargo test --locked --manifest-path src-tauri/Cargo.toml --bins\n',
-      'Annotation interchange check with the pinned qpdf (E2)',
       'run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-run',
       'Keep only compiled dependencies in the Cargo cache',
       'actions/cache/save@',
+      'Annotation interchange check with the pinned qpdf (E2)',
       'Recheck tracked source',
     ];
     let position = -1;
@@ -108,6 +108,14 @@ describe('pinned qpdf annotation interchange check (E2, SM7 C-2)', () => {
     expect(e2).toContain("'^test result: ok\\. 1 passed; 0 failed; 0 ignored;'");
     expect(e2).toContain('.Count -ne 1) { throw');
     expect(e2).not.toMatch(/continue-on-error|if:/);
+  });
+
+  it('runs qpdf only after the master-only Cargo cache save, so nothing it touches can enter that cache (SM7 L-1)', () => {
+    const save = workflow.indexOf('      - name: Save Cargo dependency cache\n');
+    const e2 = workflow.indexOf('      - name: Annotation interchange check with the pinned qpdf (E2)\n');
+    expect(save).toBeGreaterThan(-1);
+    expect(e2).toBeGreaterThan(save);
+    expect(workflow.indexOf('QPDF_EXE: ', 0)).toBeGreaterThan(save);
   });
 
   it('is wired into ci.yml only: no other workflow mentions qpdf', () => {

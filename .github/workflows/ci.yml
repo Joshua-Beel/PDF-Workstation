@@ -71,17 +71,6 @@ jobs:
       - run: npm test -- --pool=threads --maxWorkers=1 --no-file-parallelism
       - run: npm run build
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --bins
-      - name: Annotation interchange check with the pinned qpdf (E2)
-        shell: pwsh
-        env:
-          QPDF_EXE: ${{ steps.qpdf.outputs.exe }}
-        run: |
-          if (-not $env:QPDF_EXE) { throw 'QPDF_EXE is missing; E2 cannot run.' }
-          $log = @(cargo test --locked --manifest-path src-tauri/Cargo.toml --bins annotations::qpdf_check::tests::qpdf_reads_the_interchange_fixtures_when_provided -- --ignored --exact 2>&1 | ForEach-Object { "$_" })
-          $code = $LASTEXITCODE
-          $log | Out-Host
-          if ($code -ne 0) { throw "E2 failed with exit code $code" }
-          if (@($log | Where-Object { $_ -match '^test result: ok\. 1 passed; 0 failed; 0 ignored;' }).Count -ne 1) { throw 'E2 did not run exactly one test.' }
       - name: Compile every test target
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-run
 
@@ -109,6 +98,18 @@ jobs:
             ~/.cargo/git/db
             src-tauri/target
           key: ci-cargo-deps-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Annotation interchange check with the pinned qpdf (E2)
+        shell: pwsh
+        env:
+          QPDF_EXE: ${{ steps.qpdf.outputs.exe }}
+        run: |
+          if (-not $env:QPDF_EXE) { throw 'QPDF_EXE is missing; E2 cannot run.' }
+          $log = @(cargo test --locked --manifest-path src-tauri/Cargo.toml --bins annotations::qpdf_check::tests::qpdf_reads_the_interchange_fixtures_when_provided -- --ignored --exact 2>&1 | ForEach-Object { "$_" })
+          $code = $LASTEXITCODE
+          $log | Out-Host
+          if ($code -ne 0) { throw "E2 failed with exit code $code" }
+          if (@($log | Where-Object { $_ -match '^test result: ok\. 1 passed; 0 failed; 0 ignored;' }).Count -ne 1) { throw 'E2 did not run exactly one test.' }
 
       - name: Recheck tracked source
         if: ${{ always() }}

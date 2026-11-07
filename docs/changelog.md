@@ -2,6 +2,15 @@
 
 The full change log, newest first, moved verbatim from the README's "Recent changes" section (only relative link paths were adjusted for this folder); the [README](../README.md#recent-changes) keeps one-line summaries of the newest entries.
 
+- P2-5 closing follow-ups (SM3; branch `sm3/annot-p2-5` on master `053bee7`; `.github/workflows/ci.yml`, `scripts/ci-workflow.test.ts`, `scripts/setup-qpdf.test.ts`; CI and tests only). E2 passed on the hosted runner in CI run 42424565783.
+  - **SM7 L-1 (from `b250c93`):** the E2 step now runs after "Save Cargo dependency cache", so nothing qpdf might write can enter the master-scope Cargo cache.
+    - A new contract test pins this order, and the step-order test is updated.
+    - On master pushes without a cache hit, the prune step has already removed the crate's test binaries, so E2 recompiles the crate there. That costs a few minutes; dependencies stay compiled.
+    - setup-node's npm cache is still saved in its post-job step, after every step. That is the same exposure SM7 accepted for all dev dependencies.
+  - **Code-review P3:** the 8.3 `inside()` test looks up `ProgramFiles`, `USERPROFILE` and `CI` case-insensitively. Git Bash passes `PROGRAMFILES`, and with `CI=true` the test then failed locally.
+    - Its failure message lists each candidate folder and what `%~sI` gave for it, and the comparisons name the long and short folders.
+  - **SM7 L-1 (from `60101b4`, optional):** the zip-cache test removes its never-created work root in a `finally`, in case a future script regression creates it.
+  - Tests: `setup-qpdf.test.ts` plus `ci-workflow.test.ts` 19 passed, with `CI` unset and with `CI=true`. The 8.3 test also passes from Git Bash with `CI=true`. `tsc -b` clean.
 - SM7 M-1 follow-up to `e7899bb`: qpdf's launch path must name exactly the verified file (SM3; branch `sm3/annot-p2-5`; `src-tauri/src/qpdf_check.rs`; tests only).
   - **Gap:** the pin check hashes and holds qpdf through the canonical `\\?\` path, but since `e7899bb` qpdf starts through the stripped plain path. Win32 drops a trailing dot or space from plain path components, so a verified `…\x.\qpdf.exe` could start an unverified `…\x\qpdf.exe`. CI's GUID run folder rules this out there, but it weakened C-1.
   - **Fix, both ways:**
