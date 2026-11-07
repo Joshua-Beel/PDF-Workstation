@@ -2,6 +2,16 @@
 
 The full change log, newest first, moved verbatim from the README's "Recent changes" section (only relative link paths were adjusted for this folder); the [README](../README.md#recent-changes) keeps one-line summaries of the newest entries.
 
+- SM7 M-1 follow-up to `e7899bb`: qpdf's launch path must name exactly the verified file (SM3; branch `sm3/annot-p2-5`; `src-tauri/src/qpdf_check.rs`; tests only).
+  - **Gap:** the pin check hashes and holds qpdf through the canonical `\\?\` path, but since `e7899bb` qpdf starts through the stripped plain path. Win32 drops a trailing dot or space from plain path components, so a verified `…\x.\qpdf.exe` could start an unverified `…\x\qpdf.exe`. CI's GUID run folder rules this out there, but it weakened C-1.
+  - **Fix, both ways:**
+    - `plain_path` now refuses any component ending in a dot or a space.
+    - New `launch_path` canonicalizes the path, strips it to plain form, re-canonicalizes it, and requires the two canonical paths to be identical. It is used for qpdf's program, the fixture and the working directory.
+  - **Test:** under the E: temp folder, a verbatim-created `x.` folder holds the pinned stand-in `qpdf.exe`, and a sibling `x` folder holds a different `qpdf.exe`.
+    - The re-canonicalize check alone refuses it ("does not name the verified"), and so does the component rule alone.
+    - `launch_path` refuses it, and `run_pinned` refuses before anything is spawned.
+    - A trailing-space folder is refused too.
+  - **Tests:** `qpdf_check` + `child_job` 30 passed, 1 ignored. E2 was re-run locally against the real pinned qpdf after a fresh verified fetch under E: tmp (since deleted): 1 passed.
 - Fix for E2's first CI run, 42420860419, which was red on `3db311f` (SM3; branch `sm3/annot-p2-5`; `src-tauri/src/qpdf_check.rs`, `scripts/setup-qpdf.test.ts`; tests only).
   - **What failed:** qpdf started under the isolated spawn and exited with its own code 2: `qpdf: open \\app-annotations.pdf: No such file or directory`. So the fetch, the verification, the System32 VC++ runtime and the mitigations all worked.
   - **Cause, reproduced locally** with the pinned qpdf 12.4.2 from a fresh verified fetch under the E: tmp folder, on the synthetic fixture only:
