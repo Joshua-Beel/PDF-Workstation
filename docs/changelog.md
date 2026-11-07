@@ -2,6 +2,15 @@
 
 The full change log, newest first, moved verbatim from the README's "Recent changes" section (only relative link paths were adjusted for this folder); the [README](../README.md#recent-changes) keeps one-line summaries of the newest entries.
 
+- Annotation interchange Phase 2, slice P2-4 part two: random UUID `/NM` IDs for new annotations (SM3; branch `sm3/annot-p2-4` on `a298428`; `comments.rs`, `editor.rs`, `recovery_journal.rs` (SM5's seam), test updates in `annotations.rs` and `service.rs`).
+  - **New IDs.** New notes and highlights get a random UUID version 4 as `/NM`, lowercase and dashed, as Acrobat writes. It comes from the operating system's CSPRNG (`BCryptGenRandom`), never from the machine, user or time (SM7 E3).
+    - `EditSession::fresh_id` also guarantees that the ID appears nowhere in the source, the plan or the undo and redo history.
+    - The numbered `pdf-workstation-note-N` and `-highlight-N` IDs of 0.3.x and 1c still read and edit, and still must match their kind (`id_matches_kind`). A UUID carries no kind.
+  - **Recovery.** The journal accepts UUID IDs for any kind. `recovery_journal::annotation_uuid` is the only UUID check; `comments::is_uuid` calls it, the same pattern as the date check.
+  - **Moved out** (coordinator, 2026-11-07): the typed model split goes just before P2-7, and app popups get their own slice.
+  - **Tests:** `new_annotation_ids_are_random_uuids_and_numbered_ids_still_read` covers 1,000 unique UUIDs, valid and invalid forms, the kind rule for numbered IDs, a UUID note round trip, a numbered note keeping its ID, and a wrong-kind numbered ID kept as foreign. Four assertions that new numbered IDs grow now assert a new UUID instead.
+    - `comments::id` and `highlight_id` are now test-only, since the app no longer creates numbered IDs.
+    - Measured: filters `annotations::`, `comments::`, `editor::`, `recovery` and `service::tests::comments`: 69 passed, 10 ignored. The `recovery_journal` integration test passes 7, and `recovery_store` passes 10 with 2 ignored. `--no-run` builds every target. `cargo check --bins` adds no new warning.
 - P2-4 part one review fixes: one date check, recovery journal version 3 for dated records (SM3; branch `sm3/annot-p2-4`; `recovery_journal.rs` (SM5's seam), `comments.rs`, `docs/tools/comments.md`). Both reviewers flagged the journal on `ee8d94c`.
   - **One date check.** The duplicate check is gone: `comments::valid_pdf_date` calls `recovery_journal::valid_annotation_date`, which stays in the journal because `tests/recovery_journal.rs` compiles that file alone.
     - It now also rejects day-of-month values the month does not have, leap years included: no February 30th, February 29th only in leap years (2000 yes, 2100 no), and no April 31st.

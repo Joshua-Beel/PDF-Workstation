@@ -98,9 +98,17 @@ fn valid_crop(rect: RecoveryRect) -> bool {
     positive_rect(rect) && rect.right - rect.left >= 1.0 && rect.top - rect.bottom >= 1.0
 }
 
+/// An annotation ID of the given kind: a random UUID v4 (lowercase, dashed; SM3 P2-4) for any kind, or the
+/// numbered form with the kind's prefix (the journal's form of `comments::id_matches_kind`). `annotation_uuid`
+/// is the only UUID check; `comments::is_uuid` calls it, since this file is also compiled alone by
+/// `tests/recovery_journal.rs`.
 fn annotation_number(id: &str, prefix: &str) -> bool {
-    id.strip_prefix(prefix).and_then(|suffix| suffix.parse::<u64>().ok().map(|value| (suffix, value)))
+    annotation_uuid(id) || id.strip_prefix(prefix).and_then(|suffix| suffix.parse::<u64>().ok().map(|value| (suffix, value)))
         .is_some_and(|(suffix, value)| value > 0 && suffix == value.to_string())
+}
+pub fn annotation_uuid(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    bytes.len() == 36 && bytes.iter().enumerate().all(|(index, byte)| match index { 8 | 13 | 18 | 23 => *byte == b'-', 14 => *byte == b'4', 19 => matches!(byte, b'8' | b'9' | b'a' | b'b'), _ => matches!(byte, b'0'..=b'9' | b'a'..=b'f') })
 }
 
 fn union(quads: &[RecoveryRect]) -> Option<RecoveryRect> {

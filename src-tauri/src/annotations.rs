@@ -318,7 +318,7 @@ mod tests {
         assert!(session.comments_reason().is_none() && session.plan[0].notes.is_empty(), "a note something else depends on is kept, not edited");
         assert_eq!(session.view_only_annotations().unwrap().pages[0].len(), 2, "it is listed view only, with the reply");
         let next = session.proposed_comment(Some((0, crate::editor::CropBox { left: 100.0, bottom: 60.0, right: 130.0, top: 90.0 })), None, Some("New")).unwrap(); session.commit_comments(next);
-        assert!(crate::comments::number(&session.plan[0].notes[0].id).unwrap() > crate::comments::number(&ours).unwrap(), "new IDs never reuse a kept app ID");
+        assert!(crate::comments::is_uuid(&session.plan[0].notes[0].id) && session.plan[0].notes[0].id != ours, "new IDs are random UUIDs, never a kept app ID");
         let saved = Document::load_mem(&session.export(None).unwrap()).unwrap();
         assert_eq!(saved.get_object(note).unwrap(), document.get_object(note).unwrap());
         assert_eq!(saved.get_object(reply).unwrap(), document.get_object(reply).unwrap());
