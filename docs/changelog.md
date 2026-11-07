@@ -2,6 +2,32 @@
 
 The full change log, newest first, moved verbatim from the README's "Recent changes" section (only relative link paths were adjusted for this folder); the [README](../README.md#recent-changes) keeps one-line summaries of the newest entries.
 
+- Annotation interchange phase 1, slice 1b: highlight quad order and a read-only list of annotations the app does not edit (SM3; branch `sm3/annot-p1b` off master `90f2880`; `comments.rs`, new `annotations.rs`, `editor.rs`, `service.rs`, one module line in `main.rs`, `bridge.ts`, `CommentsPanel.tsx` and its CSS and tests, `docs/tools/comments.md`; review P3s of 1a in `annotation_lockdown_tests.rs`).
+  - **Shipped bug fixed: highlight QuadPoints.** Through 0.3.1 the app wrote each quad BL, BR, TR, TL. The bundled PDFium draws nothing for that order once `/AP` is gone (slice 1a probe: 0.000 coverage), so any reader that rebuilds the appearance showed our highlights blank.
+    - `comments::quad` now writes TL, TR, BL, BR for text and area highlights. That is the order of all 204 markup quads in the real-file census (0 in any other order).
+    - `read_quads` accepts either order per quad (`quad_box`, so mixed orders also read). Any other permutation or a non-rectangular quad still refuses as before.
+    - 0.3.x files read back identically; existing files are rewritten in the new order only when a comment changes.
+    - Tests: `quads_are_written_in_acrobat_order_and_both_orders_read_back` covers exact output points, legacy and mixed orders reading back equal, and a mirrored or skewed quad refused. The 1a probe now asserts that the app's written highlight is fully drawn by PDFium without `/AP` (1.000, 1.000), while the 0.3.x order still draws nothing, and that a 0.3.x file with its own `/AP` reads.
+  - **View-only list.** New `annotations::survey` reads every page's `/Annots`, direct or indirect, and lists each annotation that is not a Widget, Link, Popup, print mark, review state or Hidden non-reply. It gives the subtype (standard name or "Other"), `/T`, `/Subj`, `/Contents` and the `/M` or `/CreationDate` date, plus whether it is a reply.
+    - Text strings are decoded as UTF-16BE, UTF-8 BOM or PDFDocEncoding, with the Annex D table including 0x80-0x9E and euro at 0xA0. C0/C1 controls and bidi overrides are removed.
+    - Limits: 4,096 listed per page, 16,384 per document, 16,384 body characters each, 4 MiB of bodies per document, 256-character labels; the rest is counted as "N more not listed".
+    - It never fails, and never touches actions, appearances, rich text or attachments.
+    - `EditSession` surveys only when the strict reader refused editing. `AnnotationList` gains `viewOnly` (mapped through the current page order) and `viewOnlyTruncated`.
+    - The Comments panel lists them under the refusal as plain text only: type name, page, author, date and body, with no buttons.
+    - Editing stays refused for such files, and the source objects are untouched, so saved copies keep them. Lifting the refusal needs the preserving writer (slice 1c).
+    - Tests: survey cases (Acrobat-style note and reply, state, popup, link, widget, hidden, inline dict, null and integer entries, unknown subtype, indirect array, per-page cap and truncation, body cap, decoding edge cases), a session test (refusal kept, list serialised, an unedited copy re-surveys identically, editable files not surveyed), and a vitest that renders hostile author and body strings and finds only text elements and no edit button.
+  - **1a review P3s.**
+    - The census checks file size from metadata before reading. It skips reparse points (junctions, symlinks, cloud placeholders); test `census_walk_skips_reparse_points` makes a real junction.
+    - The lockdown test's marker folder is removed by a drop guard, even on failure.
+  - **Open (SM7 notes on 1a, not covered here).** "Printing" in the lockdown test is Print-mode renders, not the real print path (`printing.rs`). The `pdf_helper` process was not exercised. Both are recorded in the SM3 log.
+  - **Measured.**
+    - Real work PDFs, read-only (census): the survey listed all 4,522 non-link, non-popup annotations in the 285 annotated files, with 0 over a limit and the page count matching on all 285.
+    - `annotations::` and `comments::` filters: 17 passed, 2 ignored. `tsc -b` is clean. vitest for the 4 touched files: 26 passed.
+    - `cargo test --bins`: 594 passed, 3 failed, 42 ignored (2,633 s under heavy machine load). The 3 failures are wall-clock limits: two forms-hardening timing tests and `a_hanging_engine_is_stopped_by_pause_within_a_second`.
+      - The OCR test fails the same way on the unchanged 1a tree.
+      - The two forms tests took 27-34 s on this branch and 29-31 s on the 1a tree, run alone twice each (limit 30 s), so the survey does not change their time.
+    - `cargo test --no-run` builds every target.
+  - Source build only.
 - Annotation interchange phase 1, slice 1a: entry checks before any phase 1 code (SM3; branch `sm3/annot-p1a` off master `f889605`). Design: SM3's approved annotation interchange design, tasks 0a and 0b, E7. New `src-tauri/src/annotation_lockdown_tests.rs`, mounted from `comments.rs`; a test-only `InProcessDocument::has_form_handle` in `pdf_engine.rs`. Tests only; no product behaviour changes.
   - **Task 0a, PDFium lockdown (SM7 A2).** Source reading of pdfium-render 0.9.4: every load binds `FPDFDOC_InitFormFillEnvironment` when the file has a form, with every `FPDF_FORMFILLINFO` callback `None` and a null `m_pJsPlatform`, and never calls a `FORM_*` action or event function (it only draws with `FPDF_FFLDraw`). The app calls none either. No code change was needed. Two tests pin this:
     - `bundled_pdfium_is_the_non_v8_non_xfa_build_and_the_check_is_not_vacuous` parses the DLL's PE export table. Positive controls: `FPDF_InitLibrary`, `FPDFDOC_InitFormFillEnvironment`, `FPDF_FFLDraw` and `FORM_DoDocumentOpenAction` must be found. It then refuses the XFA-only `FPDF_BStr_*` exports. `FPDF_LoadXFA` is a stub in every build, so it is not used as a marker. It scans the bytes for the V8 strings "Maximum call stack size exceeded", `SharedArrayBuffer` and `WebAssembly`, with an export-name positive control, and reads `args.gn` from the verified archive (`pdf_enable_v8 = false`, `pdf_enable_xfa = false`, and `target_cpu` as the parse control). CI runs it in `cargo test --bins`.

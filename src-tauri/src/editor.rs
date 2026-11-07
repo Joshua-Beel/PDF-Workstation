@@ -108,6 +108,8 @@ pub struct EditSession {
     pub revision: u64,
     source_notes: Vec<Vec<crate::comments::Note>>,
     comments_reason: Option<String>,
+    /// Read-only survey of the source's annotations, by source page, when `comments_reason` refused editing.
+    view_only: Option<crate::annotations::Survey>,
     text_extraction_permission: Result<(), String>,
     next_note: u64,
     pub outline: crate::outline_edit::OutlineEdits,
@@ -149,16 +151,21 @@ impl EditSession {
         } else {
             parsed.as_ref().map_err(|_| "The PDF extraction permission could not be verified.".into()).and_then(|document| source_text_extraction_permission(document))
         };
-        let imported = parsed.and_then(|document| crate::comments::read(&document));
+        let imported = parsed.as_ref().map_err(Clone::clone).and_then(crate::comments::read);
         let (source_notes, comments_reason) = match imported {
             Ok(notes) if notes.len() == count => (notes, None),
             Ok(_) => (vec![Vec::new(); count], Some("The PDF engines disagree about the page count.".into())),
             Err(reason) => (vec![Vec::new(); count], Some(reason)),
         };
+        // Annotations the strict reader refused are listed read-only; the survey must see the same pages.
+        let view_only = match (&comments_reason, &parsed) {
+            (Some(_), Ok(document)) => Some(crate::annotations::survey(document)).filter(|survey| survey.pages.len() == count),
+            _ => None,
+        };
         let next_note = source_notes.iter().flatten().filter_map(|note| crate::comments::number(&note.id).ok()).max().unwrap_or(0).saturating_add(1);
         let plan: Vec<_> = (0..count).map(|source| PageSpec { source, turns: 0, crop: None, notes: source_notes[source].clone() }).collect();
         let original_size = source.len();
-        Self { source, source_page_count: count, saved: plan.clone(), plan, undo: VecDeque::new(), redo: VecDeque::new(), history_bytes: 0, history_budget: HISTORY_BUDGET, revision: 0, source_notes, comments_reason, text_extraction_permission, next_note, outline: Default::default(), labels: Default::default(), page_numbers: Default::default(), original_size, owner_unlocked: false }
+        Self { source, source_page_count: count, saved: plan.clone(), plan, undo: VecDeque::new(), redo: VecDeque::new(), history_bytes: 0, history_budget: HISTORY_BUDGET, revision: 0, source_notes, comments_reason, view_only, text_extraction_permission, next_note, outline: Default::default(), labels: Default::default(), page_numbers: Default::default(), original_size, owner_unlocked: false }
     }
     /// Marks a session built from the decrypted copy a correct owner password produced. Its `source` no longer matches the file on disk.
     pub(crate) fn mark_owner_unlocked(&mut self, original_size: usize) { self.original_size = original_size; self.owner_unlocked = true; }
@@ -209,6 +216,7 @@ impl EditSession {
     pub fn can_redo(&self) -> bool { !self.redo.is_empty() }
     pub fn mark_saved(&mut self) { self.saved = self.plan.clone(); }
     pub fn comments_reason(&self) -> Option<&str> { self.comments_reason.as_deref() }
+    pub fn view_only_annotations(&self) -> Option<&crate::annotations::Survey> { self.view_only.as_ref() }
     pub fn text_extraction_permission(&self) -> Result<(), String> { self.text_extraction_permission.clone() }
     pub fn page_image_export_guard(&self) -> Result<(), String> {
         let document = self.load_source()?;

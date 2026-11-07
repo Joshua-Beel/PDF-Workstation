@@ -150,9 +150,11 @@ fn pdfium_with_a_form_handle_runs_no_action_and_starts_no_process() {
     }
     let job = OwnJob::enter();
     assert_eq!(job.total_processes(), 1, "the job holds only this test process");
-    let folder = std::env::temp_dir().join(format!("sm3-annot-lockdown-{}", std::process::id()));
-    std::fs::create_dir_all(&folder).unwrap();
-    let marker = folder.join("launched.txt");
+    struct RemoveOnDrop(PathBuf);
+    impl Drop for RemoveOnDrop { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+    let folder = RemoveOnDrop(std::env::temp_dir().join(format!("sm3-annot-lockdown-{}", std::process::id())));
+    std::fs::create_dir_all(&folder.0).unwrap();
+    let marker = folder.0.join("launched.txt");
     let bytes = hostile_actions_pdf(&marker);
     let engine = crate::pdf_engine::InProcessEngine::bind(library()).unwrap();
     assert!(!engine.load_from_vec(blank_page(), None).unwrap().has_form_handle(), "control: a file without /AcroForm binds no form handle");
@@ -175,7 +177,7 @@ fn pdfium_with_a_form_handle_runs_no_action_and_starts_no_process() {
     assert!(status.success());
     assert_eq!(job.total_processes(), 2, "control: a started process is counted");
     assert!(marker.exists(), "control: the Launch command line writes its marker");
-    std::fs::remove_dir_all(&folder).unwrap();
+    drop(folder);
     println!("annotation-lockdown-ok");
 }
 
@@ -198,10 +200,10 @@ fn highlight_annotation(document: &mut Document) -> &mut Dictionary {
     document.get_dictionary_mut(id).unwrap()
 }
 
-/// Design task 0b (1.3). The app writes QuadPoints BL, BR, TR, TL; Acrobat and PDFium's AP generator read
-/// TL, TR, BL, BR. The app's files carry their own `/AP`, so this measures what a reader that regenerates the
-/// appearance draws once `/AP` is gone. Coverage = share of pixels inside each quad (inset 2 px) that are
-/// highlighted (blue channel below 230 on a white page).
+/// Design task 0b (1.3). Through 0.3.x the app wrote QuadPoints BL, BR, TR, TL; Acrobat and PDFium's AP
+/// generator use TL, TR, BL, BR, which the app writes since slice 1b. This measures what a reader that
+/// regenerates the appearance draws once `/AP` is gone. Coverage = share of pixels inside each quad (inset
+/// 2 px) that are highlighted (blue channel below 230 on a white page).
 #[test]
 fn app_text_highlight_without_its_appearance_in_pdfium() {
     use crate::pdf_engine::{EngineDocument, PageTarget, PdfEngine, RenderMode};
@@ -221,13 +223,13 @@ fn app_text_highlight_without_its_appearance_in_pdfium() {
     session.commit_comments(next);
     let written = Document::load_mem(&session.export(None).unwrap()).unwrap();
     let points = |document: &Document| { let mut document = document.clone(); highlight_annotation(&mut document).get(b"QuadPoints").unwrap().as_array().unwrap().iter().map(|value| value.as_float().unwrap()).collect::<Vec<f32>>() };
-    assert_eq!(points(&written), vec![40.0, 140.0, 160.0, 140.0, 160.0, 160.0, 40.0, 160.0, 40.0, 100.0, 120.0, 100.0, 120.0, 120.0, 40.0, 120.0], "the app writes BL, BR, TR, TL");
+    assert_eq!(points(&written), vec![40.0, 160.0, 160.0, 160.0, 40.0, 140.0, 160.0, 140.0, 40.0, 120.0, 120.0, 120.0, 40.0, 100.0, 120.0, 100.0], "the app writes TL, TR, BL, BR");
     let save = |document: &Document| { let mut bytes = Vec::new(); document.clone().save_to(&mut bytes).unwrap(); bytes };
-    let mut app_order = written.clone();
-    highlight_annotation(&mut app_order).remove(b"AP");
-    let mut acrobat_order = app_order.clone();
-    let acrobat: Vec<Object> = quads.iter().flat_map(|q| [q.left, q.top, q.right, q.top, q.left, q.bottom, q.right, q.bottom]).map(Object::Real).collect();
-    highlight_annotation(&mut acrobat_order).set("QuadPoints", acrobat);
+    let mut acrobat_order = written.clone();
+    highlight_annotation(&mut acrobat_order).remove(b"AP");
+    let mut app_order = acrobat_order.clone();
+    let legacy: Vec<Object> = quads.iter().flat_map(|q| [q.left, q.bottom, q.right, q.bottom, q.right, q.top, q.left, q.top]).map(Object::Real).collect();
+    highlight_annotation(&mut app_order).set("QuadPoints", legacy);
     let engine = crate::pdf_engine::InProcessEngine::bind(library()).unwrap();
     let coverage = |bytes: Vec<u8>| -> Vec<f64> {
         let document = engine.load_from_vec(bytes, None).unwrap();
@@ -243,10 +245,14 @@ fn app_text_highlight_without_its_appearance_in_pdfium() {
     let with_ap = coverage(save(&written));
     let app = coverage(save(&app_order));
     let acrobat = coverage(save(&acrobat_order));
-    println!("no-ap-probe-ok: coverage per quad, with /AP {with_ap:.3?}; no /AP, app order {app:.3?}; no /AP, Acrobat order {acrobat:.3?}");
+    println!("no-ap-probe-ok: coverage per quad, with /AP {with_ap:.3?}; no /AP, as written now (Acrobat order) {acrobat:.3?}; no /AP, 0.3.x order {app:.3?}");
     assert!(with_ap.iter().all(|value| *value > 0.99), "the app's own appearance fills each quad");
-    assert!(acrobat.iter().all(|value| *value > 0.99), "PDFium regenerates Acrobat-order quads fully");
-    assert!(app.iter().all(|value| *value < 0.9), "PDFium misdraws the app's quad order without /AP (pinned; if this changes, update design 1.3)");
+    assert!(acrobat.iter().all(|value| *value > 0.99), "PDFium regenerates the app's highlights fully once /AP is gone");
+    assert!(app.iter().all(|value| *value < 0.9), "PDFium misdraws the 0.3.x quad order without /AP (pinned; if this changes, update design 1.3)");
+    let mut legacy_file = app_order.clone();
+    let id = { let page = legacy_file.get_pages()[&1]; legacy_file.get_dictionary(page).unwrap().get(b"Annots").unwrap().as_array().unwrap()[0].as_reference().unwrap() };
+    legacy_file.get_dictionary_mut(id).unwrap().set("AP", written.get_dictionary(id).unwrap().get(b"AP").unwrap().clone());
+    assert_eq!(crate::comments::read(&legacy_file).unwrap()[0], session.plan[0].notes, "a 0.3.x file (old quad order, own /AP) still reads");
 }
 
 const CENSUS_KNOWN: &[&str] = &["Text", "Link", "FreeText", "Line", "Square", "Circle", "Polygon", "PolyLine", "Highlight", "Underline", "Squiggly", "StrikeOut", "Stamp", "Caret", "Ink", "Popup", "FileAttachment", "Sound", "Movie", "Widget", "Screen", "PrinterMark", "TrapNet", "Watermark", "3D", "Redact", "RichMedia", "Projection"];
@@ -272,6 +278,28 @@ fn quad_order(points: &[f32]) -> &'static str {
     "rotated or skewed"
 }
 
+#[cfg(windows)]
+fn is_reparse_point(metadata: &std::fs::Metadata) -> bool { use std::os::windows::fs::MetadataExt; metadata.file_attributes() & 0x400 != 0 || metadata.file_type().is_symlink() }
+#[cfg(not(windows))]
+fn is_reparse_point(metadata: &std::fs::Metadata) -> bool { metadata.file_type().is_symlink() }
+
+#[test]
+fn census_walk_skips_reparse_points() {
+    let folder = std::env::temp_dir().join(format!("sm3-census-walk-{}", std::process::id()));
+    std::fs::create_dir_all(folder.join("real")).unwrap();
+    let plain = std::fs::metadata(folder.join("real")).unwrap();
+    assert!(!is_reparse_point(&plain), "an ordinary folder is walked");
+    #[cfg(windows)]
+    {
+        let junction = folder.join("junction");
+        let made = crate::child_job::test_output(std::process::Command::new("cmd.exe").args(["/c", "mklink", "/J"]).arg(&junction).arg(folder.join("real"))).unwrap();
+        assert!(made.status.success(), "mklink /J failed");
+        let entry = std::fs::read_dir(&folder).unwrap().flatten().find(|entry| entry.file_name() == "junction").unwrap();
+        assert!(is_reparse_point(&entry.metadata().unwrap()), "a junction is skipped");
+    }
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
 /// Read-only census of annotations in a folder of real PDFs (design E7, E12). Prints counts and fixed
 /// buckets only: never a file name, path, author, body, URI, attachment name or raw producer string.
 /// `SM3_ANNOT_CENSUS_DIR=<folder> cargo test --release --bins annotation_census -- --ignored --nocapture`
@@ -288,11 +316,15 @@ fn annotation_census_real_files() {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() { pending.push(path); continue; }
+            // DirEntry metadata does not follow links; reparse points (junctions, symlinks, cloud
+            // placeholders) are skipped so the walk never leaves the folder it was given.
+            let Ok(metadata) = entry.metadata() else { unreadable += 1; continue };
+            if is_reparse_point(&metadata) { add("skipped: reparse point".into(), 1); continue; }
+            if metadata.is_dir() { pending.push(path); continue; }
             if !path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("pdf")) { continue; }
             files += 1;
+            if metadata.len() > 512 * 1024 * 1024 { add("skipped: over 512 MiB".into(), 1); continue; }
             let Ok(bytes) = std::fs::read(&path) else { unreadable += 1; continue };
-            if bytes.len() > 512 * 1024 * 1024 { add("skipped: over 512 MiB".into(), 1); continue; }
             let Ok(document) = crate::pdf_load::load(&bytes) else { add("files: refused by pdf_load".into(), 1); continue };
             loaded += 1;
             let family = producer_family(&document);
@@ -329,6 +361,10 @@ fn annotation_census_real_files() {
                 annotated += 1;
                 max_per_file = max_per_file.max(in_file);
                 add(format!("annotated files by producer family: {family}"), 1);
+                let survey = crate::annotations::survey(&document);
+                add("view-only survey: annotations listed".into(), survey.pages.iter().map(Vec::len).sum());
+                add("view-only survey: not listed (over a limit)".into(), survey.truncated);
+                add(format!("view-only survey: page count matches: {}", survey.pages.len() == document.get_pages().len()), 1);
                 let verdict = match crate::comments::read(&document) { Ok(_) => "accepted", Err(reason) if reason.contains("foreign") => "refused: foreign annotation", Err(reason) if reason.contains("unknown annotation") => "refused: unknown key", Err(reason) if reason.contains("forms, tagged") => "refused: form, tagged, labels or threads", Err(reason) if reason.contains("Signed") => "refused: signed", Err(reason) if reason.contains("Encrypted") => "refused: encrypted", Err(_) => "refused: other" };
                 add(format!("today's comments::read on annotated files: {verdict}"), 1);
                 let mut bands = [(1usize, "1"), (10, "2-10"), (100, "11-100"), (1_000, "101-1,000"), (usize::MAX, "over 1,000")].into_iter();

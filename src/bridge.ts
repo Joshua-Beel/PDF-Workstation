@@ -133,7 +133,8 @@ export const createComment = (id: number, revision: number, page: number, rect: 
 export const updateComment = (id: number, revision: number, noteId: string, contents: string, currentPage: number) => invoke<DocumentInfo>('update_comment', { id, revision, noteId, contents, currentPage });
 export const deleteComment = (id: number, revision: number, noteId: string, currentPage: number) => invoke<DocumentInfo>('delete_comment', { id, revision, noteId, currentPage });
 export type Annotation = { id: string; kind: 'note' | 'highlight'; page: number; rect: CommentRect | null; quads?: CommentRect[] | null; contents: string | null };
-export type DocumentAnnotations = { documentId: number; revision: number; status: 'supported' | 'unsupported'; reason: string | null; annotations: Annotation[] };
+export type ViewOnlyAnnotation = { page: number; subtype: string; author: string | null; subject: string | null; contents: string | null; modified: string | null; reply: boolean };
+export type DocumentAnnotations = { documentId: number; revision: number; status: 'supported' | 'unsupported'; reason: string | null; annotations: Annotation[]; viewOnly: ViewOnlyAnnotation[]; viewOnlyTruncated: number };
 export const documentAnnotations = (id: number, revision: number) => invoke<DocumentAnnotations>('document_annotations', { id, revision });
 export const createHighlight = (id: number, revision: number, page: number, rect: CommentRect, contents: string | null, currentPage: number) => invoke<DocumentInfo>('create_highlight', { id, revision, page, rect, contents, currentPage });
 export const createTextHighlight = (id: number, revision: number, page: number, start: number, end: number, contents: string | null, currentPage: number) => invoke<DocumentInfo>('create_text_highlight', { id, revision, page, start, end, contents, currentPage });

@@ -28,7 +28,10 @@ pub struct CommentList { pub document_id: u64, pub revision: u64, pub status: &'
 pub struct AnnotationInfo { pub id: String, pub kind: AnnotationKind, pub page: usize, pub rect: Option<DisplayRect>, pub contents: Option<String>, pub quads: Option<Vec<DisplayRect>> }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AnnotationList { pub document_id: u64, pub revision: u64, pub status: &'static str, pub reason: Option<String>, pub annotations: Vec<AnnotationInfo> }
+pub struct AnnotationList { pub document_id: u64, pub revision: u64, pub status: &'static str, pub reason: Option<String>, pub annotations: Vec<AnnotationInfo>, pub view_only: Vec<ViewOnlyInfo>, pub view_only_truncated: usize }
+/// An annotation the app shows but does not edit (only when `status` is "unsupported").
+#[derive(Serialize)]
+pub struct ViewOnlyInfo { pub page: usize, #[serde(flatten)] pub annotation: crate::annotations::Surveyed }
 
 pub fn highlight_contents(contents: Option<&str>) -> Result<String, String> {
     let contents = contents.unwrap_or("");
@@ -68,7 +71,18 @@ pub fn number(id: &str) -> Result<u64, String> {
 }
 pub fn id(value: u64) -> String { format!("{PREFIX}{value}") }
 pub fn highlight_id(value: u64) -> String { format!("{HIGHLIGHT_PREFIX}{value}") }
-fn quad(bounds: CropBox) -> Vec<f32> { vec![bounds.left, bounds.bottom, bounds.right, bounds.bottom, bounds.right, bounds.top, bounds.left, bounds.top] }
+/// QuadPoints in the order Acrobat writes and PDFium's appearance generator reads: top-left, top-right,
+/// bottom-left, bottom-right (measured on 204 real markup quads, 0 in any other order).
+fn quad(bounds: CropBox) -> Vec<f32> { vec![bounds.left, bounds.top, bounds.right, bounds.top, bounds.left, bounds.bottom, bounds.right, bounds.bottom] }
+/// The counter-clockwise order (bottom-left, bottom-right, top-right, top-left) this app wrote through 0.3.x.
+/// PDFium draws nothing for it once `/AP` is gone, so it is read but never written.
+fn legacy_quad(bounds: CropBox) -> Vec<f32> { vec![bounds.left, bounds.bottom, bounds.right, bounds.bottom, bounds.right, bounds.top, bounds.left, bounds.top] }
+/// The axis-aligned box of one quad, if its 8 numbers are that box in either order the app accepts.
+fn quad_box(points: &[f32]) -> Option<CropBox> {
+    let xs = [points[0], points[2], points[4], points[6]]; let ys = [points[1], points[3], points[5], points[7]];
+    let rect = CropBox { left: xs.iter().copied().fold(f32::INFINITY, f32::min), bottom: ys.iter().copied().fold(f32::INFINITY, f32::min), right: xs.iter().copied().fold(f32::NEG_INFINITY, f32::max), top: ys.iter().copied().fold(f32::NEG_INFINITY, f32::max) };
+    (points == quad(rect).as_slice() || points == legacy_quad(rect).as_slice()).then_some(rect)
+}
 pub fn highlight_union(quads: &[CropBox]) -> Result<CropBox, String> {
     if quads.is_empty() || quads.len() > MAX_HIGHLIGHT_QUADS { return Err("A text highlight needs 1 through 256 positioned characters.".into()); }
     let mut bounds = quads[0];
@@ -84,10 +98,7 @@ fn read_quads(value: &Object, bounds: CropBox) -> Result<Vec<CropBox>, String> {
     if count == 0 || count % 8 != 0 || count > MAX_HIGHLIGHT_QUADS * 8 { return Err("The PDF has invalid highlight quadrilaterals.".into()); }
     let values = values(value)?;
     if values.is_empty() || values.len() % 8 != 0 || values.len() > MAX_HIGHLIGHT_QUADS * 8 { return Err("The PDF has invalid highlight quadrilaterals.".into()); }
-    let quads = values.chunks_exact(8).map(|points| {
-        let rect = CropBox { left: points[0], bottom: points[1], right: points[2], top: points[5] };
-        if points != quad(rect) { return Err("The PDF has altered highlight quadrilaterals.".into()); } Ok(rect)
-    }).collect::<Result<Vec<_>, String>>()?;
+    let quads = values.chunks_exact(8).map(|points| quad_box(points).ok_or_else(|| "The PDF has altered highlight quadrilaterals.".to_owned())).collect::<Result<Vec<_>, String>>()?;
     if highlight_union(&quads)? != bounds { return Err("The highlight bounds do not match its quadrilaterals.".into()); }
     Ok(quads)
 }
@@ -291,6 +302,43 @@ mod tests {
     use super::*;
     use crate::editor::{EditSession, PageEdit};
     fn sample() -> Vec<u8> { std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/welcome.pdf")).unwrap() }
+    #[test]
+    fn quads_are_written_in_acrobat_order_and_both_orders_read_back() {
+        let (session, _) = annotated();
+        let mut session = session;
+        let quads = vec![CropBox { left: 40.0, bottom: 300.0, right: 80.0, top: 315.0 }, CropBox { left: 40.0, bottom: 270.0, right: 65.0, top: 285.0 }];
+        let next = session.proposed_text_highlight(0, quads.clone(), None).unwrap(); session.commit_comments(next);
+        let area = CropBox { left: 200.0, bottom: 220.0, right: 250.0, top: 260.0 };
+        let next = session.proposed_highlight(Some((0, area)), None, None, false).unwrap(); session.commit_comments(next);
+        let output = Document::load_mem(&session.export(None).unwrap()).unwrap();
+        let page = output.get_pages()[&1];
+        let annots = output.get_dictionary(page).unwrap().get(b"Annots").unwrap().as_array().unwrap().clone();
+        let points = |id: ObjectId| values(output.get_dictionary(id).unwrap().get(b"QuadPoints").unwrap()).unwrap();
+        let (text, area_id) = (annots[annots.len() - 2].as_reference().unwrap(), annots[annots.len() - 1].as_reference().unwrap());
+        assert_eq!(points(text), vec![40.0, 315.0, 80.0, 315.0, 40.0, 300.0, 80.0, 300.0, 40.0, 285.0, 65.0, 285.0, 40.0, 270.0, 65.0, 270.0], "TL, TR, BL, BR per quad");
+        assert_eq!(points(area_id), vec![200.0, 260.0, 250.0, 260.0, 200.0, 220.0, 250.0, 220.0]);
+        let expected = read(&output).unwrap();
+        assert_eq!(expected[0], session.plan[0].notes);
+        // A file from 0.3.x: the same annotations with the old counter-clockwise order still read identically.
+        let mut legacy = output.clone();
+        for id in [text, area_id] {
+            let old: Vec<Object> = points(id).chunks_exact(8).flat_map(|p| { let r = quad_box(p).unwrap(); legacy_quad(r) }).map(Object::Real).collect();
+            legacy.get_dictionary_mut(id).unwrap().set("QuadPoints", old);
+        }
+        assert_eq!(read(&legacy).unwrap(), expected);
+        // Mixed orders within one annotation are fine; any other permutation or a rotated quad is not ours.
+        let mut mixed = output.clone();
+        let mut both = legacy_quad(quads[0]); both.extend(quad(quads[1]));
+        mixed.get_dictionary_mut(text).unwrap().set("QuadPoints", both.into_iter().map(Object::Real).collect::<Vec<_>>());
+        assert_eq!(read(&mixed).unwrap(), expected);
+        let q = quads[0];
+        for wrong in [vec![q.right, q.top, q.left, q.top, q.right, q.bottom, q.left, q.bottom], vec![q.left, q.top, q.right, q.top + 1.0, q.left, q.bottom, q.right, q.bottom]] {
+            let mut altered = output.clone();
+            let mut points = wrong; points.extend(quad(quads[1]));
+            altered.get_dictionary_mut(text).unwrap().set("QuadPoints", points.into_iter().map(Object::Real).collect::<Vec<_>>());
+            assert!(read(&altered).unwrap_err().contains("altered highlight"));
+        }
+    }
     #[test]
     fn text_highlights_compound_appearance_old_schemas_unicode_and_quad_guards() {
         let (mut session, _) = annotated();
