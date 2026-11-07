@@ -2,6 +2,15 @@
 
 The full change log, newest first, moved verbatim from the README's "Recent changes" section (only relative link paths were adjusted for this folder); the [README](../README.md#recent-changes) keeps one-line summaries of the newest entries.
 
+- Annotation interchange Phase 2, slice P2-5 (part one): pdf.js as an independent reader in the tests (SM3; branch `sm3/annot-p2-5`; `package.json`, `package-lock.json`, notices `inventory.json` hashes, new `scripts/pdfjs-annotations.test.ts`, new fixtures `src-tauri/tests/fixtures/annotations/`, `annotations.rs` tests). Dev-only; nothing in the app changes.
+  - **Dependency.** `pdfjs-dist` 6.4.299 (Apache-2.0, published 2026-10-03) is an exact-pinned devDependency. It has no install scripts. Its optional `@napi-rs/canvas` comes as prebuilt platform packages (MIT, no install scripts) and is unused here, since nothing is rendered. Requires Node 22.13 or later; CI uses Node 22.
+    - Notices: `dependency-notices.mjs` regenerated. Only the `package.json` and `package-lock.json` input hashes changed, since dev dependencies are not bundled. Still 368 packages, 0 review items; `--check` passes.
+  - **Check (design F1).** `scripts/pdfjs-annotations.test.ts` runs in the normal vitest run and loads the committed fixtures with pdf.js (`isEvalSupported: false`, no XFA, no fonts).
+    - `app-annotations.pdf`: a sticky note with its popup, an area highlight and a two-quad text highlight. pdf.js must read the subtypes, contents, rectangles, Acrobat-order quad points, the note-to-popup link and the dates, with no author.
+    - `foreign-plus-app.pdf`: the Acrobat-style file with one app note added. pdf.js must still read the other app's note, its popup and reply thread (`inReplyTo`), the link URL, the inline square and the page-2 highlight beside the app note.
+    - pdf.js lists popups after all other annotations; the test matches them by reference.
+  - **Fixtures.** They hold synthetic content only and are written by the ignored Rust test `write_interchange_fixtures` (`SM3_WRITE_FIXTURES=1`). New `committed_interchange_fixtures_read_back_as_written` fails if the writer's format drifts from the committed files. The harness reads only these fixtures, never real work PDFs, in CI or locally.
+  - **qpdf (design E2)** is proposed, not fetched, and waits for SM7: see the SM3 log.
 - Popups review follow-ups (SM3; branch `sm3/annot-p2-5`; `comments.rs`, `docs/tools/comments.md`). The popups slice passed both reviews with P3s.
   - **Code review P3:** `docs/tools/comments.md` now says popups are placed from the MediaBox. On a rotated page, an inset-CropBox page or a page with a /UserUnit, a popup opened in another reader may sit partly or wholly outside the visible area.
   - **SM7 L-2:** new test `popup_rectangles_round_trip_on_a_fractional_media_box` covers A4 in points, a fractional MediaBox origin, and a small fractional page. Each has a note at fractional coordinates, and the popup rectangle must survive save, reload and a second save exactly; otherwise the note would turn foreign.

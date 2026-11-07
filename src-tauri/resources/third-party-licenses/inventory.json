@@ -5,8 +5,8 @@
   "inputHashes": {
     "src-tauri/Cargo.lock": "0ebfb6165cbfaea67d382611741b2705570a1e0cc8758621b1620f46ec68ee28",
     "src-tauri/Cargo.toml": "847645897d757a63291f37d25bba132ffa674c88d9f790ba0a4354b573d2db9c",
-    "package-lock.json": "81cfb43eeb49525aa8670141c886b25a26c179423f2b45e4c86251cd76d1bd73",
-    "package.json": "a391090e0d6aa92789a765db63ef0a47b93ed590fdca71a72737179755d04c0a",
+    "package-lock.json": "e0b11a17023d83bef2f5a065fb0ec7848d2698f6561866672b6790d1b9f789af",
+    "package.json": "c7d49c9d15d06f36b7723ffef38d2dca75a1bbd66f30c1868b0f40111ba7d76e",
     "scripts/notice-supplements/manifest.json": "f0700cbb9d20d43f42d709852e7961194d22937a41bf1fad5063e27f5fae2121",
     "scripts/mpl-source-archives.manifest.json": "d5575a6facde7afb4f4faae54009bb776da8b0d1410c68de1915c7a46a73e915",
     "scripts/ocr/pins.json": "4612743a7adf0c49ef6c7c6da839a6a4f38312e962cfee2c5caadd10e18cd50a"

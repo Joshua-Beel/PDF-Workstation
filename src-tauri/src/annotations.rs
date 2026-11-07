@@ -250,6 +250,49 @@ mod tests {
         (document, vec![note, popup, reply, link, highlight])
     }
 
+    fn fixture(name: &str) -> std::path::PathBuf { std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/annotations").join(name) }
+
+    /// Writes the committed interchange fixtures that the pdf.js check (`scripts/pdfjs-annotations.test.ts`)
+    /// reads: `app-annotations.pdf` (a sticky note with its popup, an area highlight and a two-quad text highlight,
+    /// all written by the app) and `foreign-plus-app.pdf` (the Acrobat-style two-page file of these tests with
+    /// one app note added). Synthetic content only. Run when the writer's format changes:
+    /// `SM3_WRITE_FIXTURES=1 cargo test --bins write_interchange_fixtures -- --ignored`.
+    #[test]
+    #[ignore = "writes the committed fixtures: set SM3_WRITE_FIXTURES=1"]
+    fn write_interchange_fixtures() {
+        if std::env::var_os("SM3_WRITE_FIXTURES").is_none() { return; }
+        std::fs::create_dir_all(fixture("")).unwrap();
+        let mut blank = document(|_, _| Object::Array(Vec::new()));
+        blank.get_dictionary_mut(blank.get_pages()[&1]).unwrap().remove(b"Annots");
+        let mut bytes = Vec::new(); blank.save_to(&mut bytes).unwrap();
+        let mut session = crate::editor::EditSession::new(bytes, 1);
+        let next = session.proposed_comment(Some((0, crate::editor::CropBox { left: 20.0, bottom: 150.0, right: 40.0, top: 170.0 })), None, Some("App note")).unwrap(); session.commit_comments(next);
+        let next = session.proposed_highlight(Some((0, crate::editor::CropBox { left: 60.0, bottom: 100.0, right: 140.0, top: 130.0 })), None, Some("Area"), false).unwrap(); session.commit_comments(next);
+        let quads = vec![crate::editor::CropBox { left: 20.0, bottom: 60.0, right: 120.0, top: 72.0 }, crate::editor::CropBox { left: 20.0, bottom: 40.0, right: 80.0, top: 52.0 }];
+        let next = session.proposed_text_highlight(0, quads, Some("Text")).unwrap(); session.commit_comments(next);
+        std::fs::write(fixture("app-annotations.pdf"), session.export(None).unwrap()).unwrap();
+        let (source, _) = acrobat_style();
+        let mut bytes = Vec::new(); source.clone().save_to(&mut bytes).unwrap();
+        let mut session = crate::editor::EditSession::new(bytes, 2);
+        let next = session.proposed_comment(Some((0, crate::editor::CropBox { left: 100.0, bottom: 30.0, right: 130.0, top: 60.0 })), None, Some("Mine")).unwrap(); session.commit_comments(next);
+        std::fs::write(fixture("foreign-plus-app.pdf"), session.export(None).unwrap()).unwrap();
+    }
+
+    /// The committed fixtures still match the writer's format: everything the app wrote reads back as its own,
+    /// and every foreign entry is kept. If this fails after a deliberate format change, regenerate them.
+    #[test]
+    fn committed_interchange_fixtures_read_back_as_written() {
+        let app = Document::load_mem(&std::fs::read(fixture("app-annotations.pdf")).unwrap()).unwrap();
+        let owned = crate::comments::read_owned(&app).unwrap();
+        assert_eq!((owned.app.len(), owned.popups.len(), owned.foreign), (3, 1, 0));
+        assert_eq!(owned.notes[0].iter().map(|note| note.contents.as_str()).collect::<Vec<_>>(), ["App note", "Area", "Text"]);
+        assert!(owned.notes[0].iter().all(|note| crate::comments::is_uuid(&note.id) && note.created.is_some()));
+        let mixed = Document::load_mem(&std::fs::read(fixture("foreign-plus-app.pdf")).unwrap()).unwrap();
+        let owned = crate::comments::read_owned(&mixed).unwrap();
+        assert_eq!((owned.app.len(), owned.popups.len(), owned.foreign), (1, 1, 7), "page 1: note, popup, reply, link, inline square, null; page 2: highlight");
+        assert_eq!(survey_all(&mixed).pages.iter().map(Vec::len).sum::<usize>(), 5, "the foreign note, reply, square and highlight, plus the app note");
+    }
+
     fn entries(document: &Document, page: usize) -> Vec<Object> {
         let id = document.get_pages().into_values().nth(page).unwrap();
         match document.get_dictionary(id).unwrap().get(b"Annots") {
