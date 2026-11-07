@@ -232,7 +232,7 @@ impl EditSession {
                 let page_id = *document.get_pages().values().nth(spec.source).ok_or("Source page mapping is invalid.")?;
                 rect.validate_within(spec.crop.unwrap_or(visible_box(&document, page_id)?))?;
                 let now = crate::comments::pdf_date_now();
-                spec.notes.push(crate::comments::Note { quads: None, id: crate::comments::id(self.next_note), rect, contents: contents.to_owned(), kind: crate::comments::AnnotationKind::Note, created: Some(now.clone()), modified: Some(now) });
+                spec.notes.push(crate::comments::Note { quads: None, id: self.fresh_id()?, rect, contents: contents.to_owned(), kind: crate::comments::AnnotationKind::Note, created: Some(now.clone()), modified: Some(now) });
             }
             (None, Some(id), contents) => {
                 let (page, position) = next.iter().enumerate().find_map(|(page, spec)| spec.notes.iter().position(|note| note.id == id).map(|position| (page, position))).ok_or("The note no longer exists. Refresh comments.")?;
@@ -263,7 +263,7 @@ impl EditSession {
                 let page_id = *document.get_pages().values().nth(spec.source).ok_or("Source page mapping is invalid.")?;
                 rect.validate_within(spec.crop.unwrap_or(visible_box(&document, page_id)?))?;
                 let now = crate::comments::pdf_date_now();
-                spec.notes.push(crate::comments::Note { quads: None, id: crate::comments::highlight_id(self.next_note), rect, contents, kind: crate::comments::AnnotationKind::Highlight, created: Some(now.clone()), modified: Some(now) });
+                spec.notes.push(crate::comments::Note { quads: None, id: self.fresh_id()?, rect, contents, kind: crate::comments::AnnotationKind::Highlight, created: Some(now.clone()), modified: Some(now) });
             }
             (None, Some(id), delete) => {
                 let (page, position) = next.iter().enumerate().find_map(|(page, spec)| spec.notes.iter().position(|note| note.id == id).map(|position| (page, position))).ok_or("The highlight no longer exists. Refresh annotations.")?;
@@ -289,8 +289,17 @@ impl EditSession {
         let visible = spec.crop.unwrap_or(visible_box(&document, page_id)?);
         if bounds.left < visible.left || bounds.bottom < visible.bottom || bounds.right > visible.right || bounds.top > visible.top { return Err("The selected text is outside the current visible page.".into()); }
         let now = crate::comments::pdf_date_now();
-        spec.notes.push(crate::comments::Note { id: crate::comments::highlight_id(self.next_note), rect: bounds, contents: crate::comments::highlight_contents(contents)?, kind: crate::comments::AnnotationKind::Highlight, quads: Some(quads), created: Some(now.clone()), modified: Some(now) });
+        spec.notes.push(crate::comments::Note { id: self.fresh_id()?, rect: bounds, contents: crate::comments::highlight_contents(contents)?, kind: crate::comments::AnnotationKind::Highlight, quads: Some(quads), created: Some(now.clone()), modified: Some(now) });
         crate::comments::validate_plan(&next)?; Ok(next)
+    }
+    /// A new random annotation ID (`/NM`, UUID v4) used by none of the app's own notes in the source, the plan
+    /// or the undo and redo history. Other apps' `/NM` values are not checked: a clash is astronomically
+    /// unlikely (2^-122) and harmless, since IDs only address the app's own notes. At most 8 draws, then the edit
+    /// is refused (SM7 L-2); a generator failure also refuses it (L-1).
+    fn fresh_id(&self) -> Result<String, String> {
+        let used = |id: &str| self.source_notes.iter().chain(self.plan.iter().map(|spec| &spec.notes)).chain(self.undo.iter().chain(self.redo.iter()).flat_map(|plan| plan.iter().map(|spec| &spec.notes))).flatten().any(|note| note.id == id);
+        for _ in 0..8 { let id = crate::comments::new_id()?; if !used(&id) { return Ok(id); } }
+        Err("No unused annotation ID could be made. Nothing was changed.".into())
     }
     fn notes_changed(&self, plan: &[PageSpec]) -> bool {
         plan.iter().any(|spec| self.source_notes.get(spec.source) != Some(&spec.notes))

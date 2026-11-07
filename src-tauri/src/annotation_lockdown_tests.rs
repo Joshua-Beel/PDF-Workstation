@@ -173,7 +173,8 @@ fn pdfium_with_a_form_handle_runs_no_action_and_starts_no_process() {
     use std::os::windows::process::CommandExt;
     let status = crate::child_job::test_status(std::process::Command::new("cmd.exe").raw_arg(&command_line(&marker))).unwrap();
     assert!(status.success());
-    assert_eq!(job.total_processes(), 2, "control: a started process is counted");
+    // cmd.exe may bring a conhost.exe with it, which the job also counts, so the control needs at least one more.
+    assert!(job.total_processes() >= 2, "control: a started process is counted (total {})", job.total_processes());
     assert!(marker.exists(), "control: the Launch command line writes its marker");
     drop(folder);
     println!("annotation-lockdown-ok");

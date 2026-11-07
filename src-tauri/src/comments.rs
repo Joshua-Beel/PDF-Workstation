@@ -84,8 +84,7 @@ pub fn validate_plan(plan: &[PageSpec]) -> Result<(), String> {
             if note.kind != AnnotationKind::Highlight || highlight_union(quads)? != note.rect { return Err("The annotation has invalid text-highlight quadrilaterals.".into()); }
         }
         match note.kind { AnnotationKind::Note => validate_text(&note.contents)?, AnnotationKind::Highlight => { if highlight_contents(Some(&note.contents))? != note.contents { return Err("The highlight has a noncanonical empty body.".into()); } } }
-        number(&note.id)?;
-        if note.id.starts_with(PREFIX) != (note.kind == AnnotationKind::Note) { return Err("The annotation ID does not match its kind.".into()); }
+        id_matches_kind(&note.id, note.kind)?;
         if !ids.insert(&note.id) { return Err("The PDF contains duplicate note IDs. Commenting is unavailable.".into()); }
         count += 1; total += note.contents.len();
         slots += note.quads.as_ref().map_or(1, Vec::len);
@@ -101,8 +100,52 @@ pub fn number(id: &str) -> Result<u64, String> {
     if value == 0 || suffix != value.to_string() { return Err("The PDF has an invalid note ID.".into()); }
     Ok(value)
 }
+/// The numbered IDs of 0.3.x and slice 1c; the app no longer creates them, but tests build legacy files with them.
+#[cfg(test)]
 pub fn id(value: u64) -> String { format!("{PREFIX}{value}") }
+#[cfg(test)]
 pub fn highlight_id(value: u64) -> String { format!("{HIGHLIGHT_PREFIX}{value}") }
+
+/// Whether `id` is a random UUID (version 4, lowercase, dashed), the `/NM` form the app writes since P2-4
+/// part two, as Acrobat does.
+/// The one implementation lives in the recovery journal, which the standalone journal test also compiles.
+pub fn is_uuid(id: &str) -> bool { crate::recovery_journal::annotation_uuid(id) }
+
+/// An app annotation ID: a random UUID (new) or the numbered `pdf-workstation-note-N` /
+/// `pdf-workstation-highlight-N` form of 0.3.x and slice 1c, whose prefix must match the kind.
+pub fn id_matches_kind(id: &str, kind: AnnotationKind) -> Result<(), String> {
+    if is_uuid(id) { return Ok(()); }
+    number(id)?;
+    if id.starts_with(PREFIX) != (kind == AnnotationKind::Note) { return Err("The annotation ID does not match its kind.".into()); }
+    Ok(())
+}
+
+/// A new random UUID (version 4) for a new annotation's `/NM`, from the operating system's CSPRNG. Never
+/// derived from the machine, the user or the time (SM7 E3). A generator failure is an error, never a panic:
+/// the PDF worker serves every open document and has no unwind guard (SM7 L-1 on 684b33e).
+pub fn new_id() -> Result<String, String> {
+    let mut random = [0u8; 16];
+    #[cfg(test)]
+    if FAIL_RANDOM.with(std::cell::Cell::get) { return Err(RANDOM_FAILED.into()); }
+    fill_random(&mut random)?;
+    random[6] = (random[6] & 0x0f) | 0x40; random[8] = (random[8] & 0x3f) | 0x80;
+    let hex = random.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    Ok(format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32]))
+}
+#[cfg(test)]
+thread_local! { pub(crate) static FAIL_RANDOM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+const RANDOM_FAILED: &str = "The system random number generator failed, so no annotation ID could be made. Nothing was changed.";
+#[cfg(windows)]
+fn fill_random(buffer: &mut [u8]) -> Result<(), String> {
+    use windows::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
+    let status = unsafe { BCryptGenRandom(None, buffer, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+    if status.is_ok() { Ok(()) } else { Err(RANDOM_FAILED.into()) }
+}
+#[cfg(not(windows))]
+fn fill_random(buffer: &mut [u8]) -> Result<(), String> {
+    use std::io::Read;
+    std::fs::File::open("/dev/urandom").and_then(|mut file| file.read_exact(buffer)).map_err(|_| RANDOM_FAILED.to_owned())
+}
 /// QuadPoints in the order Acrobat writes and PDFium's appearance generator reads: top-left, top-right,
 /// bottom-left, bottom-right (measured on 204 real markup quads, 0 in any other order).
 fn quad(bounds: CropBox) -> Vec<f32> { vec![bounds.left, bounds.top, bounds.right, bounds.top, bounds.left, bounds.bottom, bounds.right, bounds.bottom] }
@@ -261,8 +304,8 @@ fn app_note(document: &Document, page_id: ObjectId, annotation: &Dictionary) -> 
                 let mut quads = if kind == AnnotationKind::Highlight { Some(read_quads(annotation.get(b"QuadPoints").map_err(|error| error.to_string())?, bounds)?) } else { None };
                 let id_bytes = annotation.get(b"NM").and_then(Object::as_str).map_err(|error| error.to_string())?;
                 if id_bytes.len() > HIGHLIGHT_PREFIX.len() + 20 { return Err("The PDF has an invalid note ID.".into()); }
-                let note_id = std::str::from_utf8(id_bytes).map_err(|_| "The PDF has an invalid note ID.")?.to_owned(); number(&note_id)?;
-                if note_id.starts_with(PREFIX) != (kind == AnnotationKind::Note) { return Err("The PDF has an annotation ID with the wrong kind.".into()); }
+                let note_id = std::str::from_utf8(id_bytes).map_err(|_| "The PDF has an invalid note ID.")?.to_owned();
+                id_matches_kind(&note_id, kind)?;
                 let contents = match (kind, annotation.get(b"Contents")) { (AnnotationKind::Highlight, Err(_)) => String::new(), (_, Ok(contents)) => decode_text(contents)?, _ => return Err("The note has no contents.".into()) };
                 if kind == AnnotationKind::Note { validate_text(&contents)?; } else if annotation.has(b"Contents") && (contents.is_empty() || highlight_contents(Some(&contents))? != contents) { return Err("The PDF has a noncanonical empty highlight body.".into()); }
                 let ap = annotation.get(b"AP").and_then(Object::as_dict).map_err(|_| "The PDF has unsupported note appearances.")?; keys(ap, &[b"N"])?;
@@ -438,6 +481,29 @@ mod tests {
     use crate::editor::{EditSession, PageEdit};
     fn sample() -> Vec<u8> { std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/welcome.pdf")).unwrap() }
     #[test]
+    fn new_annotation_ids_are_random_uuids_and_numbered_ids_still_read() {
+        let ids: HashSet<String> = (0..1_000).map(|_| new_id().unwrap()).collect();
+        assert_eq!(ids.len(), 1_000);
+        assert!(ids.iter().all(|id| is_uuid(id) && crate::recovery_journal::annotation_uuid(id)));
+        for (value, uuid) in [("5c1f0a52-1b7e-4c33-8a2b-0123456789ab", true), ("5C1F0A52-1B7E-4C33-8A2B-0123456789AB", false), ("5c1f0a52-1b7e-1c33-8a2b-0123456789ab", false), ("5c1f0a52-1b7e-4c33-7a2b-0123456789ab", false), ("5c1f0a521b7e4c338a2b0123456789ab", false), ("", false)] {
+            assert_eq!(is_uuid(value), uuid, "{value}"); assert_eq!(crate::recovery_journal::annotation_uuid(value), uuid, "the journal's copy agrees: {value}");
+        }
+        assert!(id_matches_kind(&new_id().unwrap(), AnnotationKind::Note).is_ok() && id_matches_kind(&new_id().unwrap(), AnnotationKind::Highlight).is_ok());
+        assert!(id_matches_kind(&id(3), AnnotationKind::Note).is_ok() && id_matches_kind(&id(3), AnnotationKind::Highlight).is_err(), "a numbered ID still carries its kind");
+        // A new note is written with its UUID as /NM and reads back editable; a numbered 0.3.x note keeps its ID.
+        let mut session = EditSession::new(sample(), 6);
+        let next = session.proposed_comment(Some((0, CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 })), None, Some("Random")).unwrap(); session.commit_comments(next);
+        let fresh = session.plan[0].notes[0].id.clone(); assert!(is_uuid(&fresh));
+        let output = Document::load_mem(&session.export(None).unwrap()).unwrap();
+        assert_eq!(read(&output).unwrap()[0][0].id, fresh);
+        let mut legacy = output.clone();
+        let annotation = legacy.get_dictionary(legacy.get_pages()[&1]).unwrap().get(b"Annots").unwrap().as_array().unwrap()[0].as_reference().unwrap();
+        legacy.get_dictionary_mut(annotation).unwrap().set("NM", Object::string_literal(id(7)));
+        assert_eq!(read(&legacy).unwrap()[0][0].id, id(7));
+        legacy.get_dictionary_mut(annotation).unwrap().set("NM", Object::string_literal(highlight_id(7)));
+        assert!(preserved(&legacy, annotation), "a numbered ID of the wrong kind makes the note foreign");
+    }
+    #[test]
     fn pdf_dates_are_utc_civil_dates_in_the_app_form() {
         assert_eq!(pdf_date(0), "D:19700101000000Z");
         assert_eq!(pdf_date(951_782_400), "D:20000229000000Z", "leap day in a century leap year");
@@ -518,6 +584,27 @@ mod tests {
         }
         assert!(encode_recovery(&record(annotation(Some("not a date")))).is_err());
         assert!(encode_recovery(&record(annotation(Some("D:20250230000000Z")))).is_err(), "no February 30th");
+        // SM7 L-1: a generator failure refuses the edit and leaves the session as it was; nothing panics.
+        let mut session = EditSession::new(sample(), 6);
+        let before = session.plan.clone();
+        FAIL_RANDOM.with(|fail| fail.set(true));
+        let refused = session.proposed_comment(Some((0, CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 })), None, Some("x"));
+        let refused_highlight = session.proposed_text_highlight(0, vec![CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 }], None);
+        FAIL_RANDOM.with(|fail| fail.set(false));
+        assert!(refused.unwrap_err().contains("random number generator") && refused_highlight.unwrap_err().contains("random number generator"));
+        assert_eq!(session.plan, before);
+        let next = session.proposed_comment(Some((0, CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 })), None, Some("x")).unwrap(); session.commit_comments(next);
+        // SM7 M-1: a dateless note with a UUID ID is unreadable by 0.3.x too, so it is version 3; restamped as 2, refused.
+        let mut uuid_note = annotation(None); uuid_note.id = new_id().unwrap();
+        let original = record(uuid_note);
+        let bytes = encode_recovery(&original).unwrap();
+        assert_eq!(u16::from_le_bytes([bytes[8], bytes[9]]), 3);
+        assert_eq!(decode_recovery(&bytes, original.source, None, 0).unwrap(), original);
+        for older in [1u16, 2] {
+            let mut restamped = bytes.clone(); restamped[8..10].copy_from_slice(&older.to_le_bytes());
+            let body = restamped.len() - 32; let digest = <sha2::Sha256 as sha2::Digest>::digest(&restamped[..body]); restamped[body..].copy_from_slice(&digest);
+            assert!(decode_recovery(&restamped, original.source, None, 0).unwrap_err().contains("does not match its contents"), "version {older}");
+        }
     }
     #[test]
     fn quads_are_written_in_acrobat_order_and_both_orders_read_back() {
@@ -591,7 +678,7 @@ mod tests {
         let bytes = session.export(None).unwrap(); let mut output = Document::load_mem(&bytes).unwrap(); assert_eq!(read(&output).unwrap()[0], saved[0].notes);
         let page = output.get_pages()[&1]; let original = output.get_dictionary(page).unwrap().get(b"Annots").unwrap().as_array().unwrap()[0].as_reference().unwrap();
         let mut duplicate = output.get_dictionary(original).unwrap().clone(); duplicate.set("NM", Object::string_literal(highlight_id(999))); let duplicate = output.add_object(duplicate); output.get_dictionary_mut(page).unwrap().get_mut(b"Annots").unwrap().as_array_mut().unwrap().push(Object::Reference(duplicate)); assert!(preserved(&output, original) && preserved(&output, duplicate), "two annotations sharing one appearance are both kept as foreign, so they cannot push the app past its limits");
-        session.apply(PageEdit::Undo).unwrap(); assert!(session.dirty()); let next = session.proposed_text_highlight(0, vec![bounds], None).unwrap(); session.commit_comments(next); assert!(!session.can_redo()); assert!(number(&session.plan[0].notes.last().unwrap().id).unwrap() > number(&saved[0].notes.last().unwrap().id).unwrap()); session.apply(PageEdit::Undo).unwrap(); session.apply(PageEdit::Redo).unwrap(); assert!(validate_plan(&session.plan).is_ok()); assert_eq!(session.source, source);
+        session.apply(PageEdit::Undo).unwrap(); assert!(session.dirty()); let next = session.proposed_text_highlight(0, vec![bounds], None).unwrap(); session.commit_comments(next); assert!(!session.can_redo()); assert!(is_uuid(&session.plan[0].notes.last().unwrap().id) && session.plan[0].notes.last().unwrap().id != saved[0].notes.last().unwrap().id); session.apply(PageEdit::Undo).unwrap(); session.apply(PageEdit::Redo).unwrap(); assert!(validate_plan(&session.plan).is_ok()); assert_eq!(session.source, source);
     }
     /// The annotation object `id` is not editable, and adding a note on its page keeps it byte for byte
     /// (same object, same place among the page's other `/Annots` entries).
@@ -737,7 +824,7 @@ mod tests {
         let next = session.proposed_highlight(Some((0, bounds)), None, Some(" \n\t"), false).unwrap(); session.commit_comments(next); let first = session.plan[0].notes[0].id.clone(); assert!(session.plan[0].notes[0].contents.is_empty());
         let revision = session.revision; let next = session.proposed_highlight(None, Some(&first), None, false).unwrap(); session.commit_comments(next); assert_eq!(session.revision, revision);
         assert!(session.proposed_comment(None, Some(&first), Some("Wrong kind")).is_err()); assert!(session.proposed_comment(None, Some(&first), None).is_err());
-        session.apply(PageEdit::Undo).unwrap(); let next = session.proposed_comment(Some((0, bounds)), None, Some("Note")).unwrap(); session.commit_comments(next); let note = session.plan[0].notes[0].id.clone(); assert!(number(&note).unwrap() > number(&first).unwrap()); assert!(!session.can_redo()); assert!(session.proposed_highlight(None, Some(&note), None, true).is_err());
+        session.apply(PageEdit::Undo).unwrap(); let next = session.proposed_comment(Some((0, bounds)), None, Some("Note")).unwrap(); session.commit_comments(next); let note = session.plan[0].notes[0].id.clone(); assert!(is_uuid(&note) && note != first); assert!(!session.can_redo()); assert!(session.proposed_highlight(None, Some(&note), None, true).is_err());
         let next = session.proposed_highlight(Some((0, bounds)), None, None, false).unwrap(); session.commit_comments(next); let highlight = session.plan[0].notes[1].id.clone(); session.mark_saved();
         let next = session.proposed_highlight(None, Some(&highlight), Some("Body é 😀"), false).unwrap(); session.commit_comments(next); assert!(session.dirty()); session.apply(PageEdit::Undo).unwrap(); assert!(!session.dirty()); session.apply(PageEdit::Redo).unwrap(); assert!(session.dirty());
         assert!(highlight_contents(Some("\0")).is_err()); assert!(highlight_contents(Some(&"x".repeat(MAX_TEXT_BYTES + 1))).is_err());
