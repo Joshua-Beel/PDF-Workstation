@@ -2,6 +2,24 @@
 
 The full change log, newest first, moved verbatim from the README's "Recent changes" section (only relative link paths were adjusted for this folder); the [README](../README.md#recent-changes) keeps one-line summaries of the newest entries.
 
+- Fix for E2's first CI run, 42420860419, which was red on `3db311f` (SM3; branch `sm3/annot-p2-5`; `src-tauri/src/qpdf_check.rs`, `scripts/setup-qpdf.test.ts`; tests only).
+  - **What failed:** qpdf started under the isolated spawn and exited with its own code 2: `qpdf: open \\app-annotations.pdf: No such file or directory`. So the fetch, the verification, the System32 VC++ runtime and the mitigations all worked.
+  - **Cause, reproduced locally** with the pinned qpdf 12.4.2 from a fresh verified fetch under the E: tmp folder, on the synthetic fixture only:
+    - `qpdf --json=2 --json-key=qpdf <plain path>` succeeds.
+    - The same file given as the `\\?\E:\...` form that `std::fs::canonicalize` returns fails with exactly that message.
+    - So qpdf's own path handling cannot read verbatim paths.
+    - `child_job::command_line`'s quoting is correct (CommandLineToArgvW rules), so nothing in `child_job` changes.
+  - **Fix:**
+    - The canonical fixture and program checks stay.
+    - New `plain_path` removes the `\\?\` prefix only when the rest is an `X:\` drive path. It refuses UNC, device, volume-GUID, relative and drive-relative forms.
+    - qpdf's program path, its arguments and its working directory are all plain paths. `qpdf_command_line` builds the exact command line.
+  - **Tests:**
+    - `plain_path` accepts and refuses the right forms.
+    - The exact command line qpdf receives for the real canonical fixture is `"Q:\qpdf 12\bin\qpdf.exe" "--json=2" "--json-key=qpdf" "<plain fixture path>"`, with no `?`.
+    - `qpdf_check` + `child_job` 29 passed, 1 ignored.
+    - **E2 run locally against the real pinned qpdf:** `cargo test --bins annotations::qpdf_check::tests::qpdf_reads_the_interchange_fixtures_when_provided -- --ignored --exact` gives `1 passed; 0 failed; 0 ignored`, both fixtures.
+  - **Code-review P3:** the 8.3 `inside()` test now finds a short name with cmd's `%~sI`, because Scripting.FileSystemObject returned nothing on the runner. It tries Program Files, then TEMP (`RUNNER~1` on the runner), then the user profile. When `CI` is set it fails instead of skipping.
+  - Vitest: `setup-qpdf.test.ts` plus `ci-workflow.test.ts` 18 passed; the 8.3 test also passed with `CI=true`.
 - Fix for master CI run 42418348329, which was red on `f6cbe5f` (SM3; branch `sm3/annot-p2-5`; `scripts/setup-qpdf.test.ts`; tests only).
   - **What failed:** the test "needs an explicit work root outside CI and refuses C: there". Its zip-cache assertion expected `zip cache` in stderr and got the work-root refusal instead.
   - **Cause:** the hosted runner's TEMP is on C:, so the scratch work root was on C:. With `CI` cleared, the script's work-root C: check runs before the zip-cache check and fired first. Locally TEMP is on E:, so the work-root check passed.

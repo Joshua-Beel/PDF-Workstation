@@ -194,9 +194,31 @@ pub(crate) fn qpdf_environment(temp: &Path) -> Result<Vec<u16>, QpdfError> {
     Ok(block)
 }
 
+/// qpdf reads a verbatim `\\?\X:\...` path (what `canonicalize` returns) as `\\<file name>` and cannot open it,
+/// as the first CI run of E2 showed. So qpdf is given plain drive paths: the `\\?\` prefix is removed only when
+/// the rest is an `X:\` drive path, and any other form (UNC, device, relative) is refused.
+pub(crate) fn plain_path(path: &Path) -> Result<PathBuf, QpdfError> {
+    let text = path.to_str().ok_or_else(|| QpdfError::Refused(format!("{} is not valid Unicode", path.display())))?;
+    let plain = text.strip_prefix(r"\\?\").unwrap_or(text);
+    let bytes = plain.as_bytes();
+    if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' || bytes[2] != b'\\' || plain.contains(r"\\") {
+        return Err(QpdfError::Refused(format!("{} is not a plain drive path", path.display())));
+    }
+    Ok(PathBuf::from(plain))
+}
+
+/// The exact command line qpdf receives: plain drive paths and the fixed arguments, quoted by `child_job`.
+pub(crate) fn qpdf_command_line(qpdf: &Path, pdf: &Path) -> Result<Vec<u16>, QpdfError> {
+    let arguments = qpdf_arguments(&plain_path(qpdf)?, &plain_path(pdf)?);
+    let arguments = arguments.iter().map(|argument| argument.as_os_str()).collect::<Vec<_>>();
+    child_job::command_line(&arguments).map_err(|_| QpdfError::Refused("a path contains a NUL character".into()))
+}
+
 fn run_pinned(qpdf: &Path, pdf: &Path, pinned: &BTreeMap<String, String>) -> Result<Vec<u8>, QpdfError> {
     let _held = verify_and_hold(qpdf, pinned)?;
-    let directory = fixtures_root()?;
+    let directory = plain_path(&fixtures_root()?)?;
+    let application = plain_path(qpdf)?;
+    let command_line = qpdf_command_line(qpdf, pdf)?;
     let temp = tempfile::Builder::new().prefix("sm3-qpdf-child-").tempdir().map_err(|error| QpdfError::System(format!("qpdf temporary folder: {error}")))?;
     let environment = qpdf_environment(temp.path())?;
     let suspended = child_job::spawn_suspended_isolated::<QpdfError>(
@@ -205,11 +227,9 @@ fn run_pinned(qpdf: &Path, pdf: &Path, pinned: &BTreeMap<String, String>) -> Res
         &environment,
         || {
             let null = |_: child_job::ContainsNul| QpdfError::Refused("a path contains a NUL character".into());
-            let arguments = qpdf_arguments(qpdf, pdf);
-            let arguments = arguments.iter().map(|argument| argument.as_os_str()).collect::<Vec<_>>();
             Ok(ChildCommand {
-                application: child_job::wide_null(qpdf.as_os_str()).map_err(null)?,
-                command_line: child_job::command_line(&arguments).map_err(null)?,
+                application: child_job::wide_null(application.as_os_str()).map_err(null)?,
+                command_line,
                 current_directory: child_job::wide_null(directory.as_os_str()).map_err(null)?,
             })
         },
@@ -428,6 +448,27 @@ mod tests {
         let plain = child_job::spawn_suspended::<QpdfError>("qpdf mitigation control", &limits, command, || Ok(())).unwrap();
         let flags = image_load_policy(plain);
         assert_eq!(flags & PREFER_SYSTEM32_IMAGES, 0, "spawn_suspended is unchanged: {flags:#x}");
+    }
+
+    #[test]
+    fn qpdf_gets_plain_drive_paths_never_verbatim_ones() {
+        assert_eq!(plain_path(Path::new(r"\\?\D:\a\fixtures\x.pdf")).unwrap(), PathBuf::from(r"D:\a\fixtures\x.pdf"));
+        assert_eq!(plain_path(Path::new(r"E:\x.pdf")).unwrap(), PathBuf::from(r"E:\x.pdf"));
+        for refused in [r"\\?\UNC\server\share\x.pdf", r"\\server\share\x.pdf", r"\\.\pipe\x", "x.pdf", r"\\?\Volume{0}\x.pdf", "D:x.pdf"] {
+            assert!(matches!(plain_path(Path::new(refused)), Err(QpdfError::Refused(_))), "{refused}");
+        }
+    }
+
+    #[test]
+    fn the_exact_command_line_qpdf_receives() {
+        let pdf = checked_fixture(&fixture("app-annotations.pdf")).unwrap();
+        assert!(pdf.to_str().unwrap().starts_with(r"\\?\"), "canonicalize gives a verbatim path: {}", pdf.display());
+        let plain = plain_path(&pdf).unwrap();
+        let line = qpdf_command_line(Path::new(r"\\?\Q:\qpdf 12\bin\qpdf.exe"), &pdf).unwrap();
+        assert_eq!(line.last(), Some(&0));
+        let text = String::from_utf16(&line[..line.len() - 1]).unwrap();
+        assert_eq!(text, format!(r#""Q:\qpdf 12\bin\qpdf.exe" "--json=2" "--json-key=qpdf" "{}""#, plain.display()));
+        assert!(!text.contains('?'), "{text}");
     }
 
     #[test]
