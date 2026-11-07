@@ -16,6 +16,7 @@ mod text_edit;
 mod text_edit_commands;
 mod split;
 mod combine;
+mod annotations;
 mod comments;
 mod forms;
 mod page_labels;

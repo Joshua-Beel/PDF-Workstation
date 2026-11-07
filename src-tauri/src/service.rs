@@ -1172,8 +1172,19 @@ impl PdfService {
                         let result = (|| {
                             let session = &sessions.get(&id).ok_or("Document is closed")?.0;
                             if session.revision != revision { return Err("Document changed. Refresh annotations.".into()); }
-                            let mut result = crate::comments::AnnotationList { document_id: id, revision, status: "supported", reason: None, annotations: Vec::new() };
-                            if let Some(reason) = session.comments_reason() { result.status = "unsupported"; result.reason = Some(reason.to_owned()); return Ok(result); }
+                            let mut result = crate::comments::AnnotationList { document_id: id, revision, status: "supported", reason: None, annotations: Vec::new(), view_only: Vec::new(), view_only_truncated: 0 };
+                            if let Some(reason) = session.comments_reason() {
+                                result.status = "unsupported"; result.reason = Some(reason.to_owned());
+                                if let Some(survey) = session.view_only_annotations() {
+                                    result.view_only_truncated = survey.truncated;
+                                    for (index, spec) in session.plan.iter().enumerate() {
+                                        for annotation in survey.pages.get(spec.source).into_iter().flatten() {
+                                            result.view_only.push(crate::comments::ViewOnlyInfo { page: index, annotation: annotation.clone() });
+                                        }
+                                    }
+                                }
+                                return Ok(result);
+                            }
                             let document = documents.get(&id).ok_or("Document is closed")?;
                             for (index, spec) in session.plan.iter().enumerate() {
                                 for note in &spec.notes {
