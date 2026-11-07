@@ -118,7 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
-- Sticky notes are saved with an Acrobat-style closed popup at the page's right edge, and the app keeps editing them as one unit (SM3, source build).
+- Sticky notes are saved with an Acrobat-style closed popup at the page's right edge, and the app keeps editing them as one unit; a page without a valid MediaBox refuses the save (SM3, source build).
 - Your comments and highlights now carry Acrobat-style creation and modification dates (UTC) and a subject ("Sticky Note", "Highlight"), and new ones get random Acrobat-style IDs; no author name is written yet; older files still open (SM3, source build).
 - Tests: the annotation census now splits structure refusals by type, and the shared-annotation and forms-hardening timing tests compare against a baseline measured in the same run instead of fixed budgets, with absolute ceilings and per-test totals (SM3; tests only).
 - PDFs with other apps' annotations or links can now take your comments: their annotations are kept in place and order on save and listed view only; page delete and extract on such files stay refused (SM3, source build).

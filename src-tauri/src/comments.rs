@@ -468,7 +468,10 @@ fn collect_references(value: &Object, owned: &HashSet<ObjectId>, found: &mut Has
 fn new_annotation(document: &mut Document, page_id: ObjectId, note: &Note) -> Result<Vec<Object>, String> {
     let id = document.new_object_id();
     let popup = if note.kind == AnnotationKind::Note {
-        let area = popup_rect(note.rect, media_box(document, page_id)?);
+        // Fails closed (SM7 L-1 on 8bb61c3): without a valid MediaBox the reader would not accept the note as
+        // the app's own either, so writing it without a popup would gain nothing.
+        let media = media_box(document, page_id).map_err(|_| "This page has no valid MediaBox, so the sticky note's popup cannot be placed. Nothing was saved.".to_owned())?;
+        let area = popup_rect(note.rect, media);
         Some(document.add_object(dictionary! { "Type" => "Annot", "Subtype" => "Popup", "Parent" => id, "Rect" => vec![Object::Real(area.left), Object::Real(area.bottom), Object::Real(area.right), Object::Real(area.top)], "Open" => false, "F" => 28 }))
     } else { None };
     let content = match &note.quads { Some(quads) => text_appearance(note.rect, quads), None => appearance(note.rect, note.kind) };
@@ -532,6 +535,32 @@ mod tests {
     use super::*;
     use crate::editor::{EditSession, PageEdit};
     fn sample() -> Vec<u8> { std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/welcome.pdf")).unwrap() }
+    /// A one-page PDF with the given MediaBox.
+    fn page_with_media_box(media: [f32; 4]) -> Vec<u8> {
+        let mut document = Document::with_version("1.7");
+        let pages = document.new_object_id();
+        let contents = document.add_object(Stream::new(dictionary! {}, Vec::new()));
+        let page = document.add_object(dictionary! { "Type" => "Page", "Parent" => pages, "MediaBox" => media.iter().map(|value| Object::Real(*value)).collect::<Vec<_>>(), "Contents" => contents, "Resources" => dictionary! {} });
+        document.objects.insert(pages, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }));
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+        let mut bytes = Vec::new(); document.save_to(&mut bytes).unwrap(); bytes
+    }
+    #[test]
+    fn popup_rectangles_round_trip_on_a_fractional_media_box() {
+        // A4 in points (595.276 x 841.89) with a fractional origin and a note at fractional coordinates: the popup
+        // rectangle computed from the MediaBox must survive save and reload exactly, or the note would turn foreign.
+        for media in [[0.0, 0.0, 595.276, 841.89], [12.345, 6.789, 607.621, 848.679], [0.0, 0.0, 150.5, 99.25]] {
+            let mut session = EditSession::new(page_with_media_box(media), 1);
+            let rect = CropBox { left: media[0] + 10.125, bottom: media[1] + 20.333, right: media[0] + 31.75, top: media[1] + 41.9 };
+            let next = session.proposed_comment(Some((0, rect)), None, Some("Fractional")).unwrap(); session.commit_comments(next);
+            let saved = session.export(None).unwrap();
+            let owned = read_owned(&Document::load_mem(&saved).unwrap()).unwrap();
+            assert_eq!((owned.app.len(), owned.popups.len(), owned.foreign), (1, 1, 0), "MediaBox {media:?}");
+            let reopened = read_owned(&Document::load_mem(&EditSession::new(saved, 1).export(None).unwrap()).unwrap()).unwrap();
+            assert_eq!(reopened.popups.len(), 1, "a second save keeps the pair intact: {media:?}");
+        }
+    }
     #[test]
     fn a_sticky_note_and_its_acrobat_style_popup_are_one_editable_unit() {
         let mut session = EditSession::new(sample(), 6);
