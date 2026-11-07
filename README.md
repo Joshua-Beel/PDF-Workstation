@@ -118,7 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
-- Tests: the annotation census now splits structure refusals by type, and the shared-annotation and forms-hardening timing tests compare against a baseline measured in the same run instead of fixed budgets (SM3; tests only).
+- Tests: the annotation census now splits structure refusals by type, and the shared-annotation and forms-hardening timing tests compare against a baseline measured in the same run instead of fixed budgets, with absolute ceilings and per-test totals (SM3; tests only).
 - PDFs with other apps' annotations or links can now take your comments: their annotations are kept in place and order on save and listed view only; page delete and extract on such files stay refused (SM3, source build).
 - Highlights are saved with their corners in the order Acrobat and PDFium use, so readers that rebuild a highlight's appearance no longer draw it blank; older files still open. Comments lists other apps' annotations as view only, bounded against huge or shared strings and arrays (SM3, source build).
 - Tests: the bundled PDFium is checked as the non-V8, non-XFA build, and a file full of Launch, URI and JavaScript actions starts no process when loaded, rendered or printed with a form handle; a highlight probe and a read-only annotation census (SM3; tests only).

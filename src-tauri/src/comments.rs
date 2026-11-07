@@ -531,8 +531,11 @@ mod tests {
         let (base, _) = timed_open_and_write(&baseline, PAGES);
         let (times, written) = timed_open_and_write(&document, PAGES);
         println!("100,000 pages: empty /Annots each {base:?}; one shared 65,536-entry /Annots {times:?} (read_owned, open, write)");
+        // An absolute ceiling as well, so a regression that slows the baseline too fails instead of hanging CI.
+        let ceiling = std::time::Duration::from_secs(if cfg!(debug_assertions) { 300 } else { 60 });
         for (step, (shared, base)) in ["read_owned", "open", "write"].iter().zip(times.iter().zip(base.iter())) {
             assert!(*shared < *base * 10 + std::time::Duration::from_millis(200), "{step}: {shared:?} against a baseline of {base:?}");
+            assert!(*shared < ceiling && *base < ceiling, "{step}: {shared:?} (baseline {base:?}) is over the {ceiling:?} ceiling");
         }
         assert!(matches!(written.get_dictionary(written.get_pages()[&2]).unwrap().get(b"Annots").unwrap(), Object::Reference(_)), "other pages keep the shared array");
         assert_eq!(page_annots(&written, written.get_pages()[&1]).unwrap().unwrap().1.len(), 65_537);
