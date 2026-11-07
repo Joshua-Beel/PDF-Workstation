@@ -483,10 +483,6 @@ mod tests {
         // Compared through Debug so a NaN value (not equal to itself) still counts as unchanged.
         written.get_object(id).ok().map(|object| format!("{object:?}")) == Some(format!("{before:?}")) && entries(&written).iter().position(|entry| entry == &Object::Reference(id)) == Some(position)
     }
-    /// 1 s in a release build (`cargo test --release`); 20 s in the unoptimised test build, which runs this
-    /// 165,000-object fixture about 10 times slower. Either way it catches the per-page rescan SM7 measured.
-    const BUDGET: std::time::Duration = std::time::Duration::from_secs(if cfg!(debug_assertions) { 20 } else { 1 });
-
     /// `pages` pages, each with `/Annots` taken from `annots(page_index)`.
     fn many_pages(pages: usize, mut annots: impl FnMut(&mut Document, usize) -> Object, extra: impl FnOnce(&mut Document)) -> Document {
         let mut document = Document::with_version("1.7");
@@ -499,32 +495,45 @@ mod tests {
         document
     }
 
+    /// Times `read_owned`, a session open (parse excluded) and a write that adds one note on the first page.
+    fn timed_open_and_write(document: &Document, pages: usize) -> ([std::time::Duration; 3], Document) {
+        let started = std::time::Instant::now();
+        read_owned(document).unwrap();
+        let read = started.elapsed();
+        let started = std::time::Instant::now();
+        let session = EditSession::opened(Vec::<u8>::new(), Ok(document.clone()), pages, None);
+        let open = started.elapsed();
+        assert!(session.comments_reason().is_none());
+        let mut plan: Vec<PageSpec> = (0..pages).map(|source| PageSpec { source, turns: 0, crop: None, notes: Vec::new() }).collect();
+        plan[0].notes.push(Note { id: id(1), rect: CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 }, contents: "added".into(), kind: AnnotationKind::Note, quads: None });
+        let mut written = document.clone();
+        let started = std::time::Instant::now();
+        write(&mut written, &plan).unwrap();
+        ([read, open, started.elapsed()], written)
+    }
+
+    /// The shared-array cost is compared with the same 100,000 pages carrying an empty `/Annots` each, timed
+    /// in the same run, so machine load and build profile cancel out. Reading the shared array once adds about
+    /// 65,536 entries of work (measured ratio about 1.5-3x). The per-page rescan SM7 found would be about
+    /// 65,536 times the baseline per page. The 10x limit fails on any per-page walk of the shared array,
+    /// whatever the machine.
     #[test]
     fn a_shared_annots_array_is_read_once_and_open_and_write_stay_fast() {
+        const PAGES: usize = 100_000;
+        let baseline = many_pages(PAGES, |_, _| Object::Array(Vec::new()), |_| {});
         let mut shared = None;
-        let document = many_pages(100_000, |document, _| {
+        let document = many_pages(PAGES, |document, _| {
             let id = *shared.get_or_insert_with(|| { let entries: Vec<Object> = (0..65_536).map(|_| document.add_object(dictionary! { "Type" => "Annot", "Subtype" => "Link", "Rect" => vec![0.into(), 0.into(), 1.into(), 1.into()] }).into()).collect(); document.add_object(Object::Array(entries)) });
             Object::Reference(id)
         }, |_| {});
-        let started = std::time::Instant::now();
         let owned = read_owned(&document).unwrap();
-        let read_time = started.elapsed();
         assert!(owned.app.is_empty() && owned.foreign == 65_536, "the shared array is walked once");
-        let started = std::time::Instant::now();
-        let session = EditSession::opened(Vec::<u8>::new(), Ok(document.clone()), 100_000, None);
-        let open_time = started.elapsed();
-        assert!(session.comments_reason().is_none());
-        let mut plan: Vec<PageSpec> = (0..100_000).map(|source| PageSpec { source, turns: 0, crop: None, notes: Vec::new() }).collect();
-        plan[0].notes.push(Note { id: id(1), rect: CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 }, contents: "added".into(), kind: AnnotationKind::Note, quads: None });
-        let mut written = document;
-        let started = std::time::Instant::now();
-        write(&mut written, &plan).unwrap();
-        let write_time = started.elapsed();
-        println!("100,000 pages sharing a 65,536-entry /Annots: read_owned {read_time:?}, session open (parse excluded) {open_time:?}, write {write_time:?}");
-        // Every step is linear in the 100,000 pages now (release, two runs: read 0.70-0.95 s, open 2.2-2.4 s
-        // including the survey and the 100,000-page plan, write 1.1-1.2 s); the per-page rescan SM7 measured
-        // would take minutes. Budgets: read and write 2x, open 4x the base budget.
-        for (elapsed, factor) in [(read_time, 2), (write_time, 2), (open_time, 4)] { assert!(elapsed < BUDGET * factor, "took {elapsed:?}"); }
+        let (base, _) = timed_open_and_write(&baseline, PAGES);
+        let (times, written) = timed_open_and_write(&document, PAGES);
+        println!("100,000 pages: empty /Annots each {base:?}; one shared 65,536-entry /Annots {times:?} (read_owned, open, write)");
+        for (step, (shared, base)) in ["read_owned", "open", "write"].iter().zip(times.iter().zip(base.iter())) {
+            assert!(*shared < *base * 10 + std::time::Duration::from_millis(200), "{step}: {shared:?} against a baseline of {base:?}");
+        }
         assert!(matches!(written.get_dictionary(written.get_pages()[&2]).unwrap().get(b"Annots").unwrap(), Object::Reference(_)), "other pages keep the shared array");
         assert_eq!(page_annots(&written, written.get_pages()[&1]).unwrap().unwrap().1.len(), 65_537);
     }

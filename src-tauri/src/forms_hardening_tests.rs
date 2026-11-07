@@ -21,6 +21,17 @@ fn refuse(bytes: &[u8], pages: usize, case: &str) -> String {
     assert_eq!(source.source, bytes, "{case} must leave the source untouched");
     query.reason.unwrap()
 }
+/// `refuse`, timed against a baseline measured in the same run: loading the same bytes with `pdf_load::load`,
+/// work that is linear in the input. A refusal must stay within 20 times that plus 2 s. The check targets a
+/// refusal that walks hierarchies, cycles or option lists without bound (seconds to minutes), and machine
+/// load and build profile hit both timings alike. The old fixed totals also timed fixture construction and
+/// failed under load (24.5 s alone against 30 s).
+fn refuse_scaled(bytes: &[u8], pages: usize, case: &str) -> String {
+    let started = Instant::now(); let _ = crate::pdf_load::load(bytes); let load = started.elapsed();
+    let started = Instant::now(); let reason = refuse(bytes, pages, case); let elapsed = started.elapsed();
+    assert!(elapsed < load * 20 + Duration::from_secs(2), "{case}: refusal took {elapsed:?}, loading the same bytes {load:?}");
+    reason
+}
 fn mutate(source: &[u8], change: impl FnOnce(&mut Document)) -> Vec<u8> { let mut doc = Document::load_mem(source).unwrap(); change(&mut doc); save(&mut doc) }
 fn all_text_patches(form: &FormDocument, value: &str) -> Vec<FieldValue> { form.fields.iter().map(|field| FieldValue::Text { field_id: field.dto.field_id.clone(), value: value.into() }).collect() }
 fn decoded_streams(bytes: &[u8]) -> Vec<Vec<u8>> {
@@ -100,7 +111,7 @@ fn forms_hardening_every_widget_and_annotation_is_accounted_for_or_the_form_is_r
 
 #[test]
 fn forms_hardening_hierarchies_inheritance_and_reference_cycles_refuse_without_hanging() {
-    let started = Instant::now();
+    let refuse = refuse_scaled;
     let deep = mutate(PLAIN, |doc| {
         let ids = roots(doc); let form = form_id(doc); let widget = ids[0];
         let mut child = widget; let mut root = widget;
@@ -120,7 +131,6 @@ fn forms_hardening_hierarchies_inheritance_and_reference_cycles_refuse_without_h
         let bytes = mutate(PLAIN, |doc| { let id = roots(doc)[0]; let a = doc.new_object_id(); let b = doc.new_object_id(); doc.objects.insert(a, Object::Reference(b)); doc.objects.insert(b, Object::Reference(a)); doc.get_dictionary_mut(id).unwrap().set(target, a); });
         refuse(&bytes, 1, case);
     }
-    assert!(started.elapsed() < Duration::from_secs(20), "hierarchy refusals took {:?}", started.elapsed());
     let form_da = mutate(PLAIN, |doc| { let id = roots(doc)[0]; let form = form_id(doc); let da = doc.get_dictionary_mut(id).unwrap().remove(b"DA").unwrap(); doc.get_dictionary_mut(form).unwrap().set("DA", da); });
     let parsed = parse(&form_da, 1).unwrap(); let patches = all_text_patches(&parsed, "AcroForm DA");
     let (output, _) = parsed.prepare(&patches).unwrap();
@@ -129,7 +139,7 @@ fn forms_hardening_hierarchies_inheritance_and_reference_cycles_refuse_without_h
 
 #[test]
 fn forms_hardening_oversized_options_values_names_and_appearances_refuse_quickly() {
-    let started = Instant::now();
+    let refuse = refuse_scaled;
     let huge = |count: usize| mutate(CHOICE, |doc| { let id = roots(doc)[0]; doc.get_dictionary_mut(id).unwrap().set("Opt", (0..count).map(|index| Object::string_literal(format!("Option {index}"))).collect::<Vec<_>>()); });
     refuse(&huge(100_000), 1, "100,000-entry /Opt");
     let indirect = mutate(CHOICE, |doc| { let id = roots(doc)[0]; let opts = doc.add_object((0..100_000).map(|index| Object::string_literal(format!("Option {index}"))).collect::<Vec<_>>()); doc.get_dictionary_mut(id).unwrap().set("Opt", opts); });
@@ -156,7 +166,6 @@ fn forms_hardening_oversized_options_values_names_and_appearances_refuse_quickly
     }
     refuse(&mutate(PLAIN, |doc| { let id = roots(doc)[0]; let ap = doc.add_object(dictionary! { "N" => dictionary! {} }); doc.get_dictionary_mut(id).unwrap().set("AP", ap); }), 1, "non-stream normal appearance");
     refuse(&mutate(PLAIN, |doc| { let id = roots(doc)[0]; let n = normal(doc); doc.get_dictionary_mut(id).unwrap().set("AP", dictionary! { "N" => n, "D" => n }); }), 1, "text field with a down appearance");
-    assert!(started.elapsed() < Duration::from_secs(30), "oversized refusals took {:?}", started.elapsed());
 }
 
 #[test]

@@ -2,6 +2,25 @@
 
 The full change log, newest first, moved verbatim from the README's "Recent changes" section (only relative link paths were adjusted for this folder); the [README](../README.md#recent-changes) keeps one-line summaries of the newest entries.
 
+- Test: forms-hardening wall-clock limits scale with the run (SM3; branch `sm3/annot-p2-0`; `forms_hardening_tests.rs` only). No product change.
+  - `forms_hardening_hierarchies_inheritance_and_reference_cycles_refuse_without_hanging` and `forms_hardening_oversized_options_values_names_and_appearances_refuse_quickly` failed on every loaded full run. The oversized test took 24.5 s alone against its 30 s total, and failed even beside the other forms tests alone. Both totals also included building the fixtures (a 100,000-entry `/Opt`, compressing a 64 MiB bomb).
+  - Each refusal is now timed on its own through `refuse_scaled`. It must finish within 20 times the time `pdf_load::load` takes on the same bytes, measured just before, plus 2 s. That is linear-in-input work under the same load and profile, so the check still catches an unbounded walk of hierarchies, cycles or option lists.
+  - The forms filter, run in parallel (load), passes 50 with 3 ignored.
+- Annotation interchange Phase 2, slice P2-0: census split and a load-proof timing test (SM3; branch `sm3/annot-p2-0` off `a3f76c4`; `annotation_lockdown_tests.rs`, `comments.rs` tests only). No product change.
+  - **Census split** (`annotation_census_real_files`, ignored, read-only, counts only).
+    - Each annotated file is now bucketed by its structure keys (`/AcroForm`, `/StructTreeRoot`, `/PageLabels`, `/Threads`): every combination is one bucket, each key is also counted on its own (overlapping), and both are crossed with producer family.
+    - It also counts Phase 2 editable candidates per subtype (the keys each editor needs, and whether `/RC` is present) and annotations carrying `/StructParent`.
+    - The verdict buckets now name the entry cap and a malformed `/Annots`.
+  - **Census results** on real work PDFs (4,590 files; 285 annotated; release build, 380 s):
+    - 79 have no structure and are commentable.
+    - The 206 refused files: tagged only 194; forms only 8; forms + tagged 2; forms + page labels 1; page labels only 1; threads 0. Overlapping: tagged 196, forms 11, page labels 2.
+    - Tagged files by producer: other 183, Adobe 10, Microsoft 1.
+    - Editable candidates: Ink 4,425; FreeText 55 (20 with `/RC`); Highlight 24; Line 11; Square 3; Polygon 2; Text 1 (with `/RC`).
+    - All 17,669 `/StructParent` keys are on Links.
+  - **Code-review P3 on 1c:** the absolute wall-clock budgets in `a_shared_annots_array_is_read_once_and_open_and_write_stay_fast` were tight; the reviewer's write took 1.60 s against a 2 s budget.
+    - The test now times the same 100,000 pages with an empty `/Annots` each, in the same run, and requires the shared-array case to stay under 10 times that baseline plus 200 ms for `read_owned`, open and write. Load and build profile cancel out, while a per-page walk of the shared array would be thousands of times the baseline.
+    - Release: baseline 0.57 s / 2.31 s / 0.92 s against shared 0.91 s / 3.10 s / 0.96 s (ratios 1.6, 1.3 and 1.0).
+    - The debug run was blocked for 20 minutes by another stream's test binary (LNK1104) and was not repeated.
 - Slice 1c review fixes (SM3; branch `sm3/annot-p1c`; `comments.rs`). Both reviews of `ba4fb9d` returned CHANGES: SM7 `_log/sm7-review-annot-p1c-ba4fb9d.md` (F1, F2, L-1) and the code review (F2 reproduced, plus a P3).
   - **F1:** `read_owned` walks each indirect `/Annots` array once, and borrows the array instead of cloning it. An array used by more than one page makes all its entries foreign.
     - A new document-wide cap of 262,144 entries (`annotations::MAX_ENTRIES_TOTAL`) fails closed. Commenting is refused with a reason, but the file still opens, displays and lists through the bounded survey.
