@@ -2928,6 +2928,7 @@ dependencies = [
  "base64 0.22.1",
  "image",
  "lopdf",
+ "md-5",
  "minisign-verify",
  "pdfium-render",
  "png 0.18.1",

@@ -114,6 +114,9 @@ pub struct EditSession {
     pub labels: crate::page_label_edit::LabelEdits,
     /// Whether the source names a page by number in any local destination; scanned once per session.
     page_numbers: std::sync::OnceLock<bool>,
+    /// Size of the file as opened from disk; `source` is the decrypted copy once the owner password lifted the security.
+    original_size: usize,
+    owner_unlocked: bool,
 }
 
 pub(crate) struct EditSessionSnapshot {
@@ -154,8 +157,18 @@ impl EditSession {
         };
         let next_note = source_notes.iter().flatten().filter_map(|note| crate::comments::number(&note.id).ok()).max().unwrap_or(0).saturating_add(1);
         let plan: Vec<_> = (0..count).map(|source| PageSpec { source, turns: 0, crop: None, notes: source_notes[source].clone() }).collect();
-        Self { source, source_page_count: count, saved: plan.clone(), plan, undo: VecDeque::new(), redo: VecDeque::new(), history_bytes: 0, history_budget: HISTORY_BUDGET, revision: 0, source_notes, comments_reason, text_extraction_permission, next_note, outline: Default::default(), labels: Default::default(), page_numbers: Default::default() }
+        let original_size = source.len();
+        Self { source, source_page_count: count, saved: plan.clone(), plan, undo: VecDeque::new(), redo: VecDeque::new(), history_bytes: 0, history_budget: HISTORY_BUDGET, revision: 0, source_notes, comments_reason, text_extraction_permission, next_note, outline: Default::default(), labels: Default::default(), page_numbers: Default::default(), original_size, owner_unlocked: false }
     }
+    /// Marks a session built from the decrypted copy a correct owner password produced. Its `source` no longer matches the file on disk.
+    pub(crate) fn mark_owner_unlocked(&mut self, original_size: usize) { self.original_size = original_size; self.owner_unlocked = true; }
+    pub(crate) fn owner_unlocked(&self) -> bool { self.owner_unlocked }
+    /// OCR rasterizes pages into a work folder in the temp directory (and large OCR journals them in app data), which would put
+    /// the decrypted pages on disk without the user choosing a destination. An unlocked copy saved by the user is an ordinary file.
+    pub(crate) fn unlocked_job_guard(&self) -> Result<(), String> {
+        if self.owner_unlocked { Err("Save an unlocked copy first, then OCR that copy: OCR of a document unlocked with the owner password would write its pages to temporary storage.".into()) } else { Ok(()) }
+    }
+    pub(crate) fn original_size(&self) -> usize { self.original_size }
     pub fn dirty(&self) -> bool { self.plan != self.saved }
     /// Unsaved page edits, bookmark edits or page-label edits. The last two are not part of the page plan or of recovery points.
     pub fn unsaved(&self) -> bool { self.dirty() || self.outline.changed() || self.labels.changed() }

@@ -24,7 +24,7 @@ Version 0.3.1 is the current published release (2026-10-27): publisher-signed in
 - Pages sidebar (source build): renders only nearby rows, with keyboard navigation.
 - Page labels (source build): PDF page labels beside physical page numbers. [Guide](docs/tools/page-labels.md)
 - Bookmarks (source build): up to 1,000 nested bookmarks with destination zoom; add, rename, delete, move, indent and outdent save into a new copy (not in recovery points; no installed-app check); scroll and zoom feel in the running app unverified.
-- Passwords (source build): open, retry or cancel; passwords aren't saved and encrypted PDFs stay read-only. Verified in the signed installed app on controlled fixtures.
+- Passwords (source build): open, retry or cancel; passwords aren't saved and encrypted PDFs stay read-only until Document properties > Security > "Unlock with owner password..." accepts the owner password (source build only; that action is not installed-app verified). Open, retry and cancel were verified in the signed installed app on controlled fixtures.
 - Document properties (source build): Ctrl+D shows metadata, sizes, permissions and signature count; signatures aren't validated.
 
 **[Text and search](docs/features.md#text-and-search)**
@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Unlock with the owner password (SM1, source build; `owner_unlock.rs`, `DocumentProperties.tsx`): checked natively for R2-R4 (RC4, AES-128) and R6 (AES-256); restrictions lift for the session and Save a Copy writes no /Encrypt.
 - New manual `updater-secret-check.yml` (`release` environment, master only): signs a throwaway file with the updater secrets as `release.yml` passes them and verifies it against `releaseSigningPublicKey`; uploads nothing (SM6). Not yet run on a hosted runner.
 - Print-dialog verifier: a later top-level pass no longer overwrites the last completed native-enumeration receipt before its rooted pass finishes, fixing the childless-save-dialog test flake under load (SM6; `installed-print-dialog.ps1`; diagnostics only).
 - Test: every PowerShell-spawning test in the installed-app launch contract file now has a 60 s bound, matching its child's own 60 s limit, so a busy machine no longer fails them at 15 s (SM6; tests only).
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - Page-label editing (SM1, source build; `page_label_edit.rs`, `PageLabelsPanel.tsx`): add, replace and delete ranges (numbers, Roman, letters, prefix-only), undo/redo, saved only into a new copy as a flat sorted /Nums; labels edit only while pages are in source order and reorder/delete is refused while label edits are pending; extract and split recompute ranges. Not run in an installed app
 - Test: a tagged PDF (StructTreeRoot, ParentTree, StructElems) whose bookmarks carry /SE links is accepted by the bookmark editor and its edits save with the structure tree intact (SM1; `outline_edit_unit_tests.rs`, source build)
 - OCR uses automatic page segmentation (`--psm 3`) with an exact stderr allowlist for its harmless diagnostics (SM4; `ocr_process.rs`); a page the engine skips for too few characters gets no text instead of failing. Needs the text-layer parser fix to keep searchable copies working (source build).
-- OCR input preprocessing (SM4; `ocr_preprocess.rs`): background flattening and 1-5 degree deskew on a copy of the page before Tesseract; text layer mapped back onto the unrotated page. Review fixes: rotation onto a padded canvas keeps page corners, dark regions are no longer stretched, raw-image fallback. 10 real pages, unverified draft truth: CER 27.05% to 25.38% (source build).
