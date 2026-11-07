@@ -19,6 +19,16 @@ The full change log, newest first, moved verbatim from the README's "Recent chan
     - `an_app_note_another_object_refers_to_becomes_foreign_and_new_ids_skip_its_number`.
     - Earlier refusal tests now assert that the altered annotation is kept as foreign and preserved byte-for-byte as an object when a note is added (`preserved` helper): altered keys, quads, appearance, colour or opacity, duplicate `/NM`, a shared appearance, a reference from the trailer, a repeated `/Annots` entry, and an empty array.
     - A vitest covers the panel with both lists.
+    - Updated, because they asserted the old refusals:
+      - `service::tests::comments_signed_forms_tagging_refuse_while_foreign_and_altered_annotations_are_kept`: the foreign and altered cases are now supported, list one view-only item and take a new note; the source file is untouched.
+      - SM2's `split.rs` guard test: an empty `/Annots` no longer blocks a split, so that case is replaced by a Link annotation, which still does.
+    - Mutation check: dropping null entries in the writer fails the round-trip test.
+  - **Measured.**
+    - Read-only census of the real work PDFs (counts only): today's reader now accepts 79 of the 285 annotated files, against 0 before. The other 206 are still refused for form, tagged, page-label or thread structure. The view-only survey listed all 4,522 expected annotations.
+    - Filters `annotations::`, `comments::` and `editor::`: 47 passed, 2 ignored.
+    - `cargo test --bins`: 600 passed, 4 failed, 42 ignored (3,815 s). Two of the failures were the tests updated above. The other two were the forms-hardening wall-clock pair; re-run alone with the updated tests, all 10 pass.
+    - `--no-run` builds every target. `tsc -b` is clean. vitest for the touched files: 20 passed.
+  - Source build only.
 - Slice 1b review fixes (SM3; branch `sm3/annot-p1b`; `annotations.rs`, `annotation_lockdown_tests.rs`). The SM7 review `_log/sm7-review-annot-p1b-26f60b5.md` (F1 high, F2 medium, L-1 to L-4) and the code review's P1 both returned CHANGES on `26f60b5`. The reviewers measured 214 s to open, in a release build, a file with 4,096 annotations sharing one 1 MB string of control characters.
   - **F1 / P1:** `annotations::text` now examines at most 4 raw bytes per allowed character after the BOM, whatever it keeps. The UTF-8 path no longer collects the whole string into a `Vec<char>`; a split final character becomes U+FFFD. An indirect string shared by many annotations is decoded once per field limit (`Decoded` cache), so total decoding work stays within the file's size.
   - **F2:** a new document-wide cap of 262,144 `/Annots` entries examined (`MAX_ENTRIES_TOTAL`), on top of 65,536 per page. An indirect `/Annots` array, or an annotation object, that several pages share is surveyed once.

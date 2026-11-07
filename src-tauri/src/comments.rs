@@ -465,7 +465,8 @@ mod tests {
         let position = entries(document).iter().position(|entry| entry == &Object::Reference(id)).unwrap();
         let mut written = document.clone();
         write(&mut written, &plan).unwrap();
-        written.get_object(id).ok() == Some(&before) && entries(&written).iter().position(|entry| entry == &Object::Reference(id)) == Some(position)
+        // Compared through Debug so a NaN value (not equal to itself) still counts as unchanged.
+        written.get_object(id).ok().map(|object| format!("{object:?}")) == Some(format!("{before:?}")) && entries(&written).iter().position(|entry| entry == &Object::Reference(id)) == Some(position)
     }
     fn annotated() -> (EditSession, Vec<u8>) {
         let source = sample(); let mut session = EditSession::new(source.clone(), 6);

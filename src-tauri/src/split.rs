@@ -290,7 +290,8 @@ mod tests {
         document.add_object(dictionary! { "Type" => "Sig", "ByteRange" => vec![0.into(), 1.into(), 2.into(), 3.into()] });
         let mut bytes = Vec::new(); document.save_to(&mut bytes).unwrap(); check(bytes);
         let mut document = Document::load_mem(&sample()).unwrap();
-        let first = document.get_pages()[&1]; document.get_object_mut(first).unwrap().as_dict_mut().unwrap().set("Annots", Vec::<Object>::new());
+        // Another app's annotation still blocks splitting (an empty /Annots no longer does, since slice 1c).
+        let first = document.get_pages()[&1]; let link = document.add_object(dictionary! { "Type" => "Annot", "Subtype" => "Link", "Rect" => vec![0.into(), 0.into(), 10.into(), 10.into()] }); document.get_object_mut(first).unwrap().as_dict_mut().unwrap().set("Annots", vec![Object::Reference(link)]);
         let mut bytes = Vec::new(); document.save_to(&mut bytes).unwrap(); check(bytes);
         let mut document = Document::load_mem(&sample()).unwrap();
         document.trailer.set("ID", vec![Object::string_literal("split-fixture"), Object::string_literal("split-fixture")]);
