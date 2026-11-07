@@ -25,13 +25,9 @@ pub struct Note { pub id: String, pub rect: CropBox, pub contents: String, pub k
 /// Acrobat's subject for each kind, written as `/Subj` (Acrobat shows it as the comment type).
 pub fn subject(kind: AnnotationKind) -> &'static str { match kind { AnnotationKind::Note => "Sticky Note", AnnotationKind::Highlight => "Highlight" } }
 
-/// Whether `value` is a PDF date in the app's form `D:YYYYMMDDHHmmSSZ`, with each field in range.
-pub fn valid_pdf_date(value: &str) -> bool {
-    let Some(digits) = value.strip_prefix("D:").and_then(|rest| rest.strip_suffix('Z')) else { return false };
-    if digits.len() != 14 || !digits.bytes().all(|byte| byte.is_ascii_digit()) { return false; }
-    let field = |range: std::ops::Range<usize>| digits[range].parse::<u32>().unwrap_or(u32::MAX);
-    (1..=9999).contains(&field(0..4)) && (1..=12).contains(&field(4..6)) && (1..=31).contains(&field(6..8)) && field(8..10) <= 23 && field(10..12) <= 59 && field(12..14) <= 59
-}
+/// Whether `value` is a PDF date in the app's form `D:YYYYMMDDHHmmSSZ`, a real calendar date and time. The one
+/// implementation lives in the recovery journal, which the standalone journal test also compiles.
+pub fn valid_pdf_date(value: &str) -> bool { crate::recovery_journal::valid_annotation_date(value) }
 
 /// Seconds since the Unix epoch as a PDF date in UTC (`D:YYYYMMDDHHmmSSZ`).
 pub fn pdf_date(epoch_seconds: u64) -> String {
@@ -449,8 +445,10 @@ mod tests {
         assert_eq!(pdf_date(4_102_444_800), "D:21000101000000Z");
         assert!(valid_pdf_date(&pdf_date_now()));
         for bad in ["D:20251106235959", "D:2025110623595Z", "D:20251306000000Z", "D:20251100000000Z", "D:20251106240000Z", "D:20251106236000Z", "20251106235959Z", "D:2025110623595xZ", "D:20251106235959-06'00'"] { assert!(!valid_pdf_date(bad), "{bad}"); }
-        for value in ["D:20251106235959Z", "D:00001106235959Z", "D:99991231235959Z", "D:20251106235959", "D:20251306000000Z", "D:20251106236000Z", "D:20251106235959-06'00'", ""] {
-            assert_eq!(valid_pdf_date(value), crate::recovery_journal::valid_annotation_date(value), "the recovery journal's own copy agrees: {value}");
+        // One implementation (in the journal); real calendar days only.
+        for (value, valid) in [("D:20240229120000Z", true), ("D:20230229120000Z", false), ("D:21000229120000Z", false), ("D:20000229120000Z", true), ("D:20250431000000Z", false), ("D:20250430000000Z", true), ("D:20250132000000Z", false), ("D:20251106240000Z", false), ("D:20251106235960Z", false), ("D:00001106235959Z", false), ("D:99991231235959Z", true), ("", false)] {
+            assert_eq!(valid_pdf_date(value), valid, "{value}");
+            assert_eq!(crate::recovery_journal::valid_annotation_date(value), valid, "{value}");
         }
     }
     #[test]
@@ -510,8 +508,16 @@ mod tests {
             let bytes = encode_recovery(&original).unwrap();
             assert_eq!(decode_recovery(&bytes, original.source, None, 0).unwrap(), original);
             assert_eq!(bytes.windows(9).any(|window| window == b"\"created\""), created.is_some(), "dateless records are unchanged from version 2");
+            let version = u16::from_le_bytes([bytes[8], bytes[9]]);
+            assert_eq!(version, if created.is_some() { 3 } else { 2 }, "dated records are version 3, dateless ones stay 2");
+            // The other version with the same contents is refused (re-stamped and re-digested).
+            let mut swapped = bytes.clone();
+            swapped[8..10].copy_from_slice(&(if version == 3 { 2u16 } else { 3u16 }).to_le_bytes());
+            let body = swapped.len() - 32; let digest = <sha2::Sha256 as sha2::Digest>::digest(&swapped[..body]); swapped[body..].copy_from_slice(&digest);
+            assert!(decode_recovery(&swapped, original.source, None, 0).unwrap_err().contains("does not match its contents"));
         }
         assert!(encode_recovery(&record(annotation(Some("not a date")))).is_err());
+        assert!(encode_recovery(&record(annotation(Some("D:20250230000000Z")))).is_err(), "no February 30th");
     }
     #[test]
     fn quads_are_written_in_acrobat_order_and_both_orders_read_back() {
