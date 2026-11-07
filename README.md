@@ -133,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - Signed OCR artifact workflow restores no Actions cache: setup-node's `cache: npm` becomes `package-manager-cache: false`, pinned by a test (SM7 recommendation; SM6; `ocr-signed-artifact.yml`). Not yet exercised in a hosted run.
 - Release workflow restores no Actions cache: the signing job's `cache: npm` is replaced with `package-manager-cache: false`, pinned by a test (SM7 recommendation; `release.yml`, `release-workflow.test.ts`). Not yet exercised in a release run.
 - Dev dependency: vite 6.4.4 to 6.4.5, clearing the dev-server advisory GHSA-8g5g-mxqh-grgj (SM0; `package.json`, `package-lock.json`, notices inventory hash). Build tooling only; `npm audit` 0.
-- Test: with only a bookmark edit pending, form fill, redaction, image/text replacement and searchable/large OCR all refuse with the overlay message, and Undo lifts it (SM1; `outline_edit_tests.rs`; source build; mutation-checked).
