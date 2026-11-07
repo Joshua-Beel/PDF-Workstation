@@ -2,6 +2,10 @@
 
 The full change log, newest first, moved verbatim from the README's "Recent changes" section (only relative link paths were adjusted for this folder); the [README](../README.md#recent-changes) keeps one-line summaries of the newest entries.
 
+- Test: forms-hardening wall-clock limits scale with the run (SM3; branch `sm3/annot-p2-0`; `forms_hardening_tests.rs` only). No product change.
+  - `forms_hardening_hierarchies_inheritance_and_reference_cycles_refuse_without_hanging` and `forms_hardening_oversized_options_values_names_and_appearances_refuse_quickly` failed on every loaded full run. The oversized test took 24.5 s alone against its 30 s total, and failed even beside the other forms tests alone. Both totals also included building the fixtures (a 100,000-entry `/Opt`, compressing a 64 MiB bomb).
+  - Each refusal is now timed on its own through `refuse_scaled`. It must finish within 20 times the time `pdf_load::load` takes on the same bytes, measured just before, plus 2 s. That is linear-in-input work under the same load and profile, so the check still catches an unbounded walk of hierarchies, cycles or option lists.
+  - The forms filter, run in parallel (load), passes 50 with 3 ignored.
 - Annotation interchange Phase 2, slice P2-0: census split and a load-proof timing test (SM3; branch `sm3/annot-p2-0` off `a3f76c4`; `annotation_lockdown_tests.rs`, `comments.rs` tests only). No product change.
   - **Census split** (`annotation_census_real_files`, ignored, read-only, counts only).
     - Each annotated file is now bucketed by its structure keys (`/AcroForm`, `/StructTreeRoot`, `/PageLabels`, `/Threads`): every combination is one bucket, each key is also counted on its own (overlapping), and both are crossed with producer family.
