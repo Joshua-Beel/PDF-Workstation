@@ -118,7 +118,9 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
-- Sticky notes are saved with an Acrobat-style closed popup at the page's right edge, and the app keeps editing them as one unit (SM3, source build).
+- Tests (not yet used): pinned qpdf 12.4.2 setup script and a hardened, fixtures-only test harness, waiting on SM7 review; nothing downloaded, not in CI (SM3; `setup-qpdf.ps1`, `qpdf_check.rs`).
+- Tests: pdf.js (dev dependency `pdfjs-dist` 6.4.299, not shipped; its canvas package pinned to 1.0.10) independently reads the annotations the app writes and the other apps' annotations it keeps, from two committed synthetic fixtures (SM3; tests only).
+- Sticky notes are saved with an Acrobat-style closed popup at the page's right edge, and the app keeps editing them as one unit; a page without a valid MediaBox refuses the save (SM3, source build).
 - Your comments and highlights now carry Acrobat-style creation and modification dates (UTC) and a subject ("Sticky Note", "Highlight"), and new ones get random Acrobat-style IDs; no author name is written yet; older files still open (SM3, source build).
 - Tests: the annotation census now splits structure refusals by type, and the shared-annotation and forms-hardening timing tests compare against a baseline measured in the same run instead of fixed budgets, with absolute ceilings and per-test totals (SM3; tests only).
 - PDFs with other apps' annotations or links can now take your comments: their annotations are kept in place and order on save and listed view only; page delete and extract on such files stay refused (SM3, source build).
@@ -132,4 +134,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - Release workflow restores no Actions cache: the signing job's `cache: npm` is replaced with `package-manager-cache: false`, pinned by a test (SM7 recommendation; `release.yml`, `release-workflow.test.ts`). Not yet exercised in a release run.
 - Dev dependency: vite 6.4.4 to 6.4.5, clearing the dev-server advisory GHSA-8g5g-mxqh-grgj (SM0; `package.json`, `package-lock.json`, notices inventory hash). Build tooling only; `npm audit` 0.
 - Test: with only a bookmark edit pending, form fill, redaction, image/text replacement and searchable/large OCR all refuse with the overlay message, and Undo lifts it (SM1; `outline_edit_tests.rs`; source build; mutation-checked).
-- Dev dependency: vitest and its @vitest packages 4.1.11 to 4.1.12 (SM0; `package.json`, `package-lock.json`, notices inventory hash). Test runner only; nothing in the app changes.
