@@ -46,20 +46,31 @@ function run(args: string[], env: Record<string, string | undefined> = {}) {
 
 const binHashes = (folder: string, names: string[]) => Object.fromEntries(names.map(name => [name, createHash('sha256').update(name).digest('hex')]));
 
-/** The 8.3 short form of Program Files, when the volume has short names; read only. */
-function shortProgramFiles(): { long: string; short: string } | null {
-  const long = process.env.ProgramFiles;
-  if (!long) return null;
-  const probe = spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', '(New-Object -ComObject Scripting.FileSystemObject).GetFolder($env:ProgramFiles).ShortPath'], { encoding: 'utf8', timeout: 60_000 });
-  const short = probe.stdout.trim();
-  return probe.status === 0 && short.includes('~') && short.toLowerCase() !== long.toLowerCase() ? { long, short } : null;
+/** cmd's `%~sI` short form of an existing folder, read only. */
+function shortName(folder: string): string {
+  const probe = spawnSync('cmd.exe', ['/d', '/s', '/c', `"for %I in ("${folder}") do @echo %~sI"`], { encoding: 'utf8', timeout: 60_000, windowsVerbatimArguments: true });
+  return probe.status === 0 ? probe.stdout.trim() : '';
 }
-const programFiles = shortProgramFiles();
+
+/** A folder with a distinct 8.3 short name: Program Files, the temp folder (RUNNER~1 on the hosted runner) or
+ * the user profile, whichever has one first. */
+function shortFolder(): { long: string; short: string } | null {
+  for (const candidate of [process.env.ProgramFiles, tmpdir(), process.env.USERPROFILE]) {
+    if (!candidate || !existsSync(candidate)) continue;
+    const long = realpathSync.native(candidate);
+    const short = shortName(long);
+    if (short.includes('~') && short.toLowerCase() !== long.toLowerCase() && existsSync(short)) return { long, short };
+  }
+  return null;
+}
+const shortPath = shortFolder();
 
 describe('path comparison used by these tests', () => {
-  it.skipIf(!programFiles)('treats an 8.3 short path and its long form as the same folder, in both directions', () => {
-    const { long, short } = programFiles!;
-    const child = readdirSync(long, { withFileTypes: true }).find(entry => entry.isDirectory())!.name;
+  it.skipIf(!shortPath && !process.env.CI)('treats an 8.3 short path and its long form as the same folder, in both directions', () => {
+    expect(shortPath, 'CI must provide a folder with an 8.3 short name (Program Files, TEMP or the profile)').not.toBeNull();
+    const { long, short } = shortPath!;
+    const child = readdirSync(long)[0];
+    expect(child, `${long} has an entry to compare`).toBeDefined();
     expect(inside(join(short, child), long)).toBe(true);
     expect(inside(join(long, child), short.toUpperCase())).toBe(true);
     expect(inside(long, join(short, child))).toBe(false);

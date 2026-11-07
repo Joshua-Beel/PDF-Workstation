@@ -194,9 +194,60 @@ pub(crate) fn qpdf_environment(temp: &Path) -> Result<Vec<u16>, QpdfError> {
     Ok(block)
 }
 
+/// qpdf reads a verbatim `\\?\X:\...` path (what `canonicalize` returns) as `\\<file name>` and cannot open it,
+/// as the first CI run of E2 showed. So qpdf is given plain drive paths: the `\\?\` prefix is removed only when
+/// the rest is an `X:\` drive path, and any other form (UNC, device, relative) is refused.
+/// Plain paths are parsed by Win32, which drops a trailing dot or space from each component; a verbatim path is
+/// not. So `...\x.\qpdf.exe` (verified) would start `...\x\qpdf.exe` (not verified): such components are refused.
+pub(crate) fn plain_path(path: &Path) -> Result<PathBuf, QpdfError> {
+    let plain = strip_verbatim(path)?;
+    let text = plain.to_str().unwrap_or_default();
+    if text[3..].split('\\').any(|component| component.ends_with('.') || component.ends_with(' ')) {
+        return Err(QpdfError::Refused(format!("{} has a component ending in a dot or space", path.display())));
+    }
+    Ok(plain)
+}
+
+fn strip_verbatim(path: &Path) -> Result<PathBuf, QpdfError> {
+    let text = path.to_str().ok_or_else(|| QpdfError::Refused(format!("{} is not valid Unicode", path.display())))?;
+    let plain = text.strip_prefix(r"\\?\").unwrap_or(text);
+    let bytes = plain.as_bytes();
+    if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' || bytes[2] != b'\\' || plain.contains(r"\\") {
+        return Err(QpdfError::Refused(format!("{} is not a plain drive path", path.display())));
+    }
+    Ok(PathBuf::from(plain))
+}
+
+/// The plain path to hand qpdf for an existing file or folder (SM7 M-1). The path is canonicalized, stripped
+/// to plain form, and re-canonicalized; the two canonical paths must be identical, so the plain path names
+/// exactly the verified file.
+pub(crate) fn launch_path(path: &Path) -> Result<PathBuf, QpdfError> {
+    let canonical = path.canonicalize().map_err(|error| QpdfError::Refused(format!("{}: {error}", path.display())))?;
+    let plain = plain_path(&canonical)?;
+    same_after_strip(&canonical, &plain)?;
+    Ok(plain)
+}
+
+fn same_after_strip(canonical: &Path, plain: &Path) -> Result<(), QpdfError> {
+    let again = plain.canonicalize().map_err(|error| QpdfError::Refused(format!("{}: {error}", plain.display())))?;
+    if again != canonical {
+        return Err(QpdfError::Refused(format!("{} does not name the verified {}", plain.display(), canonical.display())));
+    }
+    Ok(())
+}
+
+/// The exact command line qpdf receives: plain drive paths and the fixed arguments, quoted by `child_job`.
+pub(crate) fn qpdf_command_line(qpdf: &Path, pdf: &Path) -> Result<Vec<u16>, QpdfError> {
+    let arguments = qpdf_arguments(&plain_path(qpdf)?, &plain_path(pdf)?);
+    let arguments = arguments.iter().map(|argument| argument.as_os_str()).collect::<Vec<_>>();
+    child_job::command_line(&arguments).map_err(|_| QpdfError::Refused("a path contains a NUL character".into()))
+}
+
 fn run_pinned(qpdf: &Path, pdf: &Path, pinned: &BTreeMap<String, String>) -> Result<Vec<u8>, QpdfError> {
     let _held = verify_and_hold(qpdf, pinned)?;
-    let directory = fixtures_root()?;
+    let directory = launch_path(&fixtures_root()?)?;
+    let application = launch_path(qpdf)?;
+    let command_line = qpdf_command_line(&application, &launch_path(pdf)?)?;
     let temp = tempfile::Builder::new().prefix("sm3-qpdf-child-").tempdir().map_err(|error| QpdfError::System(format!("qpdf temporary folder: {error}")))?;
     let environment = qpdf_environment(temp.path())?;
     let suspended = child_job::spawn_suspended_isolated::<QpdfError>(
@@ -205,11 +256,9 @@ fn run_pinned(qpdf: &Path, pdf: &Path, pinned: &BTreeMap<String, String>) -> Res
         &environment,
         || {
             let null = |_: child_job::ContainsNul| QpdfError::Refused("a path contains a NUL character".into());
-            let arguments = qpdf_arguments(qpdf, pdf);
-            let arguments = arguments.iter().map(|argument| argument.as_os_str()).collect::<Vec<_>>();
             Ok(ChildCommand {
-                application: child_job::wide_null(qpdf.as_os_str()).map_err(null)?,
-                command_line: child_job::command_line(&arguments).map_err(null)?,
+                application: child_job::wide_null(application.as_os_str()).map_err(null)?,
+                command_line,
                 current_directory: child_job::wide_null(directory.as_os_str()).map_err(null)?,
             })
         },
@@ -428,6 +477,55 @@ mod tests {
         let plain = child_job::spawn_suspended::<QpdfError>("qpdf mitigation control", &limits, command, || Ok(())).unwrap();
         let flags = image_load_policy(plain);
         assert_eq!(flags & PREFER_SYSTEM32_IMAGES, 0, "spawn_suspended is unchanged: {flags:#x}");
+    }
+
+    #[test]
+    fn qpdf_gets_plain_drive_paths_never_verbatim_ones() {
+        assert_eq!(plain_path(Path::new(r"\\?\D:\a\fixtures\x.pdf")).unwrap(), PathBuf::from(r"D:\a\fixtures\x.pdf"));
+        assert_eq!(plain_path(Path::new(r"E:\x.pdf")).unwrap(), PathBuf::from(r"E:\x.pdf"));
+        for refused in [r"\\?\UNC\server\share\x.pdf", r"\\server\share\x.pdf", r"\\.\pipe\x", "x.pdf", r"\\?\Volume{0}\x.pdf", "D:x.pdf"] {
+            assert!(matches!(plain_path(Path::new(refused)), Err(QpdfError::Refused(_))), "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_folder_ending_in_a_dot_cannot_redirect_the_launch_to_an_unverified_program() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        assert!(root.to_str().unwrap().starts_with(r"\\?\"));
+        let dotted = root.join("x.");
+        let undotted = root.join("x");
+        std::fs::create_dir(&dotted).unwrap();
+        std::fs::create_dir(&undotted).unwrap();
+        std::fs::write(dotted.join("qpdf.exe"), b"verified stand-in").unwrap();
+        std::fs::write(undotted.join("qpdf.exe"), b"unverified impostor").unwrap();
+        let verified = dotted.join("qpdf.exe").canonicalize().unwrap();
+        assert!(verified.to_str().unwrap().contains(r"\x.\qpdf.exe"), "{}", verified.display());
+        let pinned = BTreeMap::from([("qpdf.exe".to_owned(), sha256_hex(b"verified stand-in"))]);
+
+        let stripped = strip_verbatim(&verified).unwrap();
+        assert!(matches!(same_after_strip(&verified, &stripped), Err(QpdfError::Refused(message)) if message.contains("does not name the verified")));
+        assert!(matches!(plain_path(&verified), Err(QpdfError::Refused(message)) if message.contains("dot or space")));
+        assert!(matches!(launch_path(&verified), Err(QpdfError::Refused(_))));
+        let trailing_space = PathBuf::from(r"E:\a \qpdf.exe");
+        assert!(matches!(plain_path(&trailing_space), Err(QpdfError::Refused(_))));
+        let refused = run_pinned(&verified, &checked_fixture(&fixture("app-annotations.pdf")).unwrap(), &pinned);
+        assert!(matches!(&refused, Err(QpdfError::Refused(_))), "{refused:?}");
+
+        std::fs::remove_file(dotted.join("qpdf.exe")).unwrap();
+        std::fs::remove_dir(&dotted).unwrap();
+    }
+
+    #[test]
+    fn the_exact_command_line_qpdf_receives() {
+        let pdf = checked_fixture(&fixture("app-annotations.pdf")).unwrap();
+        assert!(pdf.to_str().unwrap().starts_with(r"\\?\"), "canonicalize gives a verbatim path: {}", pdf.display());
+        let plain = plain_path(&pdf).unwrap();
+        let line = qpdf_command_line(Path::new(r"\\?\Q:\qpdf 12\bin\qpdf.exe"), &pdf).unwrap();
+        assert_eq!(line.last(), Some(&0));
+        let text = String::from_utf16(&line[..line.len() - 1]).unwrap();
+        assert_eq!(text, format!(r#""Q:\qpdf 12\bin\qpdf.exe" "--json=2" "--json-key=qpdf" "{}""#, plain.display()));
+        assert!(!text.contains('?'), "{text}");
     }
 
     #[test]
