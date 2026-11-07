@@ -368,6 +368,15 @@ fn annotation_census_real_files() {
                         }
                     }
                     if let Ok(contents) = annotation.get(b"Contents").and_then(Object::as_str) { add(format!("contents encoding: {}", if contents.starts_with(&[0xfe, 0xff]) { "UTF-16BE" } else { "PDFDocEncoding or other" }), 1); }
+                    // Phase 2 targets (slice plan P2-6 to P2-12): annotations carrying the keys the editor for their
+                    // type depends on.
+                    let has = |key: &[u8]| annotation.has(key);
+                    let candidate = match subtype {
+                        "Ink" => has(b"InkList"), "FreeText" => has(b"DA"), "Line" => has(b"L"), "Polygon" | "PolyLine" => has(b"Vertices"),
+                        "Highlight" | "Underline" | "StrikeOut" | "Squiggly" => has(b"QuadPoints"), "Square" | "Circle" | "Stamp" | "Caret" | "Text" => true, _ => false,
+                    };
+                    if candidate { add(format!("phase 2 editable candidate: {subtype}{}", if has(b"RC") { " (with /RC)" } else { "" }), 1); }
+                    if has(b"StructParent") { add(format!("annotation with /StructParent: {subtype}"), 1); }
                 }
             }
             if in_file > 0 {
@@ -378,8 +387,17 @@ fn annotation_census_real_files() {
                 add("view-only survey: annotations listed".into(), survey.pages.iter().map(Vec::len).sum());
                 add("view-only survey: not listed (over a limit)".into(), survey.truncated);
                 add(format!("view-only survey: page count matches: {}", survey.pages.len() == document.get_pages().len()), 1);
-                let verdict = match crate::comments::read(&document) { Ok(_) => "accepted", Err(reason) if reason.contains("foreign") => "refused: foreign annotation", Err(reason) if reason.contains("unknown annotation") => "refused: unknown key", Err(reason) if reason.contains("forms, tagged") => "refused: form, tagged, labels or threads", Err(reason) if reason.contains("Signed") => "refused: signed", Err(reason) if reason.contains("Encrypted") => "refused: encrypted", Err(_) => "refused: other" };
+                let verdict = match crate::comments::read(&document) { Ok(_) => "accepted", Err(reason) if reason.contains("forms, tagged") => "refused: form, tagged, labels or threads", Err(reason) if reason.contains("Signed") => "refused: signed", Err(reason) if reason.contains("Encrypted") => "refused: encrypted", Err(reason) if reason.contains("262,144") => "refused: over the entry cap", Err(reason) if reason.contains("malformed annotation array") => "refused: malformed /Annots", Err(_) => "refused: other" };
                 add(format!("today's comments::read on annotated files: {verdict}"), 1);
+                // P2-0: split the structure refusal by catalog key. A file can have several; each combination is
+                // one bucket, and each key is also counted on its own (overlapping).
+                let catalog = document.catalog().ok();
+                let structure: Vec<&str> = [(b"AcroForm".as_slice(), "forms"), (b"StructTreeRoot", "tagged"), (b"PageLabels", "page labels"), (b"Threads", "threads")].into_iter()
+                    .filter(|(key, _)| catalog.is_some_and(|catalog| catalog.has(key))).map(|(_, label)| label).collect();
+                for label in &structure { add(format!("annotated files with structure (overlapping): {label}"), 1); }
+                add(format!("annotated files by structure combination: {}", if structure.is_empty() { "none".to_owned() } else { structure.join(" + ") }), 1);
+                add(format!("annotated files by structure combination and producer family: {} / {family}", if structure.is_empty() { "none".to_owned() } else { structure.join(" + ") }), 1);
+                if structure.len() == 1 { add(format!("annotated files refused by one structure only: {}", structure[0]), 1); }
                 let mut bands = [(1usize, "1"), (10, "2-10"), (100, "11-100"), (1_000, "101-1,000"), (usize::MAX, "over 1,000")].into_iter();
                 let band = bands.find(|(limit, _)| in_file <= *limit).map(|(_, label)| label).unwrap();
                 add(format!("annotations per annotated file: {band}"), 1);
