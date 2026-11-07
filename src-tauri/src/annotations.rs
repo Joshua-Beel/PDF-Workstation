@@ -113,8 +113,9 @@ fn date(document: &Document, dict: &Dictionary, cache: &mut Decoded) -> Option<S
     Some(format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}"))
 }
 
-/// The survey of every page, in `get_pages` order. Bounded by the limits above; never fails.
-pub fn survey(document: &Document) -> Survey {
+/// The survey of every page, in `get_pages` order, leaving out the annotation objects in `skip` (the app's
+/// own editable annotations, listed separately). Bounded by the limits above; never fails.
+pub fn survey(document: &Document, skip: &std::collections::HashSet<lopdf::ObjectId>) -> Survey {
     let mut result = Survey::default();
     let (mut listed, mut text_bytes, mut examined) = (0usize, 0usize, 0usize);
     let (mut seen_arrays, mut seen_annotations) = (std::collections::HashSet::new(), std::collections::HashSet::new());
@@ -131,7 +132,7 @@ pub fn survey(document: &Document) -> Survey {
         if entries.len() > budget { result.truncated += entries.len() - budget; }
         examined += entries.len().min(budget);
         for entry in &entries[..entries.len().min(budget)] {
-            let dict = match entry { Object::Reference(id) if seen_annotations.insert(*id) => document.get_dictionary(*id).ok(), Object::Reference(_) => None, Object::Dictionary(dict) => Some(dict), _ => None };
+            let dict = match entry { Object::Reference(id) if !skip.contains(id) && seen_annotations.insert(*id) => document.get_dictionary(*id).ok(), Object::Reference(_) => None, Object::Dictionary(dict) => Some(dict), _ => None };
             let Some(dict) = dict else { continue };
             let subtype_name = name(dict, b"Subtype");
             if subtype_name.as_deref().is_some_and(|subtype| NOT_LISTED.iter().any(|skip| skip.as_bytes() == subtype)) { continue; }
@@ -171,6 +172,7 @@ mod tests {
 
     fn utf16(value: &str) -> Object { let mut bytes = vec![0xFE, 0xFF]; for unit in value.encode_utf16() { bytes.extend(unit.to_be_bytes()); } Object::String(bytes, StringFormat::Hexadecimal) }
     fn literal(value: &[u8]) -> Object { Object::String(value.to_vec(), StringFormat::Literal) }
+    fn survey_all(document: &Document) -> Survey { survey(document, &std::collections::HashSet::new()) }
 
     fn document(annots: impl FnOnce(&mut Document, lopdf::ObjectId) -> Object) -> Document {
         let mut document = Document::with_version("1.7");
@@ -187,7 +189,7 @@ mod tests {
 
     #[test]
     fn surveys_acrobat_style_comments_replies_and_skips_links_widgets_popups_states_and_hidden() {
-        let survey = survey(&document(|document, page| {
+        let survey = survey_all(&document(|document, page| {
             let note = document.add_object(dictionary! { "Type" => "Annot", "Subtype" => "Text", "Rect" => vec![10.into(), 10.into(), 30.into(), 30.into()], "P" => page,
                 "T" => utf16("Reviewer \u{202E}evil"), "Subj" => literal(b"Sticky Note"), "Contents" => literal(b"Line one\rLine two \x8dquoted\x8e \x93\xa0"), "M" => literal(b"D:20240305141500-06'00'"), "NM" => literal(b"0b2c") });
             let reply = document.add_object(dictionary! { "Type" => "Annot", "Subtype" => "Text", "Rect" => vec![10.into(), 10.into(), 30.into(), 30.into()], "IRT" => note, "T" => literal(b"Other"), "Contents" => utf16("Reply \u{1F600}"), "F" => 30 });
@@ -215,7 +217,7 @@ mod tests {
 
     #[test]
     fn survey_reads_an_indirect_annots_array_and_bounds_what_it_lists() {
-        let survey = survey(&document(|document, _| {
+        let survey = survey_all(&document(|document, _| {
             let items: Vec<Object> = (0..MAX_LISTED_PER_PAGE + 3).map(|_| Object::Dictionary(dictionary! { "Subtype" => "Square", "Contents" => literal(&vec![b'a'; MAX_CONTENTS_CHARS + 10]) })).collect();
             document.add_object(Object::Array(items)).into()
         }));
@@ -224,24 +226,102 @@ mod tests {
         assert_eq!(survey.pages[0][0].contents.as_ref().unwrap().chars().count(), MAX_CONTENTS_CHARS);
     }
 
+    /// Two pages. Page 1 has an indirect `/Annots` array with an Acrobat-style sticky note, its popup and a
+    /// reply, a link, an inline square and a null entry. Page 2 has another app's highlight.
+    fn acrobat_style() -> (Document, Vec<lopdf::ObjectId>) {
+        let mut document = Document::with_version("1.7");
+        let pages = document.new_object_id();
+        let (first, second) = (document.new_object_id(), document.new_object_id());
+        let contents = document.add_object(Stream::new(dictionary! {}, Vec::new()));
+        let note = document.new_object_id();
+        let popup = document.add_object(dictionary! { "Type" => "Annot", "Subtype" => "Popup", "Parent" => note, "Rect" => vec![120.into(), 100.into(), 190.into(), 160.into()], "Open" => false, "F" => 28 });
+        document.objects.insert(note, Object::Dictionary(dictionary! { "Type" => "Annot", "Subtype" => "Text", "Rect" => vec![10.into(), 170.into(), 30.into(), 190.into()], "P" => first, "NM" => literal(b"5c1f0a52-1b7e-4c33"), "T" => literal(b"Reviewer"), "Subj" => literal(b"Sticky Note"), "Contents" => literal(b"Check this"), "M" => literal(b"D:20240305141500-06'00'"), "C" => vec![1.into(), 1.into(), 0.into()], "Name" => "Comment", "F" => 28, "Popup" => popup }));
+        let reply = document.add_object(dictionary! { "Type" => "Annot", "Subtype" => "Text", "Rect" => vec![10.into(), 170.into(), 30.into(), 190.into()], "P" => first, "IRT" => note, "T" => literal(b"Second"), "Contents" => literal(b"Agreed"), "F" => 30 });
+        let link = document.add_object(dictionary! { "Type" => "Annot", "Subtype" => "Link", "Rect" => vec![10.into(), 10.into(), 60.into(), 20.into()], "A" => dictionary! { "S" => "URI", "URI" => literal(b"https://example.invalid") } });
+        let square = Object::Dictionary(dictionary! { "Type" => "Annot", "Subtype" => "Square", "Rect" => vec![50.into(), 50.into(), 90.into(), 90.into()], "T" => literal(b"Inline") });
+        let annots = document.add_object(Object::Array(vec![note.into(), popup.into(), reply.into(), link.into(), square, Object::Null]));
+        let highlight = document.add_object(dictionary! { "Type" => "Annot", "Subtype" => "Highlight", "Rect" => vec![10.into(), 10.into(), 60.into(), 20.into()], "QuadPoints" => vec![10.into(), 20.into(), 60.into(), 20.into(), 10.into(), 10.into(), 60.into(), 10.into()], "T" => literal(b"Other app"), "C" => vec![1.into(), 1.into(), 0.into()] });
+        for (page, annots) in [(first, Object::Reference(annots)), (second, Object::Array(vec![highlight.into()]))] {
+            document.objects.insert(page, Object::Dictionary(dictionary! { "Type" => "Page", "Parent" => pages, "MediaBox" => vec![0.into(), 0.into(), 200.into(), 200.into()], "Contents" => contents, "Annots" => annots }));
+        }
+        document.objects.insert(pages, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![first.into(), second.into()], "Count" => 2 }));
+        let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        document.trailer.set("Root", catalog);
+        (document, vec![note, popup, reply, link, highlight])
+    }
+
+    fn entries(document: &Document, page: usize) -> Vec<Object> {
+        let id = document.get_pages().into_values().nth(page).unwrap();
+        match document.get_dictionary(id).unwrap().get(b"Annots") {
+            Ok(Object::Reference(array)) => document.get_object(*array).unwrap().as_array().unwrap().clone(),
+            Ok(Object::Array(values)) => values.clone(),
+            _ => Vec::new(),
+        }
+    }
+
     #[test]
-    fn a_refused_file_keeps_its_refusal_and_lists_its_annotations_view_only() {
-        let foreign = document(|document, page| {
-            let note = document.add_object(dictionary! { "Type" => "Annot", "Subtype" => "Text", "Rect" => vec![10.into(), 10.into(), 30.into(), 30.into()], "P" => page, "T" => literal(b"Reviewer"), "Contents" => literal(b"Check this") });
-            Object::Array(vec![note.into()])
-        });
-        let mut bytes = Vec::new(); foreign.clone().save_to(&mut bytes).unwrap();
-        let session = crate::editor::EditSession::new(bytes.clone(), 1);
-        assert!(session.comments_reason().is_some(), "editing stays refused until the preserving writer lands");
-        let listed = &session.view_only_annotations().unwrap().pages[0];
-        assert_eq!(listed.len(), 1);
-        let info = crate::comments::ViewOnlyInfo { page: 0, annotation: listed[0].clone() };
-        assert_eq!(serde_json::to_value(&info).unwrap(), serde_json::json!({ "page": 0, "subtype": "Text", "author": "Reviewer", "subject": null, "contents": "Check this", "modified": null, "reply": false }));
-        assert!(session.proposed_comment(Some((0, crate::editor::CropBox { left: 50.0, bottom: 50.0, right: 80.0, top: 80.0 })), None, Some("new")).is_err(), "no app comment can be added over it yet");
-        let exported = session.export(None).unwrap();
-        assert_eq!(survey(&Document::load_mem(&exported).unwrap()), survey(&foreign), "an unedited copy keeps the annotation");
-        let supported = crate::editor::EditSession::new(std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/welcome.pdf")).unwrap(), 6);
-        assert!(supported.comments_reason().is_none() && supported.view_only_annotations().is_none(), "editable files are not surveyed");
+    fn app_comments_work_alongside_other_apps_annotations_which_are_kept_untouched() {
+        let (source, foreign) = acrobat_style();
+        let mut bytes = Vec::new(); source.clone().save_to(&mut bytes).unwrap();
+        let source = Document::load_mem(&bytes).unwrap();
+        let mut session = crate::editor::EditSession::new(bytes.clone(), 2);
+        assert!(session.comments_reason().is_none(), "other apps' annotations no longer refuse commenting");
+        let listed = session.view_only_annotations().unwrap();
+        assert_eq!(listed.pages.iter().map(|page| page.iter().map(|item| (item.subtype, item.author.as_deref())).collect::<Vec<_>>()).collect::<Vec<_>>(), vec![vec![("Text", Some("Reviewer")), ("Text", Some("Second")), ("Square", Some("Inline"))], vec![("Highlight", Some("Other app"))]]);
+        // Add a note on page 1 and save: every foreign entry stays, in order, objects unchanged; page 2 is untouched.
+        let rect = crate::editor::CropBox { left: 100.0, bottom: 30.0, right: 130.0, top: 60.0 };
+        let next = session.proposed_comment(Some((0, rect)), None, Some("Mine")).unwrap(); session.commit_comments(next);
+        assert!(!session.removes_saved_annotation(), "adding never needs a rewrite");
+        let saved = Document::load_mem(&session.export(None).unwrap()).unwrap();
+        for id in &foreign { assert_eq!(saved.get_object(*id).unwrap(), source.get_object(*id).unwrap(), "foreign object {id:?} unchanged"); }
+        let (before, after) = (entries(&source, 0), entries(&saved, 0));
+        assert_eq!(&after[..before.len()], &before[..], "foreign entries keep their order; the inline square and null stay");
+        assert_eq!(after.len(), before.len() + 1);
+        assert!(matches!(saved.get_dictionary(saved.get_pages()[&1]).unwrap().get(b"Annots").unwrap(), Object::Array(_)), "a touched page gets a direct array");
+        assert_eq!(saved.get_dictionary(saved.get_pages()[&2]).unwrap().get(b"Annots").unwrap(), source.get_dictionary(source.get_pages()[&2]).unwrap().get(b"Annots").unwrap(), "an untouched page keeps its /Annots as it was");
+        assert_eq!(survey_all(&saved).pages[1], survey_all(&source).pages[1]);
+        // Reopen: the note is editable, the rest view only; edit then delete it; foreign entries remain exactly.
+        let mut saved_bytes = Vec::new(); saved.clone().save_to(&mut saved_bytes).unwrap();
+        let mut reopened = crate::editor::EditSession::new(saved_bytes, 2);
+        assert_eq!(reopened.plan[0].notes.len(), 1);
+        let mine = reopened.plan[0].notes[0].id.clone();
+        let next = reopened.proposed_comment(None, Some(&mine), Some("Edited")).unwrap(); reopened.commit_comments(next);
+        assert!(reopened.removes_saved_annotation(), "an edited saved note is rewritten in place (SM2 §11 rewrite rule)");
+        let edited = Document::load_mem(&reopened.export(None).unwrap()).unwrap();
+        assert_eq!(&entries(&edited, 0)[..before.len()], &before[..]);
+        assert_eq!(crate::comments::read(&edited).unwrap()[0][0].contents, "Edited");
+        let next = reopened.proposed_comment(None, Some(&mine), None).unwrap(); reopened.commit_comments(next);
+        assert!(reopened.removes_saved_annotation());
+        let deleted = Document::load_mem(&reopened.export(None).unwrap()).unwrap();
+        assert_eq!(entries(&deleted, 0), before, "after deleting the app note only the original entries remain");
+        for id in &foreign { assert_eq!(deleted.get_object(*id).unwrap(), source.get_object(*id).unwrap()); }
+        // Page removal stays refused while other apps' annotations exist; rotation and moves keep them.
+        assert!(session.apply(crate::editor::PageEdit::Delete { pages: vec![1] }).unwrap_err().contains("other apps"));
+        session.apply(crate::editor::PageEdit::Move { from: 1, to: 0 }).unwrap();
+        let moved = Document::load_mem(&session.export(None).unwrap()).unwrap();
+        for id in &foreign { assert_eq!(moved.get_object(*id).unwrap(), source.get_object(*id).unwrap()); }
+    }
+
+    #[test]
+    fn an_app_note_another_object_refers_to_becomes_foreign_and_new_ids_skip_its_number() {
+        let (mut session, bytes) = { let mut session = crate::editor::EditSession::new(std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/welcome.pdf")).unwrap(), 6);
+            let next = session.proposed_comment(Some((0, crate::editor::CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 })), None, Some("Ours")).unwrap(); session.commit_comments(next);
+            let bytes = session.export(None).unwrap(); (session, bytes) };
+        let ours = session.plan[0].notes[0].id.clone();
+        let mut document = Document::load_mem(&bytes).unwrap();
+        let page = document.get_pages()[&1];
+        let note = entries(&document, 0)[0].as_reference().unwrap();
+        let reply = document.add_object(dictionary! { "Type" => "Annot", "Subtype" => "Text", "Rect" => vec![40.into(), 60.into(), 70.into(), 90.into()], "IRT" => note, "T" => literal(b"Acrobat user"), "Contents" => literal(b"A reply to your note") });
+        document.get_dictionary_mut(page).unwrap().get_mut(b"Annots").unwrap().as_array_mut().unwrap().push(reply.into());
+        let mut replied = Vec::new(); document.clone().save_to(&mut replied).unwrap();
+        session = crate::editor::EditSession::new(replied, 6);
+        assert!(session.comments_reason().is_none() && session.plan[0].notes.is_empty(), "a note something else depends on is kept, not edited");
+        assert_eq!(session.view_only_annotations().unwrap().pages[0].len(), 2, "it is listed view only, with the reply");
+        let next = session.proposed_comment(Some((0, crate::editor::CropBox { left: 100.0, bottom: 60.0, right: 130.0, top: 90.0 })), None, Some("New")).unwrap(); session.commit_comments(next);
+        assert!(crate::comments::number(&session.plan[0].notes[0].id).unwrap() > crate::comments::number(&ours).unwrap(), "new IDs never reuse a kept app ID");
+        let saved = Document::load_mem(&session.export(None).unwrap()).unwrap();
+        assert_eq!(saved.get_object(note).unwrap(), document.get_object(note).unwrap());
+        assert_eq!(saved.get_object(reply).unwrap(), document.get_object(reply).unwrap());
     }
 
     /// 5 s in the unoptimised test build, 1 s in a release build (`cargo test --release`); release timings
@@ -263,7 +343,7 @@ mod tests {
         println!("reviewer probe, session open including parse: {elapsed:?}");
         assert!(elapsed < BUDGET * 4, "took {elapsed:?}");
         let started = std::time::Instant::now();
-        let listed = survey(&probe);
+        let listed = survey_all(&probe);
         let elapsed = started.elapsed();
         println!("reviewer probe, survey alone: {elapsed:?}");
         assert!(elapsed < BUDGET, "took {elapsed:?}");
@@ -279,7 +359,7 @@ mod tests {
         let started = std::time::Instant::now();
         let label = text(&huge, MAX_LABEL_CHARS, false);
         assert_eq!(label.chars().count(), MAX_LABEL_CHARS);
-        let survey = survey(&document(|document, _| {
+        let survey = survey_all(&document(|document, _| {
             let shared = document.add_object(Object::String(huge.clone(), StringFormat::Literal));
             Object::Array(vec![Object::Dictionary(dictionary! { "Subtype" => "Text", "T" => shared, "Subj" => shared, "Contents" => shared, "M" => shared })])
         }));
@@ -304,7 +384,7 @@ mod tests {
         let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
         document.trailer.set("Root", catalog);
         let started = std::time::Instant::now();
-        let survey = survey(&document);
+        let survey = survey_all(&document);
         let elapsed = started.elapsed();
         println!("16,384 annotations sharing a 1 MiB control string: {elapsed:?}");
         assert!(elapsed < BUDGET, "took {elapsed:?}");
@@ -326,7 +406,7 @@ mod tests {
         let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
         document.trailer.set("Root", catalog);
         let started = std::time::Instant::now();
-        let survey = survey(&document);
+        let survey = survey_all(&document);
         let elapsed = started.elapsed();
         println!("100,000 pages sharing a 65,536-entry /Annots: {elapsed:?}");
         assert!(elapsed < BUDGET, "took {elapsed:?}");
@@ -345,7 +425,7 @@ mod tests {
         document.objects.insert(pages, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => 8 }));
         let catalog = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
         document.trailer.set("Root", catalog);
-        let survey = survey(&document);
+        let survey = survey_all(&document);
         assert_eq!(survey.truncated, 8 * MAX_ENTRIES_PER_PAGE - MAX_ENTRIES_TOTAL, "entries past the document cap are only counted");
     }
 

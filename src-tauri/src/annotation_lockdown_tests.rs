@@ -374,7 +374,7 @@ fn annotation_census_real_files() {
                 annotated += 1;
                 max_per_file = max_per_file.max(in_file);
                 add(format!("annotated files by producer family: {family}"), 1);
-                let survey = crate::annotations::survey(&document);
+                let survey = crate::annotations::survey(&document, &std::collections::HashSet::new());
                 add("view-only survey: annotations listed".into(), survey.pages.iter().map(Vec::len).sum());
                 add("view-only survey: not listed (over a limit)".into(), survey.truncated);
                 add(format!("view-only survey: page count matches: {}", survey.pages.len() == document.get_pages().len()), 1);
