@@ -3,8 +3,9 @@
 //! memory cap, every hardening option, capped stdout and stderr and a deadline. The argument list is fixed and
 //! read-only (qpdf writes no file in JSON mode), and the input must be a file under `src-tauri/tests/fixtures`,
 //! so the harness cannot be pointed at real documents. Before every run, qpdf.exe and every file pinned beside
-//! it are checked against `scripts/qpdf/pins.json` and held open against change (SM7 C-1). Not wired into CI
-//! yet (C-2); without `QPDF_EXE` the run test reports that E2 did not run.
+//! it are checked against `scripts/qpdf/pins.json` and held open against change (SM7 C-1). The child gets a
+//! minimal environment and the PREFER_SYSTEM32 and NO_REMOTE image-load mitigations (SM7 R-1), so a library it
+//! loads by name comes from System32 or its own pinned folder only. CI runs E2 explicitly (`ci.yml`, C-2).
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -168,12 +169,40 @@ pub(crate) fn qpdf_json(qpdf: &Path, pdf: &Path) -> Result<Vec<u8>, QpdfError> {
     run_pinned(&qpdf, &pdf, &pinned_files()?)
 }
 
+/// The qpdf child's whole environment (SM7 R-1): `SystemRoot`, a `PATH` of only System32 and the Windows folder,
+/// and `TEMP`/`TMP` set to `temp`. Nothing else from this process reaches the child, so a library qpdf loads
+/// by name can only come from its own pinned folder or the system folders, never from a user-writable `PATH`
+/// entry. Entries are sorted by name, as `CreateProcessW` expects.
+pub(crate) fn qpdf_environment(temp: &Path) -> Result<Vec<u16>, QpdfError> {
+    let system_root = std::env::var_os("SystemRoot").map(PathBuf::from).ok_or_else(|| QpdfError::System("SystemRoot is not set".into()))?;
+    let plain = |path: &Path| path.is_absolute() && !path.as_os_str().to_string_lossy().contains([';', '\0', '=']);
+    if !plain(&system_root) || !plain(temp) {
+        return Err(QpdfError::Refused("SystemRoot or the temporary folder is not a plain absolute path".into()));
+    }
+    let entries = [
+        ("PATH", format!("{};{}", system_root.join("System32").display(), system_root.display())),
+        ("SystemRoot", system_root.display().to_string()),
+        ("TEMP", temp.display().to_string()),
+        ("TMP", temp.display().to_string()),
+    ];
+    let mut block = Vec::new();
+    for (name, value) in entries {
+        block.extend(format!("{name}={value}").encode_utf16());
+        block.push(0);
+    }
+    block.push(0);
+    Ok(block)
+}
+
 fn run_pinned(qpdf: &Path, pdf: &Path, pinned: &BTreeMap<String, String>) -> Result<Vec<u8>, QpdfError> {
     let _held = verify_and_hold(qpdf, pinned)?;
     let directory = fixtures_root()?;
-    let suspended = child_job::spawn_suspended::<QpdfError>(
+    let temp = tempfile::Builder::new().prefix("sm3-qpdf-child-").tempdir().map_err(|error| QpdfError::System(format!("qpdf temporary folder: {error}")))?;
+    let environment = qpdf_environment(temp.path())?;
+    let suspended = child_job::spawn_suspended_isolated::<QpdfError>(
         QPDF_LABEL,
         &JobLimits::hardened_single_process(QPDF_MEMORY),
+        &environment,
         || {
             let null = |_: child_job::ContainsNul| QpdfError::Refused("a path contains a NUL character".into());
             let arguments = qpdf_arguments(qpdf, pdf);
@@ -318,6 +347,90 @@ mod tests {
     }
 
     #[test]
+    fn the_child_sees_only_the_minimal_environment() {
+        assert!(std::env::var_os("USERNAME").is_some(), "the parent has a variable the child must not see");
+        let temp = tempfile::tempdir().unwrap();
+        let environment = qpdf_environment(temp.path()).unwrap();
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+        let cmd = system.join("System32").join("cmd.exe");
+        // The `set` command goes through stdin: cmd.exe's `/c` quote handling mangles the quoted arguments
+        // `command_line` produces.
+        let arguments = [cmd.as_os_str(), OsStr::new("/d"), OsStr::new("/q")];
+        let suspended = child_job::spawn_suspended_isolated::<QpdfError>(
+            "qpdf environment test",
+            &JobLimits::hardened_single_process(QPDF_MEMORY),
+            &environment,
+            || {
+                Ok(ChildCommand {
+                    application: child_job::wide_null(cmd.as_os_str()).unwrap(),
+                    command_line: child_job::command_line(&arguments).unwrap(),
+                    current_directory: child_job::wide_null(temp.path().as_os_str()).unwrap(),
+                })
+            },
+            || Ok(()),
+        )
+        .unwrap();
+        let bounds = OutputBounds { stdout_limit: 1 << 16, stderr_limit: 1 << 16, timeout: QPDF_TIMEOUT, poll_interval: QPDF_POLL, drain_grace: child_job::PIPE_DRAIN_GRACE };
+        let run = child_job::run_bounded(suspended.resume().unwrap(), b"set\r\nexit 0\r\n", &bounds, &|| false).unwrap();
+        assert_eq!(run.reason, TerminalReason::Exited);
+        let code = run.child.exit_code().unwrap();
+        let listing = String::from_utf8_lossy(&run.stdout).into_owned();
+        assert_eq!(code, 0, "cmd exited with {code:#x}; stdout {listing:?}; stderr {:?}", String::from_utf8_lossy(&run.stderr));
+        // cmd.exe prints its prompt (`<folder>>`) before the first listed variable.
+        let prompt = format!("{}>", temp.path().display()).to_ascii_lowercase();
+        let unprompted = |line: &str| if line.to_ascii_lowercase().starts_with(&prompt) { line[prompt.len()..].to_owned() } else { line.to_owned() };
+        let names = listing.lines().map(unprompted).filter_map(|line| line.split_once('=').map(|(name, _)| name.to_ascii_uppercase())).collect::<Vec<_>>();
+        assert!(names.len() >= 4, "{listing}");
+        // cmd.exe itself adds COMSPEC, PATHEXT and PROMPT to what it lists.
+        for name in &names {
+            assert!(["PATH", "SYSTEMROOT", "TEMP", "TMP", "COMSPEC", "PATHEXT", "PROMPT"].contains(&name.as_str()), "unexpected {name} in:\n{listing}");
+        }
+        let path = format!("Path={};{}", system.join("System32").display(), system.display());
+        assert!(listing.lines().any(|line| line.eq_ignore_ascii_case(&path)), "{listing}");
+        assert!(listing.lines().any(|line| line.eq_ignore_ascii_case(&format!("TEMP={}", temp.path().display()))), "{listing}");
+        assert!(child_job::spawn_suspended_isolated::<QpdfError>("unterminated", &JobLimits::hardened_single_process(QPDF_MEMORY), &[65, 0], || unreachable!(), || Ok(())).is_err());
+    }
+
+    /// Reads the running child's image-load policy, then ends it. The child is `cmd /d /q`, which waits on its
+    /// stdin pipe, so it is still alive when queried.
+    fn image_load_policy(suspended: child_job::SuspendedChild) -> u32 {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{GetProcessMitigationPolicy, OpenProcess, ProcessImageLoadPolicy, PROCESS_QUERY_INFORMATION};
+        let mut running = suspended.resume().unwrap();
+        let process = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION, false, running.child.process_id()) }.unwrap();
+        let mut flags = 0_u32;
+        let read = unsafe { GetProcessMitigationPolicy(process, ProcessImageLoadPolicy, (&mut flags as *mut u32).cast(), std::mem::size_of::<u32>()) };
+        unsafe { CloseHandle(process) }.unwrap();
+        running.child.terminate_job_and_reap(0).unwrap();
+        read.unwrap();
+        flags
+    }
+
+    #[test]
+    fn only_the_isolated_spawn_sets_prefer_system32_and_no_remote() {
+        const NO_REMOTE_IMAGES: u32 = 1 << 0;
+        const PREFER_SYSTEM32_IMAGES: u32 = 1 << 2;
+        let temp = tempfile::tempdir().unwrap();
+        let cmd = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32").join("cmd.exe");
+        let arguments = [cmd.as_os_str(), OsStr::new("/d"), OsStr::new("/q")];
+        let command = || -> Result<ChildCommand, QpdfError> {
+            Ok(ChildCommand {
+                application: child_job::wide_null(cmd.as_os_str()).unwrap(),
+                command_line: child_job::command_line(&arguments).unwrap(),
+                current_directory: child_job::wide_null(temp.path().as_os_str()).unwrap(),
+            })
+        };
+        let limits = JobLimits::hardened_single_process(QPDF_MEMORY);
+        let environment = qpdf_environment(temp.path()).unwrap();
+        let isolated = child_job::spawn_suspended_isolated::<QpdfError>("qpdf mitigation test", &limits, &environment, command, || Ok(())).unwrap();
+        let flags = image_load_policy(isolated);
+        assert_eq!(flags & (NO_REMOTE_IMAGES | PREFER_SYSTEM32_IMAGES), NO_REMOTE_IMAGES | PREFER_SYSTEM32_IMAGES, "{flags:#x}");
+        let plain = child_job::spawn_suspended::<QpdfError>("qpdf mitigation control", &limits, command, || Ok(())).unwrap();
+        let flags = image_load_policy(plain);
+        assert_eq!(flags & PREFER_SYSTEM32_IMAGES, 0, "spawn_suspended is unchanged: {flags:#x}");
+    }
+
+    #[test]
     fn the_argument_list_is_fixed_and_read_only() {
         let arguments = qpdf_arguments(Path::new("Q:\\qpdf.exe"), Path::new("Q:\\in.pdf"));
         assert_eq!(arguments, ["Q:\\qpdf.exe", "--json=2", "--json-key=qpdf", "Q:\\in.pdf"].map(std::ffi::OsString::from));
@@ -326,7 +439,7 @@ mod tests {
     /// E2. Ignored so that a run without qpdf never counts as a pass: run it with `--ignored` and `QPDF_EXE` set
     /// from the line scripts/setup-qpdf.ps1 prints. Without `QPDF_EXE` it fails.
     #[test]
-    #[ignore = "E2: needs QPDF_EXE from scripts/setup-qpdf.ps1; not wired into CI yet"]
+    #[ignore = "E2: needs QPDF_EXE from scripts/setup-qpdf.ps1; ci.yml runs it with --ignored --exact"]
     fn qpdf_reads_the_interchange_fixtures_when_provided() {
         let qpdf = std::env::var_os("QPDF_EXE").expect("E2 not run: qpdf missing (set QPDF_EXE from scripts/setup-qpdf.ps1)");
         for name in ["app-annotations.pdf", "foreign-plus-app.pdf"] {

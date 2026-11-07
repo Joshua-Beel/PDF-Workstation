@@ -2,6 +2,31 @@
 
 The full change log, newest first, moved verbatim from the README's "Recent changes" section (only relative link paths were adjusted for this folder); the [README](../README.md#recent-changes) keeps one-line summaries of the newest entries.
 
+- P2-5 C-2: the qpdf E2 check is wired into CI, for SM7 review before it runs there (SM3; branch `sm3/annot-p2-5`; `.github/workflows/ci.yml`, `scripts/ci-workflow.test.ts`, `src-tauri/src/child_job.rs`, `src-tauri/src/qpdf_check.rs`, `scripts/setup-qpdf.test.ts`). SM7 conditions C2-a to C2-f. Tests and CI only; the app does not change.
+  - **CI scope (`ci.yml` only).** A step after `setup-pdfium.ps1` runs `setup-qpdf.ps1 -WorkRoot $RUNNER_TEMP\qpdf` in its own pwsh process, with no zip cache, so qpdf is fetched and verified on every run.
+    - The step fails on a non-zero exit, and unless exactly one `QPDF_EXE=` line was printed. It also fails unless that path is under the work root and ends in `\qpdf.exe`.
+    - The path goes out only as a step output, to the E2 step's `env`. `GITHUB_ENV` is not used.
+  - **E2 step.** It runs after `cargo test --bins` as `cargo test --bins annotations::qpdf_check::tests::qpdf_reads_the_interchange_fixtures_when_provided -- --ignored --exact`.
+    - It fails if `QPDF_EXE` is empty, if cargo fails, or unless the log has exactly one `test result: ok. 1 passed; 0 failed; 0 ignored` line. So a renamed or filtered-out test cannot pass silently.
+    - The workflow keeps `contents: read`, no secrets, no deployment environment and no uploads.
+  - **R-1 and the code-review P3 on planted files.** These change `child_job.rs`, with a heads-up in SM5's Inbox. The change is additive; `spawn_suspended` and its callers are unchanged.
+    - New `spawn_suspended_isolated` passes an explicit Unicode environment block (`CREATE_UNICODE_ENVIRONMENT`) and refuses one that is not terminated.
+    - It also sets the process mitigation policy `IMAGE_LOAD_PREFER_SYSTEM32_ALWAYS_ON | IMAGE_LOAD_NO_REMOTE_ALWAYS_ON`.
+    - qpdf now starts this way, with only `PATH=<SystemRoot>\System32;<SystemRoot>`, `SystemRoot`, and `TEMP`/`TMP` set to a per-run folder.
+    - A library loaded by name therefore comes from System32 before the application folder. That covers a `version.dll` or similar planted in `bin` after the last scan, as well as user-writable `PATH` entries. No image can load from a network share.
+    - Side effect: where System32 has the VC++ runtime, qpdf uses that copy instead of the copy bundled in `bin`. `qpdf30.dll` is not in System32, so it still comes from `bin`.
+  - **Contract tests (`ci-workflow.test.ts`).**
+    - Step order now includes the two new steps.
+    - The fetch step: fresh work root, no cache, pins or record flags, and `QPDF_EXE` only from the printed line.
+    - The E2 step: exact ignored test, the one-test check, no `if:` and no `continue-on-error`.
+    - No workflow other than `ci.yml` mentions qpdf; `release.yml` and `ocr-signed-artifact.yml` are checked by name.
+    - `tauri.conf.json`, the notices inventory and `THIRD-PARTY-NOTICES.txt` do not mention qpdf.
+  - **Rust tests (`qpdf_check`).**
+    - The child sees only the minimal environment: `cmd.exe` lists its variables, and the parent's `USERNAME` is absent.
+    - Only the isolated spawn sets the PREFER_SYSTEM32 and NO_REMOTE image-load bits, read back with `GetProcessMitigationPolicy`; a plain `spawn_suspended` child does not get them.
+  - **Code-review P3 on `7d6b0cc`.** `setup-qpdf.test.ts` now tests `inside()` with a real 8.3 short path, the short form of Program Files, in both directions, so the short-to-long case does not depend on the runner. The test is skipped where a volume has no short names.
+  - Tests: `qpdf_check` and `child_job` 27 passed, 1 ignored (E2); `setup-qpdf.test.ts` plus `ci-workflow.test.ts` 17 passed; `tsc -b` clean.
+  - qpdf itself has still never run anywhere; the first run is the CI run after SM7's review.
 - Fix for master CI run 42415981960, which was red on `5c98dc7` (SM3; branch `sm3/annot-p2-5`; `scripts/setup-qpdf.test.ts`; tests only).
   - `setup-qpdf.test.ts`'s "fresh extract" test failed on the hosted runner at `exe.startsWith(work)`. It passed locally.
   - **Cause, reproduced locally and read-only:** the runner's TEMP is an 8.3 short path (`C:\Users\RUNNER~1\...`), so the test's `work` keeps `RUNNER~1`. The script normalises `-WorkRoot` with `[IO.Path]::GetFullPath`, which in PowerShell 7 (.NET) expands short names. For example, `GetFullPath('C:\PROGRA~1\Git')` returns `C:\Program Files\Git`. So the script printed `QPDF_EXE=` with the long form. Local runs use an E: TEMP with no 8.3 names, so they never saw it.

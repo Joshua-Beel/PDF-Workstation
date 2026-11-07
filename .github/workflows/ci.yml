@@ -49,6 +49,19 @@ jobs:
       - run: npm run fixtures
       - run: ./scripts/setup-pdfium.ps1
         shell: pwsh
+      - name: Fetch and verify the pinned qpdf for the annotation interchange check
+        id: qpdf
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'qpdf'
+          $lines = @(pwsh -NoProfile -NonInteractive -File ./scripts/setup-qpdf.ps1 -WorkRoot $root)
+          if ($LASTEXITCODE -ne 0) { throw "setup-qpdf.ps1 exited with $LASTEXITCODE" }
+          $found = @($lines | Where-Object { "$_".StartsWith('QPDF_EXE=') })
+          if ($found.Count -ne 1) { throw 'setup-qpdf.ps1 did not print exactly one QPDF_EXE= line.' }
+          $exe = "$($found[0])".Substring('QPDF_EXE='.Length)
+          $prefix = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+          if (-not $exe.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -or -not $exe.EndsWith('\qpdf.exe', [StringComparison]::OrdinalIgnoreCase) -or $exe -match '[\r\n]') { throw "Unexpected QPDF_EXE path: $exe" }
+          "exe=$exe" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Append -Encoding utf8
       - name: Type-check
         run: npx tsc -b
       - name: Fetch locked Windows Cargo registry for offline notice checks
@@ -58,6 +71,17 @@ jobs:
       - run: npm test -- --pool=threads --maxWorkers=1 --no-file-parallelism
       - run: npm run build
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --bins
+      - name: Annotation interchange check with the pinned qpdf (E2)
+        shell: pwsh
+        env:
+          QPDF_EXE: ${{ steps.qpdf.outputs.exe }}
+        run: |
+          if (-not $env:QPDF_EXE) { throw 'QPDF_EXE is missing; E2 cannot run.' }
+          $log = @(cargo test --locked --manifest-path src-tauri/Cargo.toml --bins annotations::qpdf_check::tests::qpdf_reads_the_interchange_fixtures_when_provided -- --ignored --exact 2>&1 | ForEach-Object { "$_" })
+          $code = $LASTEXITCODE
+          $log | Out-Host
+          if ($code -ne 0) { throw "E2 failed with exit code $code" }
+          if (@($log | Where-Object { $_ -match '^test result: ok\. 1 passed; 0 failed; 0 ignored;' }).Count -ne 1) { throw 'E2 did not run exactly one test.' }
       - name: Compile every test target
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-run
 
