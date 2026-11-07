@@ -10,6 +10,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 const script = join(import.meta.dirname, 'setup-qpdf.ps1');
 const folders: string[] = [];
 afterEach(() => { for (const folder of folders.splice(0)) rmSync(folder, { recursive: true, force: true }); });
+// Work roots under the temp folder are allowed either because CI is set (the hosted runner, whose TEMP is on
+// C:) or because TEMP is off C: (local runs keep TEMP on E:). Tests that clear CI never use a temp work root.
 const scratch = () => { const folder = mkdtempSync(join(tmpdir(), 'sm3-setup-qpdf-')); folders.push(folder); return folder; };
 const sha256 = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex');
 // The hosted runner's TEMP is an 8.3 short path (C:\Users\RUNNER~1\...), and the script's GetFullPath expands it
@@ -43,6 +45,27 @@ function run(args: string[], env: Record<string, string | undefined> = {}) {
 }
 
 const binHashes = (folder: string, names: string[]) => Object.fromEntries(names.map(name => [name, createHash('sha256').update(name).digest('hex')]));
+
+/** The 8.3 short form of Program Files, when the volume has short names; read only. */
+function shortProgramFiles(): { long: string; short: string } | null {
+  const long = process.env.ProgramFiles;
+  if (!long) return null;
+  const probe = spawnSync('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', '(New-Object -ComObject Scripting.FileSystemObject).GetFolder($env:ProgramFiles).ShortPath'], { encoding: 'utf8', timeout: 60_000 });
+  const short = probe.stdout.trim();
+  return probe.status === 0 && short.includes('~') && short.toLowerCase() !== long.toLowerCase() ? { long, short } : null;
+}
+const programFiles = shortProgramFiles();
+
+describe('path comparison used by these tests', () => {
+  it.skipIf(!programFiles)('treats an 8.3 short path and its long form as the same folder, in both directions', () => {
+    const { long, short } = programFiles!;
+    const child = readdirSync(long, { withFileTypes: true }).find(entry => entry.isDirectory())!.name;
+    expect(inside(join(short, child), long)).toBe(true);
+    expect(inside(join(long, child), short.toUpperCase())).toBe(true);
+    expect(inside(long, join(short, child))).toBe(false);
+    expect(inside(short, long), 'a folder is not inside itself').toBe(false);
+  });
+});
 
 describe('setup-qpdf.ps1', { timeout: 240_000 }, () => {
   it('verifies the zip and every pinned binary, then names qpdf.exe in a fresh extract', () => {
@@ -113,8 +136,21 @@ describe('setup-qpdf.ps1', { timeout: 240_000 }, () => {
     expect(run(['-PinsPath', pinsPath, '-ZipPath', archive]).err).toContain('pass -WorkRoot');
     expect(run(['-PinsPath', pinsPath, '-ZipPath', archive, '-WorkRoot', 'C:\\sm3-qpdf-never-created'], { CI: undefined }).err).toContain('is on C:');
     expect(existsSync('C:\\sm3-qpdf-never-created')).toBe(false);
-    expect(run(['-PinsPath', pinsPath, '-WorkRoot', join(folder, 'work'), '-ZipCache', 'C:\\sm3-qpdf-cache-never-created'], { CI: undefined }).err).toContain('zip cache');
+  });
+
+  // The work root must be off C: so the work-root check passes and the zip-cache check is the one that fires.
+  // The temp folder cannot be used: the hosted runner's TEMP is on C:. The repository is on E: locally and
+  // on D: on the runner. The script refuses the cache before it creates the work root, so nothing is written.
+  const repositoryWorkRoot = join(import.meta.dirname, '..', 'tmp', `sm3-qpdf-never-created-${process.pid}`);
+  it.skipIf(/^[Cc]:/.test(repositoryWorkRoot))('refuses a zip cache on C: outside CI, before creating anything', () => {
+    const folder = scratch();
+    const archive = zip(folder, ['qpdf-test/bin/qpdf.exe']);
+    const pinsPath = pins(folder, archive, binHashes(folder, ['qpdf-test/bin/qpdf.exe']));
+    const refused = run(['-PinsPath', pinsPath, '-WorkRoot', repositoryWorkRoot, '-ZipCache', 'C:\\sm3-qpdf-cache-never-created'], { CI: undefined });
+    expect(refused.status).not.toBe(0);
+    expect(refused.err).toContain('zip cache');
     expect(existsSync('C:\\sm3-qpdf-cache-never-created')).toBe(false);
+    expect(existsSync(repositoryWorkRoot), 'the work root is not created').toBe(false);
   });
 
   it('the committed pins name the reviewed release, its signature facts and every binary in it', () => {

@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/ci.yml', 'utf8').replace(/\r\n?/g, '\n');
@@ -35,12 +36,14 @@ describe('push and pull request CI workflow', () => {
       'run: npm ci',
       'run: npm run fixtures',
       'run: ./scripts/setup-pdfium.ps1',
+      'Fetch and verify the pinned qpdf for the annotation interchange check',
       'run: npx tsc -b',
       'run: cargo fetch --locked --target x86_64-pc-windows-msvc --manifest-path src-tauri/Cargo.toml',
       'run: node scripts/dependency-notices.mjs --check',
       'run: npm test -- --pool=threads --maxWorkers=1 --no-file-parallelism',
       'run: npm run build',
-      'run: cargo test --locked --manifest-path src-tauri/Cargo.toml --bins',
+      'run: cargo test --locked --manifest-path src-tauri/Cargo.toml --bins\n',
+      'Annotation interchange check with the pinned qpdf (E2)',
       'run: cargo test --locked --manifest-path src-tauri/Cargo.toml --no-run',
       'Keep only compiled dependencies in the Cargo cache',
       'actions/cache/save@',
@@ -70,5 +73,54 @@ describe('push and pull request CI workflow', () => {
     expect(prune).toContain('CARGO_CACHE_TARGET_BYTES=');
     expect(workflow).not.toMatch(/uses: actions\/cache@/);
     expect(workflow).not.toMatch(/CARGO_TARGET_DIR/);
+  });
+});
+
+describe('pinned qpdf annotation interchange check (E2, SM7 C-2)', () => {
+  const step = (name: string) => {
+    const start = workflow.indexOf(`      - name: ${name}\n`);
+    expect(start, name).toBeGreaterThan(-1);
+    const end = workflow.indexOf('\n      - ', start + 1);
+    return workflow.slice(start, end === -1 ? undefined : end);
+  };
+
+  it('fetches qpdf fresh into the runner temp folder and takes QPDF_EXE only from the printed line', () => {
+    const fetch = step('Fetch and verify the pinned qpdf for the annotation interchange check');
+    expect(fetch).toContain('id: qpdf\n');
+    expect(fetch).toContain("$root = Join-Path $env:RUNNER_TEMP 'qpdf'");
+    expect(fetch).toContain('-File ./scripts/setup-qpdf.ps1 -WorkRoot $root)');
+    expect(fetch).not.toMatch(/ZipCache|ZipPath|RecordFileHashes|PinsPath/);
+    expect(fetch).toContain('if ($LASTEXITCODE -ne 0) { throw');
+    expect(fetch).toContain("StartsWith('QPDF_EXE=')");
+    expect(fetch).toContain('if ($found.Count -ne 1) { throw');
+    expect(fetch).toContain('"exe=$exe" | Out-File -LiteralPath $env:GITHUB_OUTPUT');
+    expect(fetch).not.toContain('GITHUB_ENV');
+    expect(workflow).not.toContain('GITHUB_ENV');
+    expect(workflow.match(/QPDF_EXE: /g), 'only the E2 step receives QPDF_EXE').toHaveLength(1);
+  });
+
+  it('runs exactly the ignored E2 test and fails unless that one test passed', () => {
+    const e2 = step('Annotation interchange check with the pinned qpdf (E2)');
+    expect(e2).toContain('QPDF_EXE: ${{ steps.qpdf.outputs.exe }}');
+    expect(e2).toContain("if (-not $env:QPDF_EXE) { throw");
+    expect(e2).toContain('--bins annotations::qpdf_check::tests::qpdf_reads_the_interchange_fixtures_when_provided -- --ignored --exact');
+    expect(e2).toContain('if ($code -ne 0) { throw');
+    expect(e2).toContain("'^test result: ok\\. 1 passed; 0 failed; 0 ignored;'");
+    expect(e2).toContain('.Count -ne 1) { throw');
+    expect(e2).not.toMatch(/continue-on-error|if:/);
+  });
+
+  it('is wired into ci.yml only: no other workflow mentions qpdf', () => {
+    const others = readdirSync('.github/workflows').filter((name) => /\.ya?ml$/.test(name) && name !== 'ci.yml');
+    expect(others).toEqual(expect.arrayContaining(['release.yml', 'ocr-signed-artifact.yml']));
+    for (const name of others) {
+      expect(readFileSync(join('.github/workflows', name), 'utf8'), name).not.toMatch(/qpdf/i);
+    }
+  });
+
+  it('ships nothing from qpdf: not in the bundle resources or the notices inventory', () => {
+    expect(readFileSync('src-tauri/tauri.conf.json', 'utf8')).not.toMatch(/qpdf/i);
+    expect(readFileSync('src-tauri/resources/third-party-licenses/inventory.json', 'utf8')).not.toMatch(/qpdf/i);
+    expect(readFileSync('src-tauri/resources/third-party-licenses/THIRD-PARTY-NOTICES.txt', 'utf8')).not.toMatch(/qpdf/i);
   });
 });

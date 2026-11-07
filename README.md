@@ -118,6 +118,8 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Test fix: the qpdf setup-script zip-cache test no longer uses a work root on the runner's C: temp folder, which made master CI fail (SM3; `setup-qpdf.test.ts`; tests only).
+- CI (pending SM7 review): `ci.yml` fetches and verifies the pinned qpdf each run and runs the annotation interchange check (E2) with it. qpdf runs with a minimal environment and System32-first library loading. No other workflow uses qpdf, and nothing from it ships (SM3; `ci.yml`, `qpdf_check.rs`, `child_job.rs`).
 - Test fix: the qpdf setup-script test compares paths by their real long form, so the hosted runner's short `RUNNER~1` temp path no longer fails master CI (SM3; `setup-qpdf.test.ts`; tests only).
 - Tests (not in CI yet): qpdf 12.4.2's binaries are now pinned by hash, and the release checksum file's PGP signature was verified. The test harness re-checks and locks every pinned binary before each run; qpdf has not been run yet (SM3; `pins.json`, `qpdf_check.rs`).
 - Tests (not yet used): pinned qpdf 12.4.2 setup script and a hardened, fixtures-only test harness, waiting on SM7 review; nothing downloaded, not in CI (SM3; `setup-qpdf.ps1`, `qpdf_check.rs`).
@@ -131,5 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - Unlock with the owner password (SM1, source build; `owner_unlock.rs`, `DocumentProperties.tsx`): checked natively for R2-R4 (RC4, AES-128) and R6 (AES-256); restrictions lift for the session and Save a Copy writes no /Encrypt.
 - New manual `updater-secret-check.yml` (`release` environment, master only): signs a throwaway file with the updater secrets as `release.yml` passes them and verifies it against `releaseSigningPublicKey`; uploads nothing (SM6). Not yet run on a hosted runner.
 - Print-dialog verifier: a later top-level pass no longer overwrites the last completed native-enumeration receipt before its rooted pass finishes, fixing the childless-save-dialog test flake under load (SM6; `installed-print-dialog.ps1`; diagnostics only).
-- Test: every PowerShell-spawning test in the installed-app launch contract file now has a 60 s bound, matching its child's own 60 s limit, so a busy machine no longer fails them at 15 s (SM6; tests only).
-- Signed OCR artifact workflow restores no Actions cache: setup-node's `cache: npm` becomes `package-manager-cache: false`, pinned by a test (SM7 recommendation; SM6; `ocr-signed-artifact.yml`). Not yet exercised in a hosted run.

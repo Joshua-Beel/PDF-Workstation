@@ -50,7 +50,7 @@ use windows::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetCurrentThreadId, GetExitCodeProcess,
     GetProcessId, InitializeProcThreadAttributeList, OpenThread, ResumeThread, TerminateProcess,
     UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
-    EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
+    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW, THREAD_TERMINATE,
 };
 
@@ -380,13 +380,49 @@ pub(crate) fn spawn_suspended<E: From<ChildSystemError>>(
     prepare: impl FnOnce() -> Result<ChildCommand, E>,
     before_create: impl FnOnce() -> Result<(), E>,
 ) -> Result<SuspendedChild, E> {
+    spawn_suspended_in(label, limits, None, prepare, before_create)
+}
+
+/// As `spawn_suspended`, for a child that must not pick up libraries or settings from this process:
+/// - it gets exactly `environment` instead of a copy of this process's environment. That is a `CreateProcessW`
+///   Unicode environment block (`NAME=value` strings, each NUL-terminated, sorted by name, ending with an empty
+///   string); a block that does not end in two NULs is refused;
+/// - it starts with the image-load mitigations `PREFER_SYSTEM32` (a DLL loaded by name comes from System32
+///   before the application folder or anything else) and `NO_REMOTE` (no image from a network share).
+pub(crate) fn spawn_suspended_isolated<E: From<ChildSystemError>>(
+    label: &'static str,
+    limits: &JobLimits,
+    environment: &[u16],
+    prepare: impl FnOnce() -> Result<ChildCommand, E>,
+    before_create: impl FnOnce() -> Result<(), E>,
+) -> Result<SuspendedChild, E> {
+    if environment.len() < 2 || environment[environment.len() - 2..] != [0, 0] {
+        return Err(ChildSystemError(format!("The {label} environment block is not terminated")).into());
+    }
+    spawn_suspended_in(label, limits, Some(environment), prepare, before_create)
+}
+
+/// `PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY` and the image-load policy bits (winbase.h).
+const PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY: usize = 0x0002_0007;
+const IMAGE_LOAD_NO_REMOTE_ALWAYS_ON: u64 = 1 << 52;
+const IMAGE_LOAD_PREFER_SYSTEM32_ALWAYS_ON: u64 = 1 << 60;
+pub(crate) const ISOLATED_IMAGE_LOAD_POLICY: u64 = IMAGE_LOAD_NO_REMOTE_ALWAYS_ON | IMAGE_LOAD_PREFER_SYSTEM32_ALWAYS_ON;
+
+fn spawn_suspended_in<E: From<ChildSystemError>>(
+    label: &'static str,
+    limits: &JobLimits,
+    environment: Option<&[u16]>,
+    prepare: impl FnOnce() -> Result<ChildCommand, E>,
+    before_create: impl FnOnce() -> Result<(), E>,
+) -> Result<SuspendedChild, E> {
     let _spawning = spawn_lock();
     let (job, notifications) = create_job(label, limits)?;
     let (child_stdin, parent_stdin) = create_pipe(label)?;
     let (parent_stdout, child_stdout) = create_pipe(label)?;
     let (parent_stderr, child_stderr) = create_pipe(label)?;
     let inherited = [as_windows_handle(&child_stdin), as_windows_handle(&child_stdout), as_windows_handle(&child_stderr)];
-    let mut attributes = ProcThreadAttributes::with_handle_list(label, &inherited)?;
+    let mitigation = environment.map(|_| ISOLATED_IMAGE_LOAD_POLICY);
+    let mut attributes = ProcThreadAttributes::new(label, &inherited, mitigation)?;
     let mut startup = STARTUPINFOEXW::default();
     startup.StartupInfo.cb = u32::try_from(size_of::<STARTUPINFOEXW>()).unwrap();
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -396,7 +432,10 @@ pub(crate) fn spawn_suspended<E: From<ChildSystemError>>(
     startup.lpAttributeList = attributes.list;
     let mut process_info = PROCESS_INFORMATION::default();
     let ChildCommand { application, mut command_line, current_directory } = prepare()?;
-    let creation_flags = CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT;
+    let mut creation_flags = CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT;
+    if environment.is_some() {
+        creation_flags |= CREATE_UNICODE_ENVIRONMENT;
+    }
     before_create()?;
     // The child ends are inheritable only for the `CreateProcessW` call itself; `SPAWN_LOCK` is still held.
     // Known limit: code inside this process that starts a process without taking the lock (shell
@@ -412,7 +451,7 @@ pub(crate) fn spawn_suspended<E: From<ChildSystemError>>(
             None,
             true,
             creation_flags,
-            None,
+            environment.map(|block| block.as_ptr().cast::<std::ffi::c_void>()),
             PCWSTR(current_directory.as_ptr()),
             &startup.StartupInfo,
             &mut process_info,
@@ -788,13 +827,17 @@ fn read_bounded(label: &str, handle: OwnedHandle, limit: usize, exceeded: &Atomi
 struct ProcThreadAttributes {
     storage: Vec<usize>,
     list: LPPROC_THREAD_ATTRIBUTE_LIST,
+    /// The mitigation value must stay at a fixed address until `CreateProcessW` has read it.
+    mitigation: Box<u64>,
     released: bool,
 }
 
 impl ProcThreadAttributes {
-    fn with_handle_list(label: &str, handles: &[HANDLE]) -> Result<Self, ChildSystemError> {
+    /// The inherited-handle list, plus a process mitigation policy when `mitigation` is set.
+    fn new(label: &str, handles: &[HANDLE], mitigation: Option<u64>) -> Result<Self, ChildSystemError> {
+        let count = if mitigation.is_some() { 2 } else { 1 };
         let mut bytes = 0_usize;
-        let _ = unsafe { InitializeProcThreadAttributeList(None, 1, None, &mut bytes) };
+        let _ = unsafe { InitializeProcThreadAttributeList(None, count, None, &mut bytes) };
         if bytes == 0 {
             return Err(ChildSystemError(format!("Could not size {label} process attributes")));
         }
@@ -804,7 +847,7 @@ impl ProcThreadAttributes {
             / size_of::<usize>();
         let mut storage = vec![0_usize; words];
         let list = LPPROC_THREAD_ATTRIBUTE_LIST(storage.as_mut_ptr().cast());
-        unsafe { InitializeProcThreadAttributeList(Some(list), 1, None, &mut bytes) }
+        unsafe { InitializeProcThreadAttributeList(Some(list), count, None, &mut bytes) }
             .map_err(|error| ChildSystemError(format!("Could not initialize {label} process attributes: {error}")))?;
         let update = unsafe {
             UpdateProcThreadAttribute(
@@ -821,7 +864,25 @@ impl ProcThreadAttributes {
             unsafe { DeleteProcThreadAttributeList(list) };
             return Err(ChildSystemError(format!("Could not restrict {label} process handles: {error}")));
         }
-        Ok(Self { storage, list, released: false })
+        let mitigation = Box::new(mitigation.unwrap_or(0));
+        if count == 2 {
+            let update = unsafe {
+                UpdateProcThreadAttribute(
+                    list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
+                    Some((&*mitigation as *const u64).cast()),
+                    size_of::<u64>(),
+                    None,
+                    None,
+                )
+            };
+            if let Err(error) = update {
+                unsafe { DeleteProcThreadAttributeList(list) };
+                return Err(ChildSystemError(format!("Could not set {label} image-load mitigations: {error}")));
+            }
+        }
+        Ok(Self { storage, list, mitigation, released: false })
     }
 
     fn release(&mut self) {
@@ -835,7 +896,7 @@ impl ProcThreadAttributes {
 impl Drop for ProcThreadAttributes {
     fn drop(&mut self) {
         self.release();
-        let _ = self.storage.len();
+        let _ = (self.storage.len(), *self.mitigation);
     }
 }
 
