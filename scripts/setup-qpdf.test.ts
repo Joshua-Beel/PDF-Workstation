@@ -52,29 +52,42 @@ function shortName(folder: string): string {
   return probe.status === 0 ? probe.stdout.trim() : '';
 }
 
+/** An environment variable looked up by name in any case, as Windows does (Git Bash passes PROGRAMFILES). */
+function environment(name: string): string | undefined {
+  const key = Object.keys(process.env).find(candidate => candidate.toLowerCase() === name.toLowerCase());
+  return key === undefined ? undefined : process.env[key];
+}
+
 /** A folder with a distinct 8.3 short name: Program Files, the temp folder (RUNNER~1 on the hosted runner) or
- * the user profile, whichever has one first. */
-function shortFolder(): { long: string; short: string } | null {
-  for (const candidate of [process.env.ProgramFiles, tmpdir(), process.env.USERPROFILE]) {
-    if (!candidate || !existsSync(candidate)) continue;
+ * the user profile, whichever has one first. `tried` says what each candidate gave, for the failure message. */
+function shortFolder(): { found: { long: string; short: string } | null; tried: string[] } {
+  const tried: string[] = [];
+  const candidates: [string, string | undefined][] = [['ProgramFiles', environment('ProgramFiles')], ['TEMP', tmpdir()], ['USERPROFILE', environment('USERPROFILE')]];
+  for (const [name, candidate] of candidates) {
+    if (!candidate || !existsSync(candidate)) {
+      tried.push(`${name}: ${candidate ?? 'not set'} (missing)`);
+      continue;
+    }
     const long = realpathSync.native(candidate);
     const short = shortName(long);
-    if (short.includes('~') && short.toLowerCase() !== long.toLowerCase() && existsSync(short)) return { long, short };
+    tried.push(`${name}: ${long} -> ${short || 'no short form'}`);
+    if (short.includes('~') && short.toLowerCase() !== long.toLowerCase() && existsSync(short)) return { found: { long, short }, tried };
   }
-  return null;
+  return { found: null, tried };
 }
-const shortPath = shortFolder();
+const { found: shortPath, tried: shortTried } = shortFolder();
 
 describe('path comparison used by these tests', () => {
-  it.skipIf(!shortPath && !process.env.CI)('treats an 8.3 short path and its long form as the same folder, in both directions', () => {
-    expect(shortPath, 'CI must provide a folder with an 8.3 short name (Program Files, TEMP or the profile)').not.toBeNull();
+  it.skipIf(!shortPath && !environment('CI'))('treats an 8.3 short path and its long form as the same folder, in both directions', () => {
+    expect(shortPath, `CI must provide a folder with an 8.3 short name; tried ${shortTried.join('; ')}`).not.toBeNull();
     const { long, short } = shortPath!;
     const child = readdirSync(long)[0];
     expect(child, `${long} has an entry to compare`).toBeDefined();
-    expect(inside(join(short, child), long)).toBe(true);
-    expect(inside(join(long, child), short.toUpperCase())).toBe(true);
-    expect(inside(long, join(short, child))).toBe(false);
-    expect(inside(short, long), 'a folder is not inside itself').toBe(false);
+    const folders = `long ${long}, short ${short}`;
+    expect(inside(join(short, child), long), folders).toBe(true);
+    expect(inside(join(long, child), short.toUpperCase()), folders).toBe(true);
+    expect(inside(long, join(short, child)), folders).toBe(false);
+    expect(inside(short, long), `a folder is not inside itself: ${folders}`).toBe(false);
   });
 });
 
@@ -157,11 +170,15 @@ describe('setup-qpdf.ps1', { timeout: 240_000 }, () => {
     const folder = scratch();
     const archive = zip(folder, ['qpdf-test/bin/qpdf.exe']);
     const pinsPath = pins(folder, archive, binHashes(folder, ['qpdf-test/bin/qpdf.exe']));
-    const refused = run(['-PinsPath', pinsPath, '-WorkRoot', repositoryWorkRoot, '-ZipCache', 'C:\\sm3-qpdf-cache-never-created'], { CI: undefined });
-    expect(refused.status).not.toBe(0);
-    expect(refused.err).toContain('zip cache');
-    expect(existsSync('C:\\sm3-qpdf-cache-never-created')).toBe(false);
-    expect(existsSync(repositoryWorkRoot), 'the work root is not created').toBe(false);
+    try {
+      const refused = run(['-PinsPath', pinsPath, '-WorkRoot', repositoryWorkRoot, '-ZipCache', 'C:\\sm3-qpdf-cache-never-created'], { CI: undefined });
+      expect(refused.status).not.toBe(0);
+      expect(refused.err).toContain('zip cache');
+      expect(existsSync('C:\\sm3-qpdf-cache-never-created')).toBe(false);
+      expect(existsSync(repositoryWorkRoot), 'the work root is not created').toBe(false);
+    } finally {
+      rmSync(repositoryWorkRoot, { recursive: true, force: true });
+    }
   });
 
   it('the committed pins name the reviewed release, its signature facts and every binary in it', () => {
