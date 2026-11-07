@@ -108,7 +108,7 @@ pub struct EditSession {
     pub revision: u64,
     source_notes: Vec<Vec<crate::comments::Note>>,
     comments_reason: Option<String>,
-    /// Read-only survey of the source's annotations, by source page, when `comments_reason` refused editing.
+    /// Read-only survey of the source's annotations other than the app's editable ones, by source page.
     view_only: Option<crate::annotations::Survey>,
     text_extraction_permission: Result<(), String>,
     next_note: u64,
@@ -151,18 +151,16 @@ impl EditSession {
         } else {
             parsed.as_ref().map_err(|_| "The PDF extraction permission could not be verified.".into()).and_then(|document| source_text_extraction_permission(document))
         };
-        let imported = parsed.as_ref().map_err(Clone::clone).and_then(crate::comments::read);
-        let (source_notes, comments_reason) = match imported {
-            Ok(notes) if notes.len() == count => (notes, None),
-            Ok(_) => (vec![Vec::new(); count], Some("The PDF engines disagree about the page count.".into())),
-            Err(reason) => (vec![Vec::new(); count], Some(reason)),
+        let imported = parsed.as_ref().map_err(Clone::clone).and_then(crate::comments::read_owned);
+        let (source_notes, comments_reason, app_objects, max_number) = match imported {
+            Ok(owned) if owned.notes.len() == count => (owned.notes, None, owned.app.keys().copied().collect(), owned.max_number),
+            Ok(_) => (vec![Vec::new(); count], Some("The PDF engines disagree about the page count.".into()), HashSet::new(), 0),
+            Err(reason) => (vec![Vec::new(); count], Some(reason), HashSet::new(), 0),
         };
-        // Annotations the strict reader refused are listed read-only; the survey must see the same pages.
-        let view_only = match (&comments_reason, &parsed) {
-            (Some(_), Ok(document)) => Some(crate::annotations::survey(document)).filter(|survey| survey.pages.len() == count),
-            _ => None,
-        };
-        let next_note = source_notes.iter().flatten().filter_map(|note| crate::comments::number(&note.id).ok()).max().unwrap_or(0).saturating_add(1);
+        // Every annotation that is not the app's own editable one is listed read-only (all of them when
+        // commenting is refused); the survey must see the same pages.
+        let view_only = parsed.as_ref().ok().map(|document| crate::annotations::survey(document, &app_objects)).filter(|survey| survey.pages.len() == count);
+        let next_note = source_notes.iter().flatten().filter_map(|note| crate::comments::number(&note.id).ok()).max().unwrap_or(0).max(max_number).saturating_add(1);
         let plan: Vec<_> = (0..count).map(|source| PageSpec { source, turns: 0, crop: None, notes: source_notes[source].clone() }).collect();
         let original_size = source.len();
         Self { source, source_page_count: count, saved: plan.clone(), plan, undo: VecDeque::new(), redo: VecDeque::new(), history_bytes: 0, history_budget: HISTORY_BUDGET, revision: 0, source_notes, comments_reason, view_only, text_extraction_permission, next_note, outline: Default::default(), labels: Default::default(), page_numbers: Default::default(), original_size, owner_unlocked: false }
@@ -281,6 +279,16 @@ impl EditSession {
     }
     fn notes_changed(&self, plan: &[PageSpec]) -> bool {
         plan.iter().any(|spec| self.source_notes.get(spec.source) != Some(&spec.notes))
+    }
+    /// Whether the current plan deletes or replaces an annotation that is in the file on disk. SM2's
+    /// save-in-place design (`_log/sm2-save-in-place-design-2026-11-06.md` §11.2) makes such a save a full
+    /// rewrite on unsigned files, so the old annotation's bytes do not stay in an earlier revision. Editing a
+    /// note counts too: the app writes a new object in place of the old one. Only annotations added in this
+    /// session can be removed without one. Foreign annotations cannot be deleted in this build.
+    #[allow(dead_code)]
+    pub(crate) fn removes_saved_annotation(&self) -> bool {
+        let kept: Vec<&crate::comments::Note> = self.plan.iter().flat_map(|spec| &spec.notes).collect();
+        self.source_notes.iter().flatten().any(|note| !kept.contains(&note))
     }
     pub fn note_source(&self, plan: &[PageSpec]) -> Result<Option<Vec<u8>>, String> {
         if !self.notes_changed(plan) { return Ok(None); }
@@ -604,8 +612,12 @@ fn check_supported(document: &Document, structural: bool, removal: bool) -> Resu
         return Err("Deleting/extracting pages with attachments, scripts, or open actions is not supported yet. This avoids losing or breaking their references.".into());
     }
     if removal && document.get_pages().values().any(|id| document.get_dictionary(*id).is_ok_and(|page| page.has(b"Annots"))) {
-        if let Err(reason) = crate::comments::read(document) {
-            return Err(format!("Deleting/extracting pages is not supported yet for this document's annotations: {reason}"));
+        // Other apps' annotations (and links) can refer to each other across pages (popups, replies), so
+        // removing pages under them stays refused until that cleanup exists; the app's own are page-local.
+        match crate::comments::read_owned(document) {
+            Err(reason) => return Err(format!("Deleting/extracting pages is not supported yet for this document's annotations: {reason}")),
+            Ok(owned) if owned.foreign > 0 => return Err("Deleting/extracting pages is not supported yet for PDFs with links or annotations made by other apps.".into()),
+            Ok(_) => {}
         }
     }
     // Outlines, named destinations and page labels are read (and refused if malformed) by `EditSession::build`.

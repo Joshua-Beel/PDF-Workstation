@@ -1173,18 +1173,15 @@ impl PdfService {
                             let session = &sessions.get(&id).ok_or("Document is closed")?.0;
                             if session.revision != revision { return Err("Document changed. Refresh annotations.".into()); }
                             let mut result = crate::comments::AnnotationList { document_id: id, revision, status: "supported", reason: None, annotations: Vec::new(), view_only: Vec::new(), view_only_truncated: 0 };
-                            if let Some(reason) = session.comments_reason() {
-                                result.status = "unsupported"; result.reason = Some(reason.to_owned());
-                                if let Some(survey) = session.view_only_annotations() {
-                                    result.view_only_truncated = survey.truncated;
-                                    for (index, spec) in session.plan.iter().enumerate() {
-                                        for annotation in survey.pages.get(spec.source).into_iter().flatten() {
-                                            result.view_only.push(crate::comments::ViewOnlyInfo { page: index, annotation: annotation.clone() });
-                                        }
+                            if let Some(survey) = session.view_only_annotations() {
+                                result.view_only_truncated = survey.truncated;
+                                for (index, spec) in session.plan.iter().enumerate() {
+                                    for annotation in survey.pages.get(spec.source).into_iter().flatten() {
+                                        result.view_only.push(crate::comments::ViewOnlyInfo { page: index, annotation: annotation.clone() });
                                     }
                                 }
-                                return Ok(result);
                             }
+                            if let Some(reason) = session.comments_reason() { result.status = "unsupported"; result.reason = Some(reason.to_owned()); return Ok(result); }
                             let document = documents.get(&id).ok_or("Document is closed")?;
                             for (index, spec) in session.plan.iter().enumerate() {
                                 for note in &spec.notes {
@@ -3041,7 +3038,7 @@ mod tests {
         call(&service, |reply| Request::Close(info.id, reply)).unwrap(); assert!(call(&service, |reply| Request::Comments(info.id, info.revision, reply)).is_err()); assert!(call(&service, |reply| Request::Comment(info.id, info.revision, CommentMutation::Delete(next_id), reply)).is_err());
     }
     #[test]
-    fn comments_signed_forms_tagging_foreign_annotations_and_altered_owned_schema_refuse() {
+    fn comments_signed_forms_tagging_refuse_while_foreign_and_altered_annotations_are_kept() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); let service = PdfService::start(root.join("resources/pdfium/bin/pdfium.dll")); let folder = tempfile::tempdir().unwrap();
         for feature in ["Perms", "AcroForm", "StructTreeRoot", "Foreign", "Altered"] {
             let mut pdf = lopdf::Document::load(root.join("resources/welcome.pdf")).unwrap();
@@ -3051,6 +3048,16 @@ mod tests {
                 feature => { pdf.catalog_mut().unwrap().set(feature, lopdf::dictionary! {}); },
             }
             let path = folder.path().join(format!("protected-notes-{feature}.pdf")); pdf.save(&path).unwrap(); let source = std::fs::read(&path).unwrap(); let info = call(&service, |reply| Request::Open(path.clone(), reply)).unwrap();
+            if matches!(feature, "Foreign" | "Altered") {
+                // Slice 1c: another app's note, or an app note changed elsewhere, is kept view only and no longer
+                // blocks commenting; adding a note leaves the kept one untouched and never writes the source.
+                let list = call(&service, |reply| Request::Annotations(info.id, 0, reply)).unwrap();
+                assert_eq!(list.status, "supported"); assert!(list.annotations.is_empty()); assert_eq!(list.view_only.len(), 1);
+                let after = call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::Create(0, CropRect { x: 0.1, y: 0.1, width: 0.1, height: 0.1 }, "Alongside".into()), reply)).unwrap();
+                let list = call(&service, |reply| Request::Annotations(after.id, after.revision, reply)).unwrap(); assert_eq!((list.annotations.len(), list.view_only.len()), (1, 1));
+                call(&service, |reply| Request::Close(info.id, reply)).unwrap(); assert_eq!(std::fs::read(path).unwrap(), source);
+                continue;
+            }
             let list = call(&service, |reply| Request::Comments(info.id, 0, reply)).unwrap(); assert_eq!(list.status, "unsupported"); assert!(list.reason.is_some()); assert!(list.notes.is_empty());
             assert!(call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::Create(0, CropRect { x: 0.1, y: 0.1, width: 0.1, height: 0.1 }, "Blocked".into()), reply)).is_err());
             assert_eq!(call(&service, |reply| Request::Annotations(info.id, 0, reply)).unwrap().status, "unsupported"); assert!(call(&service, |reply| Request::Comment(info.id, 0, CommentMutation::CreateHighlight(0, CropRect { x: 0.1, y: 0.1, width: 0.1, height: 0.1 }, None), reply)).is_err());

@@ -2,6 +2,44 @@
 
 The full change log, newest first, moved verbatim from the README's "Recent changes" section (only relative link paths were adjusted for this folder); the [README](../README.md#recent-changes) keeps one-line summaries of the newest entries.
 
+- Slice 1c review fixes (SM3; branch `sm3/annot-p1c`; `comments.rs`). Both reviews of `ba4fb9d` returned CHANGES: SM7 `_log/sm7-review-annot-p1c-ba4fb9d.md` (F1, F2, L-1) and the code review (F2 reproduced, plus a P3).
+  - **F1:** `read_owned` walks each indirect `/Annots` array once, and borrows the array instead of cloning it. An array used by more than one page makes all its entries foreign.
+    - A new document-wide cap of 262,144 entries (`annotations::MAX_ENTRIES_TOTAL`) fails closed. Commenting is refused with a reason, but the file still opens, displays and lists through the bounded survey.
+  - **F2:** inline entries of every `/Annots` array, direct or indirect, are now scanned for references. An inline reply (`/IRT`) or popup (`/Parent`) pointing at an app note keeps that note foreign, so a write can no longer leave the inline entry pointing at a deleted object.
+  - **L-1:** an indirect `/Annots` array that any other object refers to keeps its entries foreign.
+  - **Code review P3:** `app_number` resolves an indirect `/NM`, so new IDs cannot collide with one.
+  - **Tests:**
+    - `a_shared_annots_array_is_read_once_and_open_and_write_stay_fast`: 100,000 pages share one 65,536-entry array. Release, two runs: `read_owned` 0.70-0.95 s, session open 2.2-2.4 s (parse excluded; includes the survey and the 100,000-page plan), write 1.1-1.2 s. Debug: 5.3-5.8 s, 10.4 s and 6.1-7.3 s. Budgets are 1 s release and 20 s debug, times 2 for read and write and times 4 for open. Each grows linearly with the page count; the old per-page rescan would take minutes.
+    - `more_entries_than_the_document_cap_refuse_commenting_but_still_open_and_list`.
+    - `an_inline_reply_or_another_referrer_of_the_annots_array_keeps_an_app_note_view_only`: inline `/IRT` and `/Parent`, each in a direct and an indirect array; an array referenced from `/Info`; an indirect `/NM` counted in the highest app ID.
+  - Focused filters `annotations::`, `comments::` and `editor::`: 50 passed, 2 ignored (debug). Release timing filter: 3 passed. The full suite was not re-run, since the change is confined to `comments.rs` and its tests.
+- Annotation interchange phase 1, slice 1c: the writer keeps other apps' annotations, and commenting on such files is allowed (SM3; branch `sm3/annot-p1c` off `44a8d0c`; `comments.rs`, `editor.rs`, `annotations.rs`, `service.rs`, `CommentsPanel.tsx` and its test, `docs/tools/comments.md`).
+  - **Reader:** the whole-file refusal for foreign annotations is gone. `comments::read_owned` checks each `/Annots` entry against the app's strict format (`app_note`, unchanged rules). It accepts a direct or an indirect `/Annots` array, and an empty one.
+    - An entry is the app's editable annotation only if it passes `app_note`, is referenced once from one page, has a unique `/NM` and an appearance stream of its own, and no other object or the trailer refers to it or its appearance.
+    - Everything else is foreign and kept: other apps' annotations, links, inline dictionaries, nulls, and app notes that were altered, duplicated, or replied to from another app.
+    - `read` returns only the editable notes. The document-level refusals stay: encrypted, signed, unsupported version, forms, tagged, page labels, threads, a malformed `/Annots`, and over the app's 1,000-note, 1 MiB or 4,096-slot limits.
+    - New IDs start above the highest app ID on any annotation (`Owned::max_number`), so a kept app note's ID is never reused.
+  - **Writer:** `comments::write` no longer deletes every page's `/Annots`. It touches only pages whose planned app notes differ from the source.
+    - On such a page it keeps every non-app entry, in order and with its objects unchanged. Each kept app note is regenerated in its own position, deleted ones are dropped with their appearance stream, and new ones are appended.
+    - A touched page gets a direct array; an indirect array object left unused is pruned. An emptied page loses `/Annots`.
+  - **Delete, extract and split** stay refused when the file has any foreign entry (`check_supported`: "links or annotations made by other apps"). Popups and replies can refer across pages, and that cleanup is a later slice with SM2. Files with only the app's own annotations behave as before.
+  - **SM2 seam:** new `EditSession::removes_saved_annotation()` is true when the plan deletes or replaces an annotation that is on disk (an edit replaces the object). This is the predicate SM2's save-in-place §11.2 needs to force a full rewrite on unsigned files. It is unused until save-in-place lands.
+  - **List:** `annotations::survey` takes the set of editable app annotation ids to skip. The session always surveys, and `AnnotationList.viewOnly` is filled whether or not commenting is available. The Comments panel shows the view-only list under your own comments: "shown and kept as saved".
+  - **Tests:**
+    - `app_comments_work_alongside_other_apps_annotations_which_are_kept_untouched`, on a two-page Acrobat-style file (indirect `/Annots` with a sticky note, popup, reply, link, inline square and null; another app's highlight on page 2): add, edit and delete an app note. Every foreign object is unchanged, the foreign entries keep their order, the untouched page keeps its `/Annots`, delete-page is refused, and a move keeps everything.
+    - `an_app_note_another_object_refers_to_becomes_foreign_and_new_ids_skip_its_number`.
+    - Earlier refusal tests now assert that the altered annotation is kept as foreign and preserved byte-for-byte as an object when a note is added (`preserved` helper): altered keys, quads, appearance, colour or opacity, duplicate `/NM`, a shared appearance, a reference from the trailer, a repeated `/Annots` entry, and an empty array.
+    - A vitest covers the panel with both lists.
+    - Updated, because they asserted the old refusals:
+      - `service::tests::comments_signed_forms_tagging_refuse_while_foreign_and_altered_annotations_are_kept`: the foreign and altered cases are now supported, list one view-only item and take a new note; the source file is untouched.
+      - SM2's `split.rs` guard test: an empty `/Annots` no longer blocks a split, so that case is replaced by a Link annotation, which still does.
+    - Mutation check: dropping null entries in the writer fails the round-trip test.
+  - **Measured.**
+    - Read-only census of the real work PDFs (counts only): today's reader now accepts 79 of the 285 annotated files, against 0 before. The other 206 are still refused for form, tagged, page-label or thread structure. The view-only survey listed all 4,522 expected annotations.
+    - Filters `annotations::`, `comments::` and `editor::`: 47 passed, 2 ignored.
+    - `cargo test --bins`: 600 passed, 4 failed, 42 ignored (3,815 s). Two of the failures were the tests updated above. The other two were the forms-hardening wall-clock pair; re-run alone with the updated tests, all 10 pass.
+    - `--no-run` builds every target. `tsc -b` is clean. vitest for the touched files: 20 passed.
+  - Source build only.
 - Slice 1b review fixes (SM3; branch `sm3/annot-p1b`; `annotations.rs`, `annotation_lockdown_tests.rs`). The SM7 review `_log/sm7-review-annot-p1b-26f60b5.md` (F1 high, F2 medium, L-1 to L-4) and the code review's P1 both returned CHANGES on `26f60b5`. The reviewers measured 214 s to open, in a release build, a file with 4,096 annotations sharing one 1 MB string of control characters.
   - **F1 / P1:** `annotations::text` now examines at most 4 raw bytes per allowed character after the BOM, whatever it keeps. The UTF-8 path no longer collects the whole string into a `Vec<char>`; a split final character becomes U+FFFD. An indirect string shared by many annotations is decoded once per field limit (`Decoded` cache), so total decoding work stays within the file's size.
   - **F2:** a new document-wide cap of 262,144 `/Annots` entries examined (`MAX_ENTRIES_TOTAL`), on top of 65,536 per page. An indirect `/Annots` array, or an annotation object, that several pages share is surveyed once.

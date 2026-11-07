@@ -43,12 +43,24 @@ describe('CommentsPanel', () => {
     }
     expect([...types].filter(type => !['aside', 'div', 'h2', 'button', 'p', 'ul', 'li', 'strong', 'small', 'span'].includes(type))).toEqual([]);
     const paragraphs = ui.root.findAllByType('p').map(node => node.children.join(''));
-    expect(paragraphs).toContain('These 6 annotations are shown as saved. This build cannot change them yet.');
+    expect(paragraphs).toContain('These 6 annotations are shown and kept as saved. This build cannot change them yet.');
     expect(paragraphs).toContain('2 more not listed.');
     const labels = list.findAllByType('strong').map(node => node.children.join(''));
     expect(labels).toEqual(['Sticky note · Page 1', 'Reply · Sticky note · Page 1', 'Drawing · Page 2', 'Annotation · Page 2']);
     expect(list.findAllByType('span')[0].children.join('')).toBe(`${hostile}\nsecond line`);
     expect(ui.root.findAllByType('button').map(button => button.props['aria-label'])).toEqual(['Close comments']);
+  });
+
+  it('lists other apps\' annotations beside the editable ones when commenting is available', () => {
+    const select = vi.fn();
+    let ui!: ReactTestRenderer;
+    act(() => { ui = create(<CommentsPanel document={document} page={0} annotations={{ ...annotations, viewOnly: [{ page: 1, subtype: 'Ink', author: 'Reviewer', subject: null, contents: null, modified: null, reply: false }] }} error="" selectedId={null} onAddComment={vi.fn()} onAddHighlight={vi.fn()} onSelect={select} close={vi.fn()} />); });
+    const buttons = ui.root.findAllByType('button').map(button => button.children.join(''));
+    expect(buttons).toContain('Add comment on page 1');
+    expect(ui.root.findByProps({ 'aria-label': 'Annotations (view only)' }).findAllByType('li')).toHaveLength(1);
+    expect(ui.root.findAllByType('p').map(node => node.children.join(''))).toContain('This annotation is shown and kept as saved. This build cannot change them yet.');
+    act(() => { ui.update(<CommentsPanel document={document} page={0} annotations={{ ...annotations, annotations: [], viewOnly: [{ page: 1, subtype: 'Ink', author: null, subject: null, contents: null, modified: null, reply: false }] }} error="" selectedId={null} onAddComment={vi.fn()} onAddHighlight={vi.fn()} onSelect={select} close={vi.fn()} />); });
+    expect(ui.root.findAllByType('p').map(node => node.children.join(''))).toContain('No comments or highlights of your own yet.');
   });
 
   it('offers an area highlight and identifies optional descriptions clearly', () => {
