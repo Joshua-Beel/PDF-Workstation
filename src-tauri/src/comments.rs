@@ -121,24 +121,30 @@ pub fn id_matches_kind(id: &str, kind: AnnotationKind) -> Result<(), String> {
 }
 
 /// A new random UUID (version 4) for a new annotation's `/NM`, from the operating system's CSPRNG. Never
-/// derived from the machine, the user or the time (SM7 E3).
-pub fn new_id() -> String {
+/// derived from the machine, the user or the time (SM7 E3). A generator failure is an error, never a panic:
+/// the PDF worker serves every open document and has no unwind guard (SM7 L-1 on 684b33e).
+pub fn new_id() -> Result<String, String> {
     let mut random = [0u8; 16];
-    fill_random(&mut random);
+    #[cfg(test)]
+    if FAIL_RANDOM.with(std::cell::Cell::get) { return Err(RANDOM_FAILED.into()); }
+    fill_random(&mut random)?;
     random[6] = (random[6] & 0x0f) | 0x40; random[8] = (random[8] & 0x3f) | 0x80;
     let hex = random.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
-    format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32])
+    Ok(format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32]))
 }
+#[cfg(test)]
+thread_local! { pub(crate) static FAIL_RANDOM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+const RANDOM_FAILED: &str = "The system random number generator failed, so no annotation ID could be made. Nothing was changed.";
 #[cfg(windows)]
-fn fill_random(buffer: &mut [u8]) {
+fn fill_random(buffer: &mut [u8]) -> Result<(), String> {
     use windows::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
     let status = unsafe { BCryptGenRandom(None, buffer, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
-    assert!(status.is_ok(), "the system random number generator failed");
+    if status.is_ok() { Ok(()) } else { Err(RANDOM_FAILED.into()) }
 }
 #[cfg(not(windows))]
-fn fill_random(buffer: &mut [u8]) {
+fn fill_random(buffer: &mut [u8]) -> Result<(), String> {
     use std::io::Read;
-    std::fs::File::open("/dev/urandom").and_then(|mut file| file.read_exact(buffer)).expect("the system random number generator failed");
+    std::fs::File::open("/dev/urandom").and_then(|mut file| file.read_exact(buffer)).map_err(|_| RANDOM_FAILED.to_owned())
 }
 /// QuadPoints in the order Acrobat writes and PDFium's appearance generator reads: top-left, top-right,
 /// bottom-left, bottom-right (measured on 204 real markup quads, 0 in any other order).
@@ -476,13 +482,13 @@ mod tests {
     fn sample() -> Vec<u8> { std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/welcome.pdf")).unwrap() }
     #[test]
     fn new_annotation_ids_are_random_uuids_and_numbered_ids_still_read() {
-        let ids: HashSet<String> = (0..1_000).map(|_| new_id()).collect();
+        let ids: HashSet<String> = (0..1_000).map(|_| new_id().unwrap()).collect();
         assert_eq!(ids.len(), 1_000);
         assert!(ids.iter().all(|id| is_uuid(id) && crate::recovery_journal::annotation_uuid(id)));
         for (value, uuid) in [("5c1f0a52-1b7e-4c33-8a2b-0123456789ab", true), ("5C1F0A52-1B7E-4C33-8A2B-0123456789AB", false), ("5c1f0a52-1b7e-1c33-8a2b-0123456789ab", false), ("5c1f0a52-1b7e-4c33-7a2b-0123456789ab", false), ("5c1f0a521b7e4c338a2b0123456789ab", false), ("", false)] {
             assert_eq!(is_uuid(value), uuid, "{value}"); assert_eq!(crate::recovery_journal::annotation_uuid(value), uuid, "the journal's copy agrees: {value}");
         }
-        assert!(id_matches_kind(&new_id(), AnnotationKind::Note).is_ok() && id_matches_kind(&new_id(), AnnotationKind::Highlight).is_ok());
+        assert!(id_matches_kind(&new_id().unwrap(), AnnotationKind::Note).is_ok() && id_matches_kind(&new_id().unwrap(), AnnotationKind::Highlight).is_ok());
         assert!(id_matches_kind(&id(3), AnnotationKind::Note).is_ok() && id_matches_kind(&id(3), AnnotationKind::Highlight).is_err(), "a numbered ID still carries its kind");
         // A new note is written with its UUID as /NM and reads back editable; a numbered 0.3.x note keeps its ID.
         let mut session = EditSession::new(sample(), 6);
@@ -578,6 +584,27 @@ mod tests {
         }
         assert!(encode_recovery(&record(annotation(Some("not a date")))).is_err());
         assert!(encode_recovery(&record(annotation(Some("D:20250230000000Z")))).is_err(), "no February 30th");
+        // SM7 L-1: a generator failure refuses the edit and leaves the session as it was; nothing panics.
+        let mut session = EditSession::new(sample(), 6);
+        let before = session.plan.clone();
+        FAIL_RANDOM.with(|fail| fail.set(true));
+        let refused = session.proposed_comment(Some((0, CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 })), None, Some("x"));
+        let refused_highlight = session.proposed_text_highlight(0, vec![CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 }], None);
+        FAIL_RANDOM.with(|fail| fail.set(false));
+        assert!(refused.unwrap_err().contains("random number generator") && refused_highlight.unwrap_err().contains("random number generator"));
+        assert_eq!(session.plan, before);
+        let next = session.proposed_comment(Some((0, CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 })), None, Some("x")).unwrap(); session.commit_comments(next);
+        // SM7 M-1: a dateless note with a UUID ID is unreadable by 0.3.x too, so it is version 3; restamped as 2, refused.
+        let mut uuid_note = annotation(None); uuid_note.id = new_id().unwrap();
+        let original = record(uuid_note);
+        let bytes = encode_recovery(&original).unwrap();
+        assert_eq!(u16::from_le_bytes([bytes[8], bytes[9]]), 3);
+        assert_eq!(decode_recovery(&bytes, original.source, None, 0).unwrap(), original);
+        for older in [1u16, 2] {
+            let mut restamped = bytes.clone(); restamped[8..10].copy_from_slice(&older.to_le_bytes());
+            let body = restamped.len() - 32; let digest = <sha2::Sha256 as sha2::Digest>::digest(&restamped[..body]); restamped[body..].copy_from_slice(&digest);
+            assert!(decode_recovery(&restamped, original.source, None, 0).unwrap_err().contains("does not match its contents"), "version {older}");
+        }
     }
     #[test]
     fn quads_are_written_in_acrobat_order_and_both_orders_read_back() {

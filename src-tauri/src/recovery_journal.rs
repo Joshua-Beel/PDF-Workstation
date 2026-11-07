@@ -3,8 +3,8 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 const MAGIC: &[u8; 8] = b"SMACREC\0";
-/// The newest record version this build reads. It writes 3 only for records whose annotations carry dates
-/// (`record_version`), and 2 otherwise.
+/// The newest record version this build reads. It writes 3 only for records whose annotations carry dates or
+/// a UUID ID (`record_version`), and 2 otherwise.
 const VERSION: u16 = 3;
 const HEADER_BYTES: usize = 78;
 const DIGEST_BYTES: usize = 32;
@@ -82,10 +82,11 @@ pub fn valid_annotation_date(value: &str) -> bool {
     (1..=9999).contains(&year) && (1..=days).contains(&day) && field(8..10) <= 23 && field(10..12) <= 59 && field(12..14) <= 59
 }
 
-/// Version 3 marks a record whose annotations carry dates; a record without dates is written as version 2,
-/// byte-identical to what 0.3.x writes.
+/// Version 3 marks a record that 0.3.x cannot read: one whose annotations carry dates or a UUID ID. Any other
+/// record is written as version 2, byte-identical to what 0.3.x writes.
 fn record_version(state: &RecoveryEditState) -> u16 {
-    if state.pages.iter().flat_map(|page| &page.annotations).any(|annotation| annotation.created.is_some() || annotation.modified.is_some()) { 3 } else { 2 }
+    // Version 3 also when any ID is a UUID: 0.3.x reads only numbered IDs (SM7 M-1 on 684b33e).
+    if state.pages.iter().flat_map(|page| &page.annotations).any(|annotation| annotation.created.is_some() || annotation.modified.is_some() || annotation_uuid(&annotation.id)) { 3 } else { 2 }
 }
 
 fn positive_rect(rect: RecoveryRect) -> bool {
@@ -205,7 +206,7 @@ pub fn decode_recovery(bytes: &[u8], expected_source: SourceIdentity, prior_gene
     if revision < minimum_revision { return Err("Recovery revision is stale.".into()); }
     let edit_state: RecoveryEditState = serde_json::from_slice(&bytes[HEADER_BYTES..payload_end]).map_err(|_| "Recovery state is malformed.")?;
     if serde_json::to_vec(&edit_state).map_err(|_| "Recovery state is malformed.")? != &bytes[HEADER_BYTES..payload_end] { return Err("Recovery state is not canonical.".into()); }
-    // Dates appear only in version 3, and a version 3 record always has some (otherwise it is written as 2).
+    // Dates and UUID IDs appear only in version 3, and a version 3 record always has one (otherwise it is written as 2).
     if version == 1 && record_version(&edit_state) == 3 || version >= 2 && version != record_version(&edit_state) { return Err("Recovery record version does not match its contents.".into()); }
     let active = if version == 1 { true } else { !edit_state.pages.is_empty() };
     let record = RecoveryRecord { active, generation, revision, current_page, source_pages, source, edit_state };
