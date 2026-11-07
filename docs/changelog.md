@@ -2,6 +2,22 @@
 
 The full change log, newest first, moved verbatim from the README's "Recent changes" section (only relative link paths were adjusted for this folder); the [README](../README.md#recent-changes) keeps one-line summaries of the newest entries.
 
+- P2-5 qpdf pins recorded, SM7 C-1, and the code-review P3s (SM3; branch `sm3/annot-p2-5`; `scripts/qpdf/pins.json`, `scripts/setup-qpdf.ps1`, `scripts/setup-qpdf.test.ts`, `src-tauri/src/qpdf_check.rs`). SM7 cleared `e6b1b8b..a8b5b24` and approved one recording fetch. E2 is still not in CI (C-2 is a later commit).
+  - **Recording fetch, 2026-11-07.** `setup-qpdf.ps1 -RecordFileHashes` was run with its work root under the E: tmp folder and no zip cache. The zip matched the pinned size and SHA-256 before anything was extracted. `qpdf.exe` was not run. The 12 `.exe` and `.dll` hashes in `bin` are now the `files` pins. The zip, the extract and the checksum file were deleted and never committed.
+  - **Signature.** The release's `qpdf-12.4.2.sha256` matched its pinned size (2,906) and SHA-256. It lists `db87077e…5de25d` for `qpdf-12.4.2-msvc64.zip`, and it is PGP clear-signed.
+    - The fingerprint `C2C9 6B10 011F E009 E6D1 DF82 8A75 D109 9801 2C7E` (Jay Berkenbilt) comes from the qpdf source README on GitHub (`main/README.md`), not the release page. The key comes from `https://q.ql.org/pubkey.asc`, the location that README gives.
+    - gpg 2.4.9, with its keyring in a throwaway folder under the E: tmp folder, reports "Good signature", made 2026-09-26, primary key fingerprint matching. The key is not certified by a trusted signature, so it is trusted only through the README fingerprint. The keyring was deleted afterwards.
+  - **C-1.** `qpdf_json` reads `pins.json` on every call and refuses null or malformed `files`. All pins must be in one folder.
+    - Every pinned file beside the given `qpdf.exe` is opened without following reparse points, refused if it is not a plain file, and hashed through that handle.
+    - The handles stay open with read-only sharing until qpdf exits, so the files cannot be written, renamed or deleted between the check and the run.
+    - Any unpinned `.exe` or `.dll` in that folder is refused, checked both before and after hashing. `QPDF_EXE` is no longer trusted on its name alone.
+  - **Code-review P3s.**
+    - `-ZipCache` is resolved and refused on C: outside CI, and the cached zip file itself is checked for a reparse point, as well as its folder.
+    - The zip-mismatch test also asserts that no run or extract folder is left.
+    - The E2 run test is `#[ignore]`, so a run without qpdf never counts as a pass. Run it with `--ignored`; without `QPDF_EXE` it now fails.
+  - **Tests:**
+    - `setup-qpdf.test.ts`: the committed-pins test checks the 12 hashes and the PGP facts, and a C: zip-cache case is added.
+    - `qpdf_check` adds tests for the committed pins, check and hold (held files cannot be written, renamed or deleted), unpinned or missing or absent pins, and a held program still starting under the job. That last one uses a copy of `where.exe` standing in as `qpdf.exe`; qpdf itself is not run. Results: vitest 7/7; `qpdf_check` 8 passed, 1 ignored (E2); `tsc -b` clean.
 - P2-5 qpdf scaffolding, awaiting SM7 review before first use (SM3; branch `sm3/annot-p2-5`; new `scripts/qpdf/pins.json`, `scripts/setup-qpdf.ps1`, `scripts/setup-qpdf.test.ts`, `src-tauri/src/qpdf_check.rs`, mounted test-only from `annotations.rs`). Nothing is downloaded, nothing runs in CI, and nothing in the app changes.
   - **Pins.** qpdf 12.4.2 (Apache-2.0), Windows `msvc64` zip: URL, size and SHA-256 come from the GitHub release metadata, and the release's `.sha256` file is pinned the same way. Not yet known, so recorded as `null`: whether that file is PGP clear-signed, the signing key's fingerprint and its independent source, and the per-file SHA-256 of `qpdf.exe` and every DLL. They are filled in at the first fetch, which SM7 reviews.
   - **`setup-qpdf.ps1`.** Each run makes a fresh folder under the runner's temp directory (`RUNNER_TEMP`). Locally, `-WorkRoot` is required, and C: is refused outside CI. The zip comes from `-ZipPath` (tests), else a cached zip, else a TLS 1.2 download. Size and SHA-256 are checked before anything is extracted, and a cached zip is re-checked on every run.

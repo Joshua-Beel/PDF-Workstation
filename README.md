@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Tests (not in CI yet): qpdf 12.4.2's binaries are now pinned by hash, and the release checksum file's PGP signature was verified. The test harness re-checks and locks every pinned binary before each run; qpdf has not been run yet (SM3; `pins.json`, `qpdf_check.rs`).
 - Tests (not yet used): pinned qpdf 12.4.2 setup script and a hardened, fixtures-only test harness, waiting on SM7 review; nothing downloaded, not in CI (SM3; `setup-qpdf.ps1`, `qpdf_check.rs`).
 - Tests: pdf.js (dev dependency `pdfjs-dist` 6.4.299, not shipped; its canvas package pinned to 1.0.10) independently reads the annotations the app writes and the other apps' annotations it keeps, from two committed synthetic fixtures (SM3; tests only).
 - Sticky notes are saved with an Acrobat-style closed popup at the page's right edge, and the app keeps editing them as one unit; a page without a valid MediaBox refuses the save (SM3, source build).
@@ -132,5 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - Test: every PowerShell-spawning test in the installed-app launch contract file now has a 60 s bound, matching its child's own 60 s limit, so a busy machine no longer fails them at 15 s (SM6; tests only).
 - Signed OCR artifact workflow restores no Actions cache: setup-node's `cache: npm` becomes `package-manager-cache: false`, pinned by a test (SM7 recommendation; SM6; `ocr-signed-artifact.yml`). Not yet exercised in a hosted run.
 - Release workflow restores no Actions cache: the signing job's `cache: npm` is replaced with `package-manager-cache: false`, pinned by a test (SM7 recommendation; `release.yml`, `release-workflow.test.ts`). Not yet exercised in a release run.
-- Dev dependency: vite 6.4.4 to 6.4.5, clearing the dev-server advisory GHSA-8g5g-mxqh-grgj (SM0; `package.json`, `package-lock.json`, notices inventory hash). Build tooling only; `npm audit` 0.
-- Test: with only a bookmark edit pending, form fill, redaction, image/text replacement and searchable/large OCR all refuse with the overlay message, and Undo lifts it (SM1; `outline_edit_tests.rs`; source build; mutation-checked).
