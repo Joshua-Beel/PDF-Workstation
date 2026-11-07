@@ -491,3 +491,7 @@ mod tests {
         assert_eq!(text(b"\x7f\x9f\xad", 10, true), "");
     }
 }
+
+#[cfg(all(test, windows))]
+#[path = "qpdf_check.rs"]
+mod qpdf_check;

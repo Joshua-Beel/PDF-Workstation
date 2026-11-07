@@ -118,7 +118,8 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
-- Tests: pdf.js (dev dependency `pdfjs-dist` 6.4.299, not shipped) independently reads the annotations the app writes and the other apps' annotations it keeps, from two committed synthetic fixtures (SM3; tests only).
+- Tests (not yet used): pinned qpdf 12.4.2 setup script and a hardened, fixtures-only test harness, waiting on SM7 review; nothing downloaded, not in CI (SM3; `setup-qpdf.ps1`, `qpdf_check.rs`).
+- Tests: pdf.js (dev dependency `pdfjs-dist` 6.4.299, not shipped; its canvas package pinned to 1.0.10) independently reads the annotations the app writes and the other apps' annotations it keeps, from two committed synthetic fixtures (SM3; tests only).
 - Sticky notes are saved with an Acrobat-style closed popup at the page's right edge, and the app keeps editing them as one unit; a page without a valid MediaBox refuses the save (SM3, source build).
 - Your comments and highlights now carry Acrobat-style creation and modification dates (UTC) and a subject ("Sticky Note", "Highlight"), and new ones get random Acrobat-style IDs; no author name is written yet; older files still open (SM3, source build).
 - Tests: the annotation census now splits structure refusals by type, and the shared-annotation and forms-hardening timing tests compare against a baseline measured in the same run instead of fixed budgets, with absolute ceilings and per-test totals (SM3; tests only).

@@ -1,0 +1,19 @@
+{
+  "comment": "Dev-only qpdf for the annotation interchange E2 check (SM3 P2-5). Never shipped, never a build dependency, never run on real work PDFs in CI. Nothing has been downloaded yet: the per-file hashes and the signature facts are recorded at the first fetch, which SM7 reviews. Source of the zip figures: GitHub release metadata for qpdf v12.4.2.",
+  "version": "12.4.2",
+  "license": "Apache-2.0",
+  "zip": {
+    "url": "https://github.com/qpdf/qpdf/releases/download/v12.4.2/qpdf-12.4.2-msvc64.zip",
+    "size": 28183147,
+    "sha256": "db87077e683630c1217e0e8f9a20a9749d952ab676e881c3689187763a5de25d"
+  },
+  "releaseChecksumFile": {
+    "url": "https://github.com/qpdf/qpdf/releases/download/v12.4.2/qpdf-12.4.2.sha256",
+    "size": 2906,
+    "sha256": "bb4472ec2efb3fe4c4a49f030906c734506ffd99cb27abab0eb2f15ab1820d69",
+    "pgpClearSigned": null,
+    "signingKeyFingerprint": null,
+    "fingerprintSource": null
+  },
+  "files": null
+}
