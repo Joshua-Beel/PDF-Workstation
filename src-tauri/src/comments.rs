@@ -434,3 +434,7 @@ mod tests {
         std::fs::write(dir.join("annotated.pdf"), bytes).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "annotation_lockdown_tests.rs"]
+mod lockdown_tests;
