@@ -198,6 +198,9 @@ impl PdfEngine for InProcessEngine {
 pub(crate) struct InProcessDocument<'a> { inner: PdfDocument<'a>, text_extraction_allowed: bool, _source: Option<crate::editor::SourceBytes> }
 
 impl InProcessDocument<'_> {
+    /// Whether pdfium-render bound a form-fill environment (`FPDFDOC_InitFormFillEnvironment`) for this document.
+    #[cfg(test)]
+    pub(crate) fn has_form_handle(&self) -> bool { self.inner.form().is_some() }
     /// The pre-`bb09ea1` way to read sizes (loads every page); kept for the equality test and the perf harness.
     #[cfg(test)]
     pub(crate) fn page_sizes_loading_each_page(&self) -> Result<Vec<(f32, f32)>, String> {
