@@ -25,7 +25,7 @@ export const keepRecoveredEdits = (id: number, revision: number) => invoke<Recov
 export const openOriginal = (id: number, revision: number) => invoke<DocumentInfo>('open_original', { id, revision });
 export const unlockDocument = (requestId: number, password: string) => invoke<OpenResult>('unlock_document', { requestId, password });
 export const ownerUnlockDocument = (id: number, revision: number, password: string) => invoke<void>('owner_unlock_document', { id, revision, password });
-export const cancelPasswordRequest =(requestId: number) => invoke<void>('cancel_password_request', { requestId });
+export const cancelPasswordRequest = (requestId: number) => invoke<void>('cancel_password_request', { requestId });
 export type OcrCapability = {
   available: boolean; reason: string | null; language: 'eng' | null;
   searchablePdfAvailable: boolean; searchablePdfReason: string | null; searchablePdfDpi: number | null;

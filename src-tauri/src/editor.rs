@@ -163,6 +163,11 @@ impl EditSession {
     /// Marks a session built from the decrypted copy a correct owner password produced. Its `source` no longer matches the file on disk.
     pub(crate) fn mark_owner_unlocked(&mut self, original_size: usize) { self.original_size = original_size; self.owner_unlocked = true; }
     pub(crate) fn owner_unlocked(&self) -> bool { self.owner_unlocked }
+    /// OCR rasterizes pages into a work folder in the temp directory (and large OCR journals them in app data), which would put
+    /// the decrypted pages on disk without the user choosing a destination. An unlocked copy saved by the user is an ordinary file.
+    pub(crate) fn unlocked_job_guard(&self) -> Result<(), String> {
+        if self.owner_unlocked { Err("Save an unlocked copy first, then OCR that copy: OCR of a document unlocked with the owner password would write its pages to temporary storage.".into()) } else { Ok(()) }
+    }
     pub(crate) fn original_size(&self) -> usize { self.original_size }
     pub fn dirty(&self) -> bool { self.plan != self.saved }
     /// Unsaved page edits, bookmark edits or page-label edits. The last two are not part of the page plan or of recovery points.

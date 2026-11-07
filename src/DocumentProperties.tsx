@@ -35,7 +35,7 @@ export default function DocumentProperties({ document, close }: { document: Docu
     try {
       await ownerUnlockDocument(document.id, document.revision, entered);
       if (!alive.current) return;
-      setUnlocking(false); setUnlockNotice('Security removed for this session. This PDF is no longer restricted, and Save a Copy writes it without a password or restrictions. The file on disk is unchanged.'); setReload(count => count + 1);
+      setUnlocking(false); setUnlockNotice('Security removed for this session. This PDF is no longer restricted, and Save a Copy writes it without a password or restrictions. The file on disk is unchanged. Recovery points and OCR are off for this unlocked document so its pages are not written to temporary storage: save a copy to keep edits, and OCR that copy.'); setReload(count => count + 1);
     } catch (reason) {
       if (alive.current) setUnlockError(String(reason));
     } finally {

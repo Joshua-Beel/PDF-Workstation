@@ -292,3 +292,58 @@ fn service_agrees_with_pdfium_about_which_password_is_the_owner_password() {
         }
     }
 }
+
+fn folder_is_empty(path: &Path) -> bool { std::fs::read_dir(path).map_or(true, |mut entries| entries.next().is_none()) }
+
+/// PDFium binds once per process and the shared test service has no recovery folder, so the body runs in a child process
+/// of this test binary that starts its own worker the way production does (`start_with_recovery`).
+#[test]
+fn unlocked_sessions_edit_undo_and_save_under_a_recovery_folder_without_writing_to_it() {
+    const NAME: &str = "owner_unlock::tests::unlocked_sessions_edit_undo_and_save_under_a_recovery_folder_without_writing_to_it";
+    if std::env::var_os("OWNER_UNLOCK_RECOVERY_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap()).args([NAME, "--exact", "--test-threads=1"]).env("OWNER_UNLOCK_RECOVERY_CHILD", "1").output().unwrap();
+        assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "the child run did not execute the test");
+        return;
+    }
+    let folder = tempfile::tempdir().unwrap();
+    let recovery = folder.path().join("recovery");
+    let service = PdfService::start_with_recovery(root().join("resources/pdfium/bin/pdfium.dll"), recovery.clone());
+    let path = folder.path().join("locked.pdf");
+    let original = encrypted(Flavor::R3, "reader", OWNER);
+    std::fs::write(&path, &original).unwrap();
+    let info = open(&service, &path, "reader");
+    let (id, revision) = id_and_revision(&info);
+    block(service.owner_unlock(id, revision, OWNER.into())).unwrap();
+    let rotate = || crate::editor::PageEdit::Rotate { pages: vec![0], clockwise: true };
+    let edited = id_and_revision(&json(&block(service.edit(id, rotate(), 0)).unwrap())).1;
+    let undone = json(&block(service.edit(id, crate::editor::PageEdit::Undo, 0)).unwrap());
+    assert_eq!(undone["dirty"], false);
+    block(service.edit(id, rotate(), 0)).unwrap();
+    let (_, current) = id_and_revision(&json(&block(service.edit(id, rotate(), 0)).unwrap()));
+    assert!(current > edited);
+    assert!(block(service.checkpoint_recovery(recovery.clone(), id, current, 0)).unwrap_err().contains("not available after unlocking"));
+    let output = folder.path().join("copy.pdf");
+    block(service.save_at(id, current, None, output.clone())).unwrap();
+    assert!(!std::fs::read(&output).unwrap().windows(8).any(|window| window == b"/Encrypt"));
+    block(service.discard_recovery(id, current)).unwrap();
+    block(service.close(id)).unwrap();
+    assert!(folder_is_empty(&recovery), "nothing may be written to the recovery folder");
+    assert_eq!(std::fs::read(&path).unwrap(), original, "the original file must not change");
+}
+
+#[cfg(windows)]
+#[test]
+fn unlocked_sessions_refuse_every_ocr_path_that_would_write_pages_to_disk() {
+    let _serial = serial();
+    let service = start();
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("locked.pdf");
+    std::fs::write(&path, encrypted(Flavor::R3, "reader", OWNER)).unwrap();
+    let (id, revision) = id_and_revision(&open(&service, &path, "reader"));
+    block(service.owner_unlock(id, revision, OWNER.into())).unwrap();
+    let error = block(service.preflight_searchable_ocr(id, revision)).unwrap_err();
+    assert!(error.contains("Save an unlocked copy first"), "{error}");
+    assert!(service.ocr_job_source_blocking(id, revision).unwrap_err().contains("Save an unlocked copy first"));
+    block(service.close(id)).unwrap();
+}

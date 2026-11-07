@@ -585,6 +585,7 @@ impl PdfService {
                         let result = (|| {
                             cancellation.ensure_runnable().map_err(|error| error.to_string())?;
                             let (session, _) = sessions.get(&request.document_id).ok_or("Document is closed")?;
+                            session.unlocked_job_guard()?;
                             let original = documents.get(&request.document_id).ok_or("Document is closed")?;
                             text_extraction_permission(session, &**original)?;
                             let (dimensions, spec, page_width, page_height) = checked_ocr_request(session, original, request)?;
@@ -641,6 +642,7 @@ impl PdfService {
                             let (session, info) = sessions.get(&id).ok_or("Document is closed")?;
                             let document = documents.get(&id).ok_or("Document is closed")?;
                             if session.revision != revision { return Err("Document changed. Start searchable OCR again.".into()); }
+                            session.unlocked_job_guard()?;
                             if !document.is_unprotected() { return Err("Searchable OCR of encrypted or restricted PDFs is not supported in this build.".into()); }
                             session.page_image_export_guard()?;
                             session.overlay_guard()?;
@@ -669,6 +671,7 @@ impl PdfService {
                             let (session, _) = sessions.get(&request.document_id).ok_or("Document is closed")?;
                             let original = documents.get(&request.document_id).ok_or("Document is closed")?;
                             if session.revision != request.revision { return Err("Document changed. Start OCR again.".into()); }
+                            session.unlocked_job_guard()?;
                             if !original.is_unprotected() { return Err("OCR of encrypted or restricted PDFs is not supported in this build.".into()); }
                             session.page_image_export_guard()?;
                             text_extraction_permission(session, &**original)?;
@@ -733,7 +736,7 @@ impl PdfService {
                             if let Ok(value) = &result { if let OpenResult::Opened { document, .. } = &**value { documents.remove(&document.id); sessions.remove(&document.id); } }
                         }
                     }
-                    Request::OwnerUnlock(id, revision, password, reply) => {
+                    Request::OwnerUnlock(id, revision, mut password, reply) => {
                         if reply.is_closed() { continue; }
                         let result = (|| {
                             let engine = pdfium.as_ref().map_err(Clone::clone)?;
@@ -753,6 +756,8 @@ impl PdfService {
                             note_documents.remove(&id); cache.close(id); page_labels.close(id);
                             Ok(())
                         })();
+                        // Best effort: NUL is valid UTF-8, so overwriting in place keeps the String sound.
+                        unsafe { password.as_bytes_mut().fill(0); }
                         let _ = reply.send(result);
                     }
                     Request::Open(path, reply) => {
@@ -882,6 +887,7 @@ impl PdfService {
                             }
                             if session.revision != revision { return Err("Document changed. Discard again.".into()); }
                             if !session.dirty() { if session.unsaved() { session.discard_outline_and_labels(); return Ok(()); } return Err("Only unsaved edits can be discarded.".into()); }
+                            if session.owner_unlocked() { return Ok(()); }
                             let root = recovery_root.as_deref().ok_or("Recovery is unavailable.")?;
                             let source = recovery_source_identity(&session.source)?;
                             if recovery_heads.iter().any(|(owner, (identity, _))| *owner != id && *identity == source) { return Err("Another open tab owns recovery for this PDF.".into()); }
@@ -1916,6 +1922,7 @@ const RECOVERY_COMMITTED_REOPEN_REQUIRED: &str = "RECOVERY_COMMITTED_REOPEN_REQU
 struct RecoveryLock { requested_revision: u64, committed_revision: u64, source: crate::recovery_journal::SourceIdentity, generation: u64 }
 fn record_recovery_lock(root: Option<&std::path::Path>, locks: &mut HashMap<u64, RecoveryLock>, id: u64, requested_revision: u64, session: &EditSession) -> Option<RecoveryLock> {
     let root = root?;
+    if session.owner_unlocked() { return None; }
     let source = recovery_source_identity(&session.source).ok()?;
     let record = crate::recovery_store::read_recovery(root, source, None, 0).ok()??;
     let lock = RecoveryLock { requested_revision, committed_revision: record.revision, source, generation: record.generation };
@@ -1932,7 +1939,8 @@ fn write_recovery_verified(root: &std::path::Path, record: &crate::recovery_jour
 }
 fn persist_recovery_state(root: Option<&std::path::Path>, floors: &mut HashMap<crate::recovery_journal::SourceIdentity, crate::recovery_journal::RecoveryRecord>, session: &EditSession, original: &DocumentInfo, current_page: u32) -> Result<Option<crate::recovery_journal::RecoveryRecord>, String> {
     let Some(root) = root else { return Ok(None); };
-    let disk = crate::open_limits::read_bounded(std::path::Path::new(&original.path), session.source.len() as u64).map_err(|_| "The source PDF changed or became unavailable; recovery was not updated.".to_owned())?;
+    if session.owner_unlocked() { return Ok(None); }
+    let disk =crate::open_limits::read_bounded(std::path::Path::new(&original.path), session.source.len() as u64).map_err(|_| "The source PDF changed or became unavailable; recovery was not updated.".to_owned())?;
     if disk != session.source { return Err("The source PDF changed outside the app; recovery was not updated.".into()); }
     let source = recovery_source_identity(&session.source)?;
     let current = crate::recovery_store::read_recovery(root, source, None, 0)?;
@@ -1960,6 +1968,7 @@ fn recovery_checkpoint_current(root: &std::path::Path, head: Option<&(crate::rec
     Ok(true)
 }
 fn ensure_recovery_owner(root: Option<&std::path::Path>, heads: &HashMap<u64, (crate::recovery_journal::SourceIdentity, u64)>, floors: &mut HashMap<crate::recovery_journal::SourceIdentity, crate::recovery_journal::RecoveryRecord>, id: u64, session: &EditSession) -> Result<(), String> {
+    if session.owner_unlocked() { return Ok(()); }
     let source = recovery_source_identity(&session.source)?;
     if heads.iter().any(|(owner, (identity, _))| *owner != id && *identity == source) { return Err("Another open tab owns recovery for this PDF. Close or resolve it before editing this tab.".into()); }
     if let Some(root) = root {
@@ -2050,6 +2059,7 @@ impl RequestSender{
 #[cfg(windows)]
 fn checked_searchable_ocr_request(session: &EditSession, document: &EngineDoc<'_>, revision: u64) -> Result<usize, String> {
     if session.revision != revision { return Err("Document changed. Start searchable OCR again.".into()); }
+    session.unlocked_job_guard()?;
     if !document.is_unprotected() { return Err("Searchable OCR of encrypted or restricted PDFs is not supported in this build.".into()); }
     session.page_image_export_guard()?;
     session.overlay_guard()?;
