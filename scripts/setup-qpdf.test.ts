@@ -10,6 +10,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 const script = join(import.meta.dirname, 'setup-qpdf.ps1');
 const folders: string[] = [];
 afterEach(() => { for (const folder of folders.splice(0)) rmSync(folder, { recursive: true, force: true }); });
+// Work roots under the temp folder are allowed either because CI is set (the hosted runner, whose TEMP is on
+// C:) or because TEMP is off C: (local runs keep TEMP on E:). Tests that clear CI never use a temp work root.
 const scratch = () => { const folder = mkdtempSync(join(tmpdir(), 'sm3-setup-qpdf-')); folders.push(folder); return folder; };
 const sha256 = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex');
 // The hosted runner's TEMP is an 8.3 short path (C:\Users\RUNNER~1\...), and the script's GetFullPath expands it
@@ -134,8 +136,21 @@ describe('setup-qpdf.ps1', { timeout: 240_000 }, () => {
     expect(run(['-PinsPath', pinsPath, '-ZipPath', archive]).err).toContain('pass -WorkRoot');
     expect(run(['-PinsPath', pinsPath, '-ZipPath', archive, '-WorkRoot', 'C:\\sm3-qpdf-never-created'], { CI: undefined }).err).toContain('is on C:');
     expect(existsSync('C:\\sm3-qpdf-never-created')).toBe(false);
-    expect(run(['-PinsPath', pinsPath, '-WorkRoot', join(folder, 'work'), '-ZipCache', 'C:\\sm3-qpdf-cache-never-created'], { CI: undefined }).err).toContain('zip cache');
+  });
+
+  // The work root must be off C: so the work-root check passes and the zip-cache check is the one that fires.
+  // The temp folder cannot be used: the hosted runner's TEMP is on C:. The repository is on E: locally and
+  // on D: on the runner. The script refuses the cache before it creates the work root, so nothing is written.
+  const repositoryWorkRoot = join(import.meta.dirname, '..', 'tmp', `sm3-qpdf-never-created-${process.pid}`);
+  it.skipIf(/^[Cc]:/.test(repositoryWorkRoot))('refuses a zip cache on C: outside CI, before creating anything', () => {
+    const folder = scratch();
+    const archive = zip(folder, ['qpdf-test/bin/qpdf.exe']);
+    const pinsPath = pins(folder, archive, binHashes(folder, ['qpdf-test/bin/qpdf.exe']));
+    const refused = run(['-PinsPath', pinsPath, '-WorkRoot', repositoryWorkRoot, '-ZipCache', 'C:\\sm3-qpdf-cache-never-created'], { CI: undefined });
+    expect(refused.status).not.toBe(0);
+    expect(refused.err).toContain('zip cache');
     expect(existsSync('C:\\sm3-qpdf-cache-never-created')).toBe(false);
+    expect(existsSync(repositoryWorkRoot), 'the work root is not created').toBe(false);
   });
 
   it('the committed pins name the reviewed release, its signature facts and every binary in it', () => {

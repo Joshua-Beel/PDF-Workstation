@@ -2,6 +2,15 @@
 
 The full change log, newest first, moved verbatim from the README's "Recent changes" section (only relative link paths were adjusted for this folder); the [README](../README.md#recent-changes) keeps one-line summaries of the newest entries.
 
+- Fix for master CI run 42418348329, which was red on `f6cbe5f` (SM3; branch `sm3/annot-p2-5`; `scripts/setup-qpdf.test.ts`; tests only).
+  - **What failed:** the test "needs an explicit work root outside CI and refuses C: there". Its zip-cache assertion expected `zip cache` in stderr and got the work-root refusal instead.
+  - **Cause:** the hosted runner's TEMP is on C:, so the scratch work root was on C:. With `CI` cleared, the script's work-root C: check runs before the zip-cache check and fired first. Locally TEMP is on E:, so the work-root check passed.
+  - **Fix:** the zip-cache case is now its own test. Its work root is under the repository's `tmp` folder (E: locally, D: on the runner) and is never created, because the script refuses the cache before creating the work root. The test asserts that nothing was created. It is skipped if the repository itself is on C:.
+  - **Audit of the rest of the file:**
+    - All other script runs keep the inherited `CI`. Temp work roots are allowed there because `CI` is set on the runner, or because TEMP is off C: locally; a comment now says so.
+    - The only other run with `CI` cleared passes an explicit `C:\` path that is refused before anything is created.
+    - The 8.3 `inside()` test from `b250c93` reads `%ProgramFiles%` only and does not depend on TEMP or `CI`.
+  - Tests: `setup-qpdf.test.ts` plus `ci-workflow.test.ts` 18 passed, both with `CI` unset and with `CI=true`; `tsc -b` clean. The runner's C: TEMP was not simulated, because that would mean writing to C:.
 - P2-5 C-2: the qpdf E2 check is wired into CI, for SM7 review before it runs there (SM3; branch `sm3/annot-p2-5`; `.github/workflows/ci.yml`, `scripts/ci-workflow.test.ts`, `src-tauri/src/child_job.rs`, `src-tauri/src/qpdf_check.rs`, `scripts/setup-qpdf.test.ts`). SM7 conditions C2-a to C2-f. Tests and CI only; the app does not change.
   - **CI scope (`ci.yml` only).** A step after `setup-pdfium.ps1` runs `setup-qpdf.ps1 -WorkRoot $RUNNER_TEMP\qpdf` in its own pwsh process, with no zip cache, so qpdf is fetched and verified on every run.
     - The step fails on a non-zero exit, and unless exactly one `QPDF_EXE=` line was printed. It also fails unless that path is under the work root and ends in `\qpdf.exe`.
