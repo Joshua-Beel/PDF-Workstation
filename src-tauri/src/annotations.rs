@@ -276,7 +276,7 @@ mod tests {
         for id in &foreign { assert_eq!(saved.get_object(*id).unwrap(), source.get_object(*id).unwrap(), "foreign object {id:?} unchanged"); }
         let (before, after) = (entries(&source, 0), entries(&saved, 0));
         assert_eq!(&after[..before.len()], &before[..], "foreign entries keep their order; the inline square and null stay");
-        assert_eq!(after.len(), before.len() + 1);
+        assert_eq!(after.len(), before.len() + 2, "the new note and its popup");
         assert!(matches!(saved.get_dictionary(saved.get_pages()[&1]).unwrap().get(b"Annots").unwrap(), Object::Array(_)), "a touched page gets a direct array");
         assert_eq!(saved.get_dictionary(saved.get_pages()[&2]).unwrap().get(b"Annots").unwrap(), source.get_dictionary(source.get_pages()[&2]).unwrap().get(b"Annots").unwrap(), "an untouched page keeps its /Annots as it was");
         assert_eq!(survey_all(&saved).pages[1], survey_all(&source).pages[1]);

@@ -2,6 +2,18 @@
 
 The full change log, newest first, moved verbatim from the README's "Recent changes" section (only relative link paths were adjusted for this folder); the [README](../README.md#recent-changes) keeps one-line summaries of the newest entries.
 
+- Annotation interchange Phase 2, popups slice: sticky notes get an Acrobat-style popup, and note plus popup are one editable unit (SM3; branch `sm3/annot-popups` on `d111517`; `comments.rs`, test updates in `annotations.rs` and `service.rs`).
+  - **Written.** Each sticky note gets a popup annotation: `/Subtype /Popup /Parent <note> /Open false /F 28`, with `/Rect` a 180 x 120 point box at the page's right edge, level with the note's top and kept inside the MediaBox (`popup_rect`). It is listed in `/Annots` right after its note, and the note points to it with `/Popup`. Highlights get no popup.
+  - **Ownership.** A note with a `/Popup` is editable only if the popup is exactly the app's form (`app_popup`: exact key set, `/Parent` this note, closed, `/F 28`, the expected rectangle) and is listed once, on the note's page, for this note only. Nothing else may refer to the popup.
+    - The popup's own `/Parent` back-link no longer counts as a foreign reference.
+    - An app popup is not counted as a foreign entry, so page delete stays allowed on files holding only the app's annotations.
+    - Any other popup form keeps the note foreign, and both are kept untouched. A foreign popup's link to a foreign note is never modified.
+  - **Writer.** On a touched page, an app note's popup is regenerated with the note, and its old object and entry are dropped. Deleting a note removes its popup too. A 0.3.x or 1c note without a popup still reads; it gains a popup when its page is rewritten.
+  - **Rendering.** The popup is closed, so pages look the same. The existing pixel and print-snapshot tests pass unchanged.
+  - **Tests:**
+    - `a_sticky_note_and_its_acrobat_style_popup_are_one_editable_unit`: form and placement; it is read back as one unit with 0 foreign entries; editing regenerates the pair; deleting removes both and leaves no popup object; page delete is still allowed. It also covers seven altered or shared popup cases kept as foreign and preserved, and a note without a popup still reading.
+    - Seven existing tests updated for the extra `/Annots` entry.
+  - **Measured:** `cargo test --bins` 612 passed, 0 failed, 42 ignored; `--no-run` builds every target.
 - P2-4 part two review fixes (SM3; branch `sm3/annot-p2-4`; `recovery_journal.rs` (SM5's seam), `comments.rs`, `editor.rs`). SM7 `_log/sm7-review-annot-p2-4b-684b33e.md`.
   - **M-1:** a dateless note with a UUID ID produced a version 2 record that 0.3.1 cannot read. `record_version` now returns 3 when any annotation ID is a UUID, as well as when any carries dates. Decoding refuses version 1 and 2 records that carry a UUID.
   - **L-1:** a random-generator failure no longer panics on the PDF worker (no unwind guard, so a panic would end every open document). `comments::new_id` returns a `Result`, and the edit is refused with a message, leaving the session unchanged.

@@ -2959,7 +2959,7 @@ mod tests {
             assert_eq!(service.print_render_blocking(old_snapshot.token, 0, 600, 600).unwrap().bgra, before_print.bgra, "An earlier snapshot must not acquire the new note");
             let snapshot = print_snapshot(&service, info.id, info.revision); comments_assert_box(&comments_print_rgb(&service.print_render_blocking(snapshot.token, 0, 600, 600).unwrap()), marker);
             let output_path = folder.path().join(format!("notes-copy-{original}-{edited}.pdf")); let saved = call(&service, |reply| Request::Save(info.id, None, output_path.clone(), reply)).unwrap(); info = saved.document;
-            let output = lopdf::Document::load(&output_path).unwrap(); let output_page = output.get_pages()[&1]; assert_eq!(output.get_dictionary(output_page).unwrap().get(b"Annots").unwrap().as_array().unwrap().len(), 1);
+            let output = lopdf::Document::load(&output_path).unwrap(); let output_page = output.get_pages()[&1]; assert_eq!(output.get_dictionary(output_page).unwrap().get(b"Annots").unwrap().as_array().unwrap().len(), 2, "the note and its popup");
             let reopened = call(&service, |reply| Request::Open(output_path, reply)).unwrap(); assert_eq!(call(&service, |reply| Request::Comments(reopened.id, 0, reply)).unwrap().notes[0].contents, note_body); comments_assert_box(&comments_png(&service, reopened.id, 0, 600), marker);
             assert_eq!(call(&service, |reply| Request::Text(reopened.id, 0, 0, reply)).unwrap(), text); call(&service, |reply| Request::Close(reopened.id, reply)).unwrap();
             info = call(&service, |reply| Request::Crop(info.id, 0, info.revision, CropRect { x: 0.2, y: 0.0, width: 0.8, height: 1.0 }, reply)).unwrap();

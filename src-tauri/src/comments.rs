@@ -270,6 +270,9 @@ pub struct Owned {
     pub notes: Vec<Vec<Note>>,
     /// Annotation object id of each editable note, mapped to its id and its appearance stream's id.
     pub app: std::collections::HashMap<ObjectId, (String, ObjectId)>,
+    /// The popup annotation of an editable sticky note (note object id to popup object id). The note and its
+    /// popup are one unit: the popup's `/Parent` points back at the note, which is not a foreign reference.
+    pub popups: std::collections::HashMap<ObjectId, ObjectId>,
     /// Entries in `/Annots` that are not the app's editable annotations (other apps', links, widgets,
     /// app-made ones another object refers to or that were altered, inline or malformed entries).
     pub foreign: usize,
@@ -277,11 +280,32 @@ pub struct Owned {
     pub max_number: u64,
 }
 
+/// Where the app puts a sticky note's popup, as Acrobat does: a 180 x 120 point box at the right edge of the
+/// page, its top level with the note's top, kept inside the MediaBox.
+pub fn popup_rect(note: CropBox, media: CropBox) -> CropBox {
+    let (width, height) = (180f32.min(media.right - media.left), 120f32.min(media.top - media.bottom));
+    let top = note.top.min(media.top).max(media.bottom + height);
+    CropBox { left: media.right - width, bottom: top - height, right: media.right, top }
+}
+
+/// The app's popup for the sticky note `parent`: exactly `/Type /Annot /Subtype /Popup /Parent /Rect /Open
+/// false /F 28`, with the rectangle `popup_rect` gives. Anything else makes the note foreign.
+fn app_popup(document: &Document, popup: ObjectId, parent: ObjectId, note: CropBox, media: CropBox) -> Result<(), String> {
+    let dict = document.get_dictionary(popup).map_err(|error| error.to_string())?;
+    keys(dict, &[b"Type", b"Subtype", b"Parent", b"Rect", b"Open", b"F"])?;
+    name(dict, b"Type", b"Annot")?; name(dict, b"Subtype", b"Popup")?;
+    let expected = popup_rect(note, media);
+    if dict.get(b"Parent").and_then(Object::as_reference).ok() != Some(parent) || dict.get(b"Open").and_then(Object::as_bool).ok() != Some(false) || dict.get(b"F").and_then(Object::as_i64).ok() != Some(28)
+        || values(dict.get(b"Rect").map_err(|error| error.to_string())?)? != [expected.left, expected.bottom, expected.right, expected.top] { return Err("The PDF has an altered note popup.".into()); }
+    Ok(())
+}
+
 /// One annotation checked against the app's strict format. Any failure makes it foreign, not the file.
-fn app_note(document: &Document, page_id: ObjectId, annotation: &Dictionary) -> Result<(Note, ObjectId), String> {
+/// Returns the note, its appearance stream and, for a sticky note written since the popups slice, its popup.
+fn app_note(document: &Document, page_id: ObjectId, id: ObjectId, annotation: &Dictionary) -> Result<(Note, ObjectId, Option<ObjectId>), String> {
                 let kind = match annotation.get(b"Subtype").and_then(Object::as_name).ok() { Some(b"Text") => AnnotationKind::Note, Some(b"Highlight") => AnnotationKind::Highlight, _ => return Err("The PDF has a foreign annotation subtype.".into()) };
                 match kind {
-                    AnnotationKind::Note => { keys(annotation, &[b"Type", b"Subtype", b"Rect", b"NM", b"Contents", b"Name", b"C", b"Open", b"F", b"P", b"AP", b"Subj", b"M", b"CreationDate"])?; name(annotation, b"Name", b"Note")?; if annotation.get(b"Open").and_then(Object::as_bool).ok() != Some(false) { return Err("The PDF has unsupported popup state.".into()); } },
+                    AnnotationKind::Note => { keys(annotation, &[b"Type", b"Subtype", b"Rect", b"NM", b"Contents", b"Name", b"C", b"Open", b"F", b"P", b"AP", b"Subj", b"M", b"CreationDate", b"Popup"])?; name(annotation, b"Name", b"Note")?; if annotation.get(b"Open").and_then(Object::as_bool).ok() != Some(false) { return Err("The PDF has unsupported popup state.".into()); } },
                     AnnotationKind::Highlight => keys(annotation, &[b"Type", b"Subtype", b"Rect", b"QuadPoints", b"NM", b"Contents", b"C", b"F", b"P", b"AP", b"Subj", b"M", b"CreationDate"])?
                 }
                 // Acrobat-style metadata the app writes since slice P2-4: optional (0.3.x and 1c files lack it),
@@ -321,7 +345,11 @@ fn app_note(document: &Document, page_id: ObjectId, annotation: &Dictionary) -> 
                 if legacy { rect(bounds_value)?; quads = None; }
                 else if quads.as_ref().is_none_or(|quads| stream.content != text_appearance(bounds, quads)) { return Err("The PDF has an altered annotation appearance.".into()); }
                 if stream.dict.get(b"Length").is_ok_and(|value| value.as_i64().ok() != Some(stream.content.len() as i64)) { return Err("The PDF has an altered note appearance.".into()); }
-                Ok((Note { id: note_id, rect: bounds, contents, kind, quads, created, modified }, appearance_id))
+                let popup = match annotation.get(b"Popup") {
+                    Err(_) => None,
+                    Ok(value) => { let popup = value.as_reference().map_err(|_| "The PDF has an unsupported note popup.")?; app_popup(document, popup, id, bounds, media)?; Some(popup) }
+                };
+                Ok((Note { id: note_id, rect: bounds, contents, kind, quads, created, modified }, appearance_id, popup))
 }
 
 /// The app number in an annotation's `/NM`, when it carries the app's prefix (valid or not otherwise).
@@ -345,8 +373,10 @@ pub fn read_owned(document: &Document) -> Result<Owned, String> {
     if catalog.has(b"Perms") || document.objects.values().any(|object| object.as_dict().is_ok_and(|dict| dict.has(b"ByteRange") || dict.get(b"Type").is_ok_and(|value| value.as_name().ok() == Some(b"Sig")))) { return Err("Signed or certified PDFs cannot be commented on in this build.".into()); }
     if [b"AcroForm".as_slice(), b"StructTreeRoot", b"PageLabels", b"Threads"].iter().any(|key| catalog.has(key)) { return Err("Commenting on forms, tagged PDFs, page labels, or article threads is not supported in this build.".into()); }
     let pages = document.get_pages().into_values().collect::<Vec<_>>();
-    // (page index, annotation id, note, appearance id, indirect /Annots array it came from)
-    let mut candidates: Vec<(usize, ObjectId, Note, ObjectId, Option<ObjectId>)> = Vec::new();
+    // (page index, annotation id, note, appearance id, indirect /Annots array it came from, popup)
+    let mut candidates: Vec<(usize, ObjectId, Note, ObjectId, Option<ObjectId>, Option<ObjectId>)> = Vec::new();
+    // The page each referenced /Annots entry was first seen on, so a note's popup must sit on the same page.
+    let mut entry_page: std::collections::HashMap<ObjectId, usize> = std::collections::HashMap::new();
     let (mut entries_total, mut max_number) = (0usize, 0u64);
     let mut reference_counts: std::collections::HashMap<ObjectId, usize> = std::collections::HashMap::new();
     // How many pages use each indirect /Annots array. A shared array is walked once; its entries are on
@@ -365,21 +395,26 @@ pub fn read_owned(document: &Document) -> Result<Owned, String> {
             if let Some(value) = app_number(document, entry) { max_number = max_number.max(value); }
             let Object::Reference(id) = entry else { inline_entries.push(entry); continue };
             *reference_counts.entry(*id).or_insert(0) += 1;
+            entry_page.entry(*id).or_insert(index);
             if reference_counts[id] > 1 { continue; }
-            if let Ok((note, appearance)) = document.get_dictionary(*id).map_err(|error| error.to_string()).and_then(|dict| app_note(document, *page_id, dict)) {
-                candidates.push((index, *id, note, appearance, array_id));
+            if let Ok((note, appearance, popup)) = document.get_dictionary(*id).map_err(|error| error.to_string()).and_then(|dict| app_note(document, *page_id, *id, dict)) {
+                candidates.push((index, *id, note, appearance, array_id, popup));
             }
         }
     }
     // Keep a candidate only if nothing else could depend on it: one `/Annots` reference, from an array no
     // other page or object uses, a unique `/NM`, an appearance of its own, and no reference to either from
     // any other object, inline annotation or the trailer.
+    // A popup must be listed exactly once, on its note's page, and belong to one note only.
     let mut names = std::collections::HashMap::new();
     let mut appearances = std::collections::HashMap::new();
-    for (_, _, note, appearance, _) in &candidates { *names.entry(note.id.clone()).or_insert(0usize) += 1; *appearances.entry(*appearance).or_insert(0usize) += 1; }
-    candidates.retain(|(_, id, note, appearance, array)| reference_counts[id] == 1 && names[&note.id] == 1 && appearances[appearance] == 1 && !reference_counts.contains_key(appearance) && array.is_none_or(|array| array_pages[&array] == 1));
-    let mut targets: HashSet<ObjectId> = candidates.iter().flat_map(|(_, id, _, appearance, _)| [*id, *appearance]).collect();
-    targets.extend(candidates.iter().filter_map(|(_, _, _, _, array)| *array));
+    let mut popup_uses = std::collections::HashMap::new();
+    for (_, _, note, appearance, _, popup) in &candidates { *names.entry(note.id.clone()).or_insert(0usize) += 1; *appearances.entry(*appearance).or_insert(0usize) += 1; if let Some(popup) = popup { *popup_uses.entry(*popup).or_insert(0usize) += 1; } }
+    let note_ids: HashSet<ObjectId> = candidates.iter().map(|(_, id, ..)| *id).collect();
+    candidates.retain(|(index, id, note, appearance, array, popup)| reference_counts[id] == 1 && names[&note.id] == 1 && appearances[appearance] == 1 && !reference_counts.contains_key(appearance) && array.is_none_or(|array| array_pages[&array] == 1)
+        && popup.is_none_or(|popup| popup_uses[&popup] == 1 && reference_counts.get(&popup) == Some(&1) && entry_page.get(&popup) == Some(index) && !appearances.contains_key(&popup) && !note_ids.contains(&popup)));
+    let mut targets: HashSet<ObjectId> = candidates.iter().flat_map(|(_, id, _, appearance, _, popup)| [Some(*id), Some(*appearance), *popup]).flatten().collect();
+    targets.extend(candidates.iter().filter_map(|(_, _, _, _, array, _)| *array));
     let page_set: HashSet<ObjectId> = pages.iter().copied().collect();
     let mut referenced = HashSet::new();
     for (id, object) in &document.objects {
@@ -394,18 +429,22 @@ pub fn read_owned(document: &Document) -> Result<Owned, String> {
     }
     for entry in inline_entries { collect_references(entry, &targets, &mut referenced); }
     collect_references(&Object::Dictionary(document.trailer.clone()), &targets, &mut referenced);
-    candidates.retain(|(_, id, _, appearance, array)| !referenced.contains(id) && !referenced.contains(appearance) && array.is_none_or(|array| !referenced.contains(&array)));
+    // The popups' own `/Parent` links back to their notes are skipped above (they are targets); any other
+    // reference to a note, its appearance, its popup or its /Annots array keeps the unit foreign.
+    candidates.retain(|(_, id, _, appearance, array, popup)| !referenced.contains(id) && !referenced.contains(appearance) && array.is_none_or(|array| !referenced.contains(&array)) && popup.is_none_or(|popup| !referenced.contains(&popup)));
     let (mut count, mut text_bytes, mut geometry_slots) = (0usize, 0usize, 0usize);
     let mut notes = vec![Vec::new(); pages.len()];
     let mut app = std::collections::HashMap::new();
-    for (index, id, note, appearance, _) in candidates {
+    let mut popups = std::collections::HashMap::new();
+    for (index, id, note, appearance, _, popup) in candidates {
         count += 1; text_bytes += note.contents.len(); geometry_slots += note.quads.as_ref().map_or(1, Vec::len);
         if geometry_slots > MAX_GEOMETRY_SLOTS { return Err("The PDF exceeds the 4,096 annotation geometry-slot limit. Annotations are unavailable.".into()); }
         if count > MAX_NOTES || text_bytes > MAX_TOTAL_BYTES { return Err("The PDF exceeds the 1,000-note or 1 MiB total note-text limit.".into()); }
         app.insert(id, (note.id.clone(), appearance));
+        if let Some(popup) = popup { popups.insert(id, popup); }
         notes[index].push(note);
     }
-    Ok(Owned { notes, foreign: entries_total - app.len(), app, max_number })
+    Ok(Owned { notes, foreign: entries_total - app.len() - popups.len(), app, popups, max_number })
 }
 
 /// The app's editable notes and highlights per page (see `read_owned`).
@@ -424,7 +463,14 @@ fn collect_references(value: &Object, owned: &HashSet<ObjectId>, found: &mut Has
     }
 }
 
-fn new_annotation(document: &mut Document, page_id: ObjectId, note: &Note) -> Object {
+/// The `/Annots` entries for one app annotation: the annotation, then, for a sticky note, its popup (Acrobat
+/// lists a popup right after its parent).
+fn new_annotation(document: &mut Document, page_id: ObjectId, note: &Note) -> Result<Vec<Object>, String> {
+    let id = document.new_object_id();
+    let popup = if note.kind == AnnotationKind::Note {
+        let area = popup_rect(note.rect, media_box(document, page_id)?);
+        Some(document.add_object(dictionary! { "Type" => "Annot", "Subtype" => "Popup", "Parent" => id, "Rect" => vec![Object::Real(area.left), Object::Real(area.bottom), Object::Real(area.right), Object::Real(area.top)], "Open" => false, "F" => 28 }))
+    } else { None };
     let content = match &note.quads { Some(quads) => text_appearance(note.rect, quads), None => appearance(note.rect, note.kind) };
     let appearance = document.add_object(Stream::new(appearance_dict(note.rect, note.kind), content));
     let mut annotation = dictionary! { "Type" => "Annot", "Subtype" => if note.kind == AnnotationKind::Note { "Text" } else { "Highlight" }, "Rect" => vec![Object::Real(note.rect.left), Object::Real(note.rect.bottom), Object::Real(note.rect.right), Object::Real(note.rect.top)],
@@ -435,7 +481,9 @@ fn new_annotation(document: &mut Document, page_id: ObjectId, note: &Note) -> Ob
     if let Some(modified) = &note.modified { annotation.set("M", Object::String(modified.as_bytes().to_vec(), StringFormat::Literal)); }
     if note.kind == AnnotationKind::Note { annotation.set("Contents", encode_text(&note.contents)); annotation.set("Name", "Note"); annotation.set("C", vec![Object::Real(1.0), Object::Real(0.85), Object::Real(0.0)]); annotation.set("Open", false); }
     else { let points = note.quads.as_deref().map_or_else(|| quad(note.rect), |quads| quads.iter().flat_map(|bounds| quad(*bounds)).collect()); annotation.set("QuadPoints", points.into_iter().map(Object::Real).collect::<Vec<_>>()); annotation.set("C", vec![1.into(), 1.into(), 0.into()]); if !note.contents.is_empty() { annotation.set("Contents", encode_text(&note.contents)); } }
-    Object::Reference(document.add_object(annotation))
+    if let Some(popup) = popup { annotation.set("Popup", popup); }
+    document.objects.insert(id, Object::Dictionary(annotation));
+    Ok([Some(id), popup].into_iter().flatten().map(Object::Reference).collect())
 }
 
 /// Writes the planned app annotations. Only pages whose app annotations changed are touched. On such a
@@ -458,17 +506,21 @@ pub fn write(document: &mut Document, plan: &[PageSpec]) -> Result<(), String> {
         if notes == owned.notes[index].as_slice() { continue; }
         let entries = page_annots(document, page_id)?.map(|(_, entries)| entries.to_vec()).unwrap_or_default();
         let mut emitted = HashSet::new();
-        let mut output = Vec::with_capacity(entries.len() + notes.len());
+        let mut output = Vec::with_capacity(entries.len() + 2 * notes.len());
+        let app_popups: HashSet<ObjectId> = owned.popups.values().copied().collect();
         for entry in entries {
+            // An app note's popup is regenerated with its note, so its old entry is dropped here.
+            if let Object::Reference(id) = &entry { if app_popups.contains(id) { document.objects.remove(id); continue; } }
             let app = match &entry { Object::Reference(id) => owned.app.get(id).cloned().map(|app| (*id, app)), _ => None };
             let Some((id, (note_id, appearance))) = app else { output.push(entry); continue };
             document.objects.remove(&id); document.objects.remove(&appearance);
+            if let Some(popup) = owned.popups.get(&id) { document.objects.remove(popup); }
             if let Some(note) = notes.iter().find(|note| note.id == note_id) {
-                output.push(new_annotation(document, page_id, note));
+                output.extend(new_annotation(document, page_id, note)?);
                 emitted.insert(note_id);
             }
         }
-        for note in notes.iter().filter(|note| !emitted.contains(&note.id)) { output.push(new_annotation(document, page_id, note)); }
+        for note in notes.iter().filter(|note| !emitted.contains(&note.id)) { output.extend(new_annotation(document, page_id, note)?); }
         let page = document.get_dictionary_mut(page_id).map_err(|error| error.to_string())?;
         if output.is_empty() { page.remove(b"Annots"); } else { page.set("Annots", output); }
     }
@@ -480,6 +532,71 @@ mod tests {
     use super::*;
     use crate::editor::{EditSession, PageEdit};
     fn sample() -> Vec<u8> { std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/welcome.pdf")).unwrap() }
+    #[test]
+    fn a_sticky_note_and_its_acrobat_style_popup_are_one_editable_unit() {
+        let mut session = EditSession::new(sample(), 6);
+        let rect = CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 };
+        let next = session.proposed_comment(Some((0, rect)), None, Some("With popup")).unwrap(); session.commit_comments(next);
+        let next = session.proposed_highlight(Some((0, CropBox { left: 100.0, bottom: 200.0, right: 180.0, top: 240.0 })), None, None, false).unwrap(); session.commit_comments(next);
+        let output = Document::load_mem(&session.export(None).unwrap()).unwrap();
+        let page = output.get_pages()[&1];
+        let annots = output.get_dictionary(page).unwrap().get(b"Annots").unwrap().as_array().unwrap().clone();
+        assert_eq!(annots.len(), 3, "note, its popup right after it, then the highlight (no popup)");
+        let (note, popup) = (annots[0].as_reference().unwrap(), annots[1].as_reference().unwrap());
+        assert_eq!(output.get_dictionary(note).unwrap().get(b"Popup").unwrap().as_reference().unwrap(), popup);
+        let popup_dict = output.get_dictionary(popup).unwrap();
+        assert_eq!(popup_dict.get(b"Subtype").unwrap().as_name().unwrap(), b"Popup");
+        assert_eq!(popup_dict.get(b"Parent").unwrap().as_reference().unwrap(), note);
+        assert_eq!(popup_dict.get(b"Open").unwrap().as_bool().unwrap(), false);
+        assert_eq!(popup_dict.get(b"F").unwrap().as_i64().unwrap(), 28);
+        let media = media_box(&output, page).unwrap();
+        let area = values(popup_dict.get(b"Rect").unwrap()).unwrap();
+        assert_eq!(area[2], media.right, "at the right edge of the page");
+        assert_eq!(area[3], rect.top.max(media.bottom + 120.0), "level with the note's top, raised only to stay on the page");
+        assert_eq!(area[3] - area[1], 120.0); assert_eq!(area[2] - area[0], 180.0);
+        let high = popup_rect(CropBox { left: 40.0, bottom: 700.0, right: 70.0, top: 730.0 }, media);
+        assert_eq!((high.top, high.bottom), (730.0, 610.0), "a note high on the page keeps its top");
+        let owned = read_owned(&output).unwrap();
+        assert_eq!(owned.notes[0], session.plan[0].notes);
+        assert_eq!(owned.popups.get(&note), Some(&popup));
+        assert_eq!(owned.foreign, 0, "the popup is part of the app's unit, so page delete is not blocked");
+        // Editing regenerates the pair; deleting removes both.
+        let mut reopened = EditSession::new(session.export(None).unwrap(), 6);
+        let id = reopened.plan[0].notes[0].id.clone();
+        let next = reopened.proposed_comment(None, Some(&id), Some("Edited")).unwrap(); reopened.commit_comments(next);
+        let edited = Document::load_mem(&reopened.export(None).unwrap()).unwrap();
+        assert_eq!(edited.get_dictionary(edited.get_pages()[&1]).unwrap().get(b"Annots").unwrap().as_array().unwrap().len(), 3);
+        assert_eq!(read_owned(&edited).unwrap().popups.len(), 1);
+        let next = reopened.proposed_comment(None, Some(&id), None).unwrap(); reopened.commit_comments(next);
+        let deleted = Document::load_mem(&reopened.export(None).unwrap()).unwrap();
+        let left = deleted.get_dictionary(deleted.get_pages()[&1]).unwrap().get(b"Annots").unwrap().as_array().unwrap().clone();
+        assert_eq!(left.len(), 1, "only the highlight remains");
+        assert!(deleted.objects.values().all(|object| object.as_dict().map_or(true, |dict| dict.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"Popup"))), "the old popup is gone from the copy");
+        assert!(reopened.apply(PageEdit::Delete { pages: vec![5] }).is_ok(), "an app-only file still allows page delete");
+        // A popup in any other form, or one another object also uses, keeps the note foreign; both are kept.
+        let alter = |change: &dyn Fn(&mut Document)| { let mut altered = output.clone(); change(&mut altered); altered };
+        let cases: Vec<(&str, Document)> = vec![
+            ("open popup", alter(&|doc| { doc.get_dictionary_mut(popup).unwrap().set("Open", true); })),
+            ("moved popup", alter(&|doc| { doc.get_dictionary_mut(popup).unwrap().set("Rect", vec![0.into(), 0.into(), 10.into(), 10.into()]); })),
+            ("extra key", alter(&|doc| { doc.get_dictionary_mut(popup).unwrap().set("Contents", Object::string_literal("x")); })),
+            ("other parent", alter(&|doc| { let other = annots[2].as_reference().unwrap(); doc.get_dictionary_mut(popup).unwrap().set("Parent", other); })),
+            ("popup missing from /Annots", alter(&|doc| { doc.get_dictionary_mut(page).unwrap().get_mut(b"Annots").unwrap().as_array_mut().unwrap().remove(1); })),
+            ("popup listed twice", alter(&|doc| { doc.get_dictionary_mut(page).unwrap().get_mut(b"Annots").unwrap().as_array_mut().unwrap().push(Object::Reference(popup)); })),
+            ("popup referenced elsewhere", alter(&|doc| { let info = doc.add_object(dictionary! { "Popup" => popup }); doc.trailer.set("Info", info); })),
+        ];
+        for (case, document) in cases {
+            let owned = read_owned(&document).unwrap();
+            assert!(!owned.app.contains_key(&note) && owned.popups.is_empty(), "{case}: the note is foreign");
+            assert!(preserved(&document, note), "{case}: the note is kept as it was");
+        }
+        // A 0.3.x note without a popup still reads; when its page is rewritten it gains one.
+        let mut legacy = output.clone();
+        legacy.get_dictionary_mut(note).unwrap().remove(b"Popup");
+        legacy.get_dictionary_mut(page).unwrap().get_mut(b"Annots").unwrap().as_array_mut().unwrap().remove(1);
+        legacy.objects.remove(&popup);
+        let owned = read_owned(&legacy).unwrap();
+        assert!(owned.app.contains_key(&note) && owned.popups.is_empty());
+    }
     #[test]
     fn new_annotation_ids_are_random_uuids_and_numbered_ids_still_read() {
         let ids: HashSet<String> = (0..1_000).map(|_| new_id().unwrap()).collect();
@@ -527,7 +644,7 @@ mod tests {
         assert!(note.created.is_some() && note.created == note.modified && highlight.created.is_some());
         let output = Document::load_mem(&session.export(None).unwrap()).unwrap();
         let page = output.get_pages()[&1];
-        for (index, expected) in [(0, "Sticky Note"), (1, "Highlight")] {
+        for (index, expected) in [(0, "Sticky Note"), (2, "Highlight")] {
             let id = output.get_dictionary(page).unwrap().get(b"Annots").unwrap().as_array().unwrap()[index].as_reference().unwrap();
             let dict = output.get_dictionary(id).unwrap();
             assert_eq!(dict.get(b"Subj").unwrap().as_str().unwrap(), expected.as_bytes());
@@ -655,7 +772,7 @@ mod tests {
         let next = session.proposed_text_highlight(0, quads.clone(), Some("  é 漢字 😀\n ")).unwrap(); session.commit_comments(next);
         let output = Document::load_mem(&session.export(None).unwrap()).unwrap(); assert_eq!(read(&output).unwrap()[0], session.plan[0].notes);
         assert!(session.plan[0].notes[0].quads.is_none() && session.plan[0].notes[1].quads.is_none());
-        let page = output.get_pages()[&1]; let annotation = output.get_dictionary(page).unwrap().get(b"Annots").unwrap().as_array().unwrap()[2].as_reference().unwrap();
+        let page = output.get_pages()[&1]; let annotation = output.get_dictionary(page).unwrap().get(b"Annots").unwrap().as_array().unwrap()[3].as_reference().unwrap();
         let ap = output.get_dictionary(annotation).unwrap().get(b"AP").unwrap().as_dict().unwrap().get(b"N").unwrap().as_reference().unwrap();
         let content = &output.get_object(ap).unwrap().as_stream().unwrap().content;
         assert_eq!(std::str::from_utf8(content).unwrap().matches(" re ").count(), 4); assert_eq!(std::str::from_utf8(content).unwrap().matches("f Q").count(), 1, "Overlapping quads use exactly one nonzero-winding fill");
@@ -751,7 +868,7 @@ mod tests {
             assert!(*shared < ceiling && *base < ceiling, "{step}: {shared:?} (baseline {base:?}) is over the {ceiling:?} ceiling");
         }
         assert!(matches!(written.get_dictionary(written.get_pages()[&2]).unwrap().get(b"Annots").unwrap(), Object::Reference(_)), "other pages keep the shared array");
-        assert_eq!(page_annots(&written, written.get_pages()[&1]).unwrap().unwrap().1.len(), 65_537);
+        assert_eq!(page_annots(&written, written.get_pages()[&1]).unwrap().unwrap().1.len(), 65_538, "the shared entries plus the new note and its popup");
     }
 
     #[test]
@@ -810,7 +927,7 @@ mod tests {
         let body = "  Unicode é 漢字 😀\n ";
         let plan = session.proposed_highlight(Some((0, bounds)), None, Some(body), false).unwrap(); session.commit_comments(plan);
         let output = Document::load_mem(&session.export(None).unwrap()).unwrap(); let imported = read(&output).unwrap(); assert_eq!(imported[0], session.plan[0].notes); assert_eq!(imported[0][1].contents, body); assert_eq!(imported[0][0], original.plan[0].notes[0]);
-        let page = output.get_pages()[&1]; let annotation = output.get_dictionary(page).unwrap().get(b"Annots").unwrap().as_array().unwrap()[1].as_reference().unwrap();
+        let page = output.get_pages()[&1]; let annotation = output.get_dictionary(page).unwrap().get(b"Annots").unwrap().as_array().unwrap()[2].as_reference().unwrap();
         for key in [b"AA".as_slice(), b"A", b"Popup", b"Name", b"Open", b"Unknown"] { let mut altered = output.clone(); altered.get_dictionary_mut(annotation).unwrap().set(key, Object::Null); assert!(preserved(&altered, annotation)); }
         let mut altered = output.clone(); altered.get_dictionary_mut(annotation).unwrap().set("QuadPoints", vec![0.into(); 8]); assert!(preserved(&altered, annotation));
         let ap = output.get_dictionary(annotation).unwrap().get(b"AP").unwrap().as_dict().unwrap().get(b"N").unwrap().as_reference().unwrap();
