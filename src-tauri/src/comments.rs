@@ -15,8 +15,38 @@ const HIGHLIGHT_PREFIX: &str = "pdf-workstation-highlight-";
 #[serde(rename_all = "lowercase")]
 pub enum AnnotationKind { Note, Highlight }
 
+/// One of the app's own annotations. `created` and `modified` are PDF dates in the app's one form,
+/// `D:YYYYMMDDHHmmSSZ` (UTC, so no time-zone offset is recorded). They are written as `/CreationDate` and
+/// `/M`, as Acrobat does. Notes from 0.3.x and slice 1c have none: an edit sets `modified` and leaves
+/// `created` unknown.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Note { pub id: String, pub rect: CropBox, pub contents: String, pub kind: AnnotationKind, pub quads: Option<Vec<CropBox>> }
+pub struct Note { pub id: String, pub rect: CropBox, pub contents: String, pub kind: AnnotationKind, pub quads: Option<Vec<CropBox>>, pub created: Option<String>, pub modified: Option<String> }
+
+/// Acrobat's subject for each kind, written as `/Subj` (Acrobat shows it as the comment type).
+pub fn subject(kind: AnnotationKind) -> &'static str { match kind { AnnotationKind::Note => "Sticky Note", AnnotationKind::Highlight => "Highlight" } }
+
+/// Whether `value` is a PDF date in the app's form `D:YYYYMMDDHHmmSSZ`, a real calendar date and time. The one
+/// implementation lives in the recovery journal, which the standalone journal test also compiles.
+pub fn valid_pdf_date(value: &str) -> bool { crate::recovery_journal::valid_annotation_date(value) }
+
+/// Seconds since the Unix epoch as a PDF date in UTC (`D:YYYYMMDDHHmmSSZ`).
+pub fn pdf_date(epoch_seconds: u64) -> String {
+    let (days, seconds) = (epoch_seconds / 86_400, epoch_seconds % 86_400);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm, proleptic Gregorian).
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!("D:{year:04}{month:02}{day:02}{:02}{:02}{:02}Z", seconds / 3_600, seconds % 3_600 / 60, seconds % 60)
+}
+
+/// Now, as a PDF date in UTC.
+pub fn pdf_date_now() -> String { pdf_date(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs())) }
 #[derive(Clone, Debug, Serialize)]
 pub struct DisplayRect { pub x: f64, pub y: f64, pub width: f64, pub height: f64 }
 #[derive(Serialize)]
@@ -49,6 +79,7 @@ pub fn validate_text(contents: &str) -> Result<(), String> {
 pub fn validate_plan(plan: &[PageSpec]) -> Result<(), String> {
     let mut count = 0usize; let mut total = 0usize; let mut slots = 0usize; let mut ids = HashSet::new();
     for note in plan.iter().flat_map(|page| &page.notes) {
+        if [&note.created, &note.modified].into_iter().flatten().any(|date| !valid_pdf_date(date)) { return Err("The annotation has an invalid date.".into()); }
         if let Some(quads) = &note.quads {
             if note.kind != AnnotationKind::Highlight || highlight_union(quads)? != note.rect { return Err("The annotation has invalid text-highlight quadrilaterals.".into()); }
         }
@@ -207,9 +238,18 @@ pub struct Owned {
 fn app_note(document: &Document, page_id: ObjectId, annotation: &Dictionary) -> Result<(Note, ObjectId), String> {
                 let kind = match annotation.get(b"Subtype").and_then(Object::as_name).ok() { Some(b"Text") => AnnotationKind::Note, Some(b"Highlight") => AnnotationKind::Highlight, _ => return Err("The PDF has a foreign annotation subtype.".into()) };
                 match kind {
-                    AnnotationKind::Note => { keys(annotation, &[b"Type", b"Subtype", b"Rect", b"NM", b"Contents", b"Name", b"C", b"Open", b"F", b"P", b"AP"])?; name(annotation, b"Name", b"Note")?; if annotation.get(b"Open").and_then(Object::as_bool).ok() != Some(false) { return Err("The PDF has unsupported popup state.".into()); } },
-                    AnnotationKind::Highlight => keys(annotation, &[b"Type", b"Subtype", b"Rect", b"QuadPoints", b"NM", b"Contents", b"C", b"F", b"P", b"AP"])?
+                    AnnotationKind::Note => { keys(annotation, &[b"Type", b"Subtype", b"Rect", b"NM", b"Contents", b"Name", b"C", b"Open", b"F", b"P", b"AP", b"Subj", b"M", b"CreationDate"])?; name(annotation, b"Name", b"Note")?; if annotation.get(b"Open").and_then(Object::as_bool).ok() != Some(false) { return Err("The PDF has unsupported popup state.".into()); } },
+                    AnnotationKind::Highlight => keys(annotation, &[b"Type", b"Subtype", b"Rect", b"QuadPoints", b"NM", b"Contents", b"C", b"F", b"P", b"AP", b"Subj", b"M", b"CreationDate"])?
                 }
+                // Acrobat-style metadata the app writes since slice P2-4: optional (0.3.x and 1c files lack it),
+                // but when present it must be exactly the app's form.
+                if annotation.has(b"Subj") && annotation.get(b"Subj").and_then(Object::as_str).ok() != Some(subject(kind).as_bytes()) { return Err("The PDF has an altered annotation subject.".into()); }
+                let date = |key: &[u8]| -> Result<Option<String>, String> {
+                    let Ok(value) = annotation.get(key) else { return Ok(None) };
+                    let text = value.as_str().ok().and_then(|bytes| std::str::from_utf8(bytes).ok()).filter(|text| valid_pdf_date(text)).ok_or("The PDF has an annotation date in a form the app does not write.")?;
+                    Ok(Some(text.to_owned()))
+                };
+                let (created, modified) = (date(b"CreationDate")?, date(b"M")?);
                 name(annotation, b"Type", b"Annot")?;
                 if annotation.get(b"P").and_then(Object::as_reference).ok() != Some(page_id) || annotation.get(b"F").and_then(Object::as_i64).ok() != Some(4) { return Err("The PDF has unsupported annotation links or flags.".into()); }
                 let expected_color = if kind == AnnotationKind::Note { [1.0, 0.85, 0.0] } else { [1.0, 1.0, 0.0] };
@@ -238,7 +278,7 @@ fn app_note(document: &Document, page_id: ObjectId, annotation: &Dictionary) -> 
                 if legacy { rect(bounds_value)?; quads = None; }
                 else if quads.as_ref().is_none_or(|quads| stream.content != text_appearance(bounds, quads)) { return Err("The PDF has an altered annotation appearance.".into()); }
                 if stream.dict.get(b"Length").is_ok_and(|value| value.as_i64().ok() != Some(stream.content.len() as i64)) { return Err("The PDF has an altered note appearance.".into()); }
-                Ok((Note { id: note_id, rect: bounds, contents, kind, quads }, appearance_id))
+                Ok((Note { id: note_id, rect: bounds, contents, kind, quads, created, modified }, appearance_id))
 }
 
 /// The app number in an annotation's `/NM`, when it carries the app's prefix (valid or not otherwise).
@@ -345,7 +385,11 @@ fn new_annotation(document: &mut Document, page_id: ObjectId, note: &Note) -> Ob
     let content = match &note.quads { Some(quads) => text_appearance(note.rect, quads), None => appearance(note.rect, note.kind) };
     let appearance = document.add_object(Stream::new(appearance_dict(note.rect, note.kind), content));
     let mut annotation = dictionary! { "Type" => "Annot", "Subtype" => if note.kind == AnnotationKind::Note { "Text" } else { "Highlight" }, "Rect" => vec![Object::Real(note.rect.left), Object::Real(note.rect.bottom), Object::Real(note.rect.right), Object::Real(note.rect.top)],
-        "NM" => Object::String(note.id.as_bytes().to_vec(), StringFormat::Literal), "F" => 4, "P" => page_id, "AP" => dictionary! { "N" => appearance } };
+        "NM" => Object::String(note.id.as_bytes().to_vec(), StringFormat::Literal), "F" => 4, "P" => page_id, "AP" => dictionary! { "N" => appearance },
+        "Subj" => Object::String(subject(note.kind).as_bytes().to_vec(), StringFormat::Literal) };
+    // No /T: the author name stays blank until Joshua rules on Q1 (design 6.4); the Windows user name is never read.
+    if let Some(created) = &note.created { annotation.set("CreationDate", Object::String(created.as_bytes().to_vec(), StringFormat::Literal)); }
+    if let Some(modified) = &note.modified { annotation.set("M", Object::String(modified.as_bytes().to_vec(), StringFormat::Literal)); }
     if note.kind == AnnotationKind::Note { annotation.set("Contents", encode_text(&note.contents)); annotation.set("Name", "Note"); annotation.set("C", vec![Object::Real(1.0), Object::Real(0.85), Object::Real(0.0)]); annotation.set("Open", false); }
     else { let points = note.quads.as_deref().map_or_else(|| quad(note.rect), |quads| quads.iter().flat_map(|bounds| quad(*bounds)).collect()); annotation.set("QuadPoints", points.into_iter().map(Object::Real).collect::<Vec<_>>()); annotation.set("C", vec![1.into(), 1.into(), 0.into()]); if !note.contents.is_empty() { annotation.set("Contents", encode_text(&note.contents)); } }
     Object::Reference(document.add_object(annotation))
@@ -393,6 +437,88 @@ mod tests {
     use super::*;
     use crate::editor::{EditSession, PageEdit};
     fn sample() -> Vec<u8> { std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/welcome.pdf")).unwrap() }
+    #[test]
+    fn pdf_dates_are_utc_civil_dates_in_the_app_form() {
+        assert_eq!(pdf_date(0), "D:19700101000000Z");
+        assert_eq!(pdf_date(951_782_400), "D:20000229000000Z", "leap day in a century leap year");
+        assert_eq!(pdf_date(1_762_473_599), "D:20251106235959Z");
+        assert_eq!(pdf_date(4_102_444_800), "D:21000101000000Z");
+        assert!(valid_pdf_date(&pdf_date_now()));
+        for bad in ["D:20251106235959", "D:2025110623595Z", "D:20251306000000Z", "D:20251100000000Z", "D:20251106240000Z", "D:20251106236000Z", "20251106235959Z", "D:2025110623595xZ", "D:20251106235959-06'00'"] { assert!(!valid_pdf_date(bad), "{bad}"); }
+        // One implementation (in the journal); real calendar days only.
+        for (value, valid) in [("D:20240229120000Z", true), ("D:20230229120000Z", false), ("D:21000229120000Z", false), ("D:20000229120000Z", true), ("D:20250431000000Z", false), ("D:20250430000000Z", true), ("D:20250132000000Z", false), ("D:20251106240000Z", false), ("D:20251106235960Z", false), ("D:00001106235959Z", false), ("D:99991231235959Z", true), ("", false)] {
+            assert_eq!(valid_pdf_date(value), valid, "{value}");
+            assert_eq!(crate::recovery_journal::valid_annotation_date(value), valid, "{value}");
+        }
+    }
+    #[test]
+    fn new_app_annotations_carry_acrobat_style_dates_and_subject_but_no_author() {
+        let mut session = EditSession::new(sample(), 6);
+        let rect = CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 };
+        let next = session.proposed_comment(Some((0, rect)), None, Some("Dated")).unwrap(); session.commit_comments(next);
+        let next = session.proposed_highlight(Some((0, CropBox { left: 100.0, bottom: 200.0, right: 180.0, top: 240.0 })), None, None, false).unwrap(); session.commit_comments(next);
+        let (note, highlight) = (session.plan[0].notes[0].clone(), session.plan[0].notes[1].clone());
+        assert!(note.created.is_some() && note.created == note.modified && highlight.created.is_some());
+        let output = Document::load_mem(&session.export(None).unwrap()).unwrap();
+        let page = output.get_pages()[&1];
+        for (index, expected) in [(0, "Sticky Note"), (1, "Highlight")] {
+            let id = output.get_dictionary(page).unwrap().get(b"Annots").unwrap().as_array().unwrap()[index].as_reference().unwrap();
+            let dict = output.get_dictionary(id).unwrap();
+            assert_eq!(dict.get(b"Subj").unwrap().as_str().unwrap(), expected.as_bytes());
+            assert!(valid_pdf_date(std::str::from_utf8(dict.get(b"CreationDate").unwrap().as_str().unwrap()).unwrap()) && dict.has(b"M"));
+            assert!(!dict.has(b"T"), "the author stays blank until Joshua rules on Q1");
+        }
+        assert_eq!(read(&output).unwrap()[0], session.plan[0].notes, "dates and subject round-trip");
+        // An unchanged edit keeps /M; a real edit changes /M and keeps /CreationDate.
+        let revision = session.revision;
+        let next = session.proposed_comment(None, Some(&note.id), Some("Dated")).unwrap(); session.commit_comments(next);
+        assert_eq!(session.revision, revision);
+        let mut edited = session.proposed_comment(None, Some(&note.id), Some("Changed")).unwrap();
+        assert_eq!(edited[0].notes[0].created, note.created);
+        assert!(edited[0].notes[0].modified.as_deref() >= note.modified.as_deref());
+        edited[0].notes[0].modified = Some("D:20991231235959Z".into());
+        session.commit_comments(edited);
+        let output = Document::load_mem(&session.export(None).unwrap()).unwrap();
+        assert_eq!(read(&output).unwrap()[0][0].modified.as_deref(), Some("D:20991231235959Z"));
+        // A date or subject in any other form makes the annotation foreign (kept, not edited).
+        let id = output.get_dictionary(page).unwrap().get(b"Annots").unwrap().as_array().unwrap()[0].as_reference().unwrap();
+        for (key, value) in [("M", "D:20240305141500-06'00'"), ("CreationDate", "yesterday"), ("Subj", "Comment")] {
+            let mut altered = output.clone(); altered.get_dictionary_mut(id).unwrap().set(key, Object::string_literal(value));
+            assert!(preserved(&altered, id), "{key} = {value}");
+        }
+        // A 0.3.x note without dates still reads; editing it sets only /M.
+        let (_, dated) = annotated();
+        let mut legacy = Document::load_mem(&dated).unwrap();
+        let first = legacy.get_dictionary(legacy.get_pages()[&1]).unwrap().get(b"Annots").unwrap().as_array().unwrap()[0].as_reference().unwrap();
+        for key in [b"M".as_slice(), b"CreationDate", b"Subj"] { legacy.get_dictionary_mut(first).unwrap().remove(key); }
+        let mut legacy_bytes = Vec::new(); legacy.save_to(&mut legacy_bytes).unwrap();
+        let mut old = EditSession::new(legacy_bytes, 6);
+        assert!(old.plan[0].notes[0].created.is_none());
+        let id = old.plan[0].notes[0].id.clone();
+        let next = old.proposed_comment(None, Some(&id), Some("Edited later")).unwrap(); old.commit_comments(next);
+        assert!(old.plan[0].notes[0].created.is_none() && old.plan[0].notes[0].modified.is_some());
+    }
+    #[test]
+    fn recovery_records_keep_annotation_dates_and_dateless_records_stay_canonical() {
+        use crate::recovery_journal::*;
+        let annotation = |created: Option<&str>| RecoveryAnnotation { id: id(1), kind: RecoveryAnnotationKind::Note, rect: RecoveryRect { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 }, contents: "x".into(), quads: Vec::new(), created: created.map(str::to_owned), modified: created.map(str::to_owned) };
+        let record = |annotation: RecoveryAnnotation| RecoveryRecord { active: true, generation: 1, revision: 1, current_page: 0, source_pages: 1, source: SourceIdentity { bytes: 10, sha256: [7; 32] }, edit_state: RecoveryEditState { pages: vec![RecoveryPage { source: 0, turns: 0, crop: None, annotations: vec![annotation] }] } };
+        for created in [None, Some("D:20251106235959Z")] {
+            let original = record(annotation(created));
+            let bytes = encode_recovery(&original).unwrap();
+            assert_eq!(decode_recovery(&bytes, original.source, None, 0).unwrap(), original);
+            assert_eq!(bytes.windows(9).any(|window| window == b"\"created\""), created.is_some(), "dateless records are unchanged from version 2");
+            let version = u16::from_le_bytes([bytes[8], bytes[9]]);
+            assert_eq!(version, if created.is_some() { 3 } else { 2 }, "dated records are version 3, dateless ones stay 2");
+            // The other version with the same contents is refused (re-stamped and re-digested).
+            let mut swapped = bytes.clone();
+            swapped[8..10].copy_from_slice(&(if version == 3 { 2u16 } else { 3u16 }).to_le_bytes());
+            let body = swapped.len() - 32; let digest = <sha2::Sha256 as sha2::Digest>::digest(&swapped[..body]); swapped[body..].copy_from_slice(&digest);
+            assert!(decode_recovery(&swapped, original.source, None, 0).unwrap_err().contains("does not match its contents"));
+        }
+        assert!(encode_recovery(&record(annotation(Some("not a date")))).is_err());
+        assert!(encode_recovery(&record(annotation(Some("D:20250230000000Z")))).is_err(), "no February 30th");
+    }
     #[test]
     fn quads_are_written_in_acrobat_order_and_both_orders_read_back() {
         let (session, _) = annotated();
@@ -474,7 +600,7 @@ mod tests {
         if owned.app.contains_key(&id) { return false; }
         let page = document.get_pages().into_values().position(|page| page_annots(document, page).ok().flatten().is_some_and(|(_, entries)| entries.contains(&Object::Reference(id)))).unwrap();
         let mut plan: Vec<PageSpec> = owned.notes.iter().enumerate().map(|(source, notes)| PageSpec { source, turns: 0, crop: None, notes: notes.clone() }).collect();
-        plan[page].notes.push(Note { id: self::id(owned.max_number + 1), rect: CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 }, contents: "added".into(), kind: AnnotationKind::Note, quads: None });
+        plan[page].notes.push(Note { id: self::id(owned.max_number + 1), rect: CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 }, contents: "added".into(), kind: AnnotationKind::Note, quads: None, created: None, modified: None });
         let before = document.get_object(id).unwrap().clone();
         let entries = |document: &Document| page_annots(document, document.get_pages().into_values().nth(page).unwrap()).unwrap().unwrap().1.to_vec();
         let position = entries(document).iter().position(|entry| entry == &Object::Reference(id)).unwrap();
@@ -505,7 +631,7 @@ mod tests {
         let open = started.elapsed();
         assert!(session.comments_reason().is_none());
         let mut plan: Vec<PageSpec> = (0..pages).map(|source| PageSpec { source, turns: 0, crop: None, notes: Vec::new() }).collect();
-        plan[0].notes.push(Note { id: id(1), rect: CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 }, contents: "added".into(), kind: AnnotationKind::Note, quads: None });
+        plan[0].notes.push(Note { id: id(1), rect: CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 }, contents: "added".into(), kind: AnnotationKind::Note, quads: None, created: None, modified: None });
         let mut written = document.clone();
         let started = std::time::Instant::now();
         write(&mut written, &plan).unwrap();
@@ -531,8 +657,11 @@ mod tests {
         let (base, _) = timed_open_and_write(&baseline, PAGES);
         let (times, written) = timed_open_and_write(&document, PAGES);
         println!("100,000 pages: empty /Annots each {base:?}; one shared 65,536-entry /Annots {times:?} (read_owned, open, write)");
+        // An absolute ceiling as well, so a regression that slows the baseline too fails instead of hanging CI.
+        let ceiling = std::time::Duration::from_secs(if cfg!(debug_assertions) { 300 } else { 60 });
         for (step, (shared, base)) in ["read_owned", "open", "write"].iter().zip(times.iter().zip(base.iter())) {
             assert!(*shared < *base * 10 + std::time::Duration::from_millis(200), "{step}: {shared:?} against a baseline of {base:?}");
+            assert!(*shared < ceiling && *base < ceiling, "{step}: {shared:?} (baseline {base:?}) is over the {ceiling:?} ceiling");
         }
         assert!(matches!(written.get_dictionary(written.get_pages()[&2]).unwrap().get(b"Annots").unwrap(), Object::Reference(_)), "other pages keep the shared array");
         assert_eq!(page_annots(&written, written.get_pages()[&1]).unwrap().unwrap().1.len(), 65_537);
@@ -613,8 +742,8 @@ mod tests {
         let next = session.proposed_highlight(None, Some(&highlight), Some("Body é 😀"), false).unwrap(); session.commit_comments(next); assert!(session.dirty()); session.apply(PageEdit::Undo).unwrap(); assert!(!session.dirty()); session.apply(PageEdit::Redo).unwrap(); assert!(session.dirty());
         assert!(highlight_contents(Some("\0")).is_err()); assert!(highlight_contents(Some(&"x".repeat(MAX_TEXT_BYTES + 1))).is_err());
         let next = session.proposed_comment(None, Some(&note), None).unwrap(); session.commit_comments(next); let next = session.proposed_highlight(None, Some(&highlight), None, true).unwrap(); session.commit_comments(next); let output = Document::load_mem(&session.export(None).unwrap()).unwrap(); assert!(output.get_pages().values().all(|page| !output.get_dictionary(*page).unwrap().has(b"Annots"))); assert!(read(&output).unwrap().iter().all(Vec::is_empty));
-        session.plan[0].notes = (1..=MAX_NOTES).map(|value| Note { quads: None, id: if value % 2 == 0 { highlight_id(value as u64) } else { id(value as u64) }, kind: if value % 2 == 0 { AnnotationKind::Highlight } else { AnnotationKind::Note }, rect: bounds, contents: "x".into() }).collect(); assert!(validate_plan(&session.plan).is_ok()); session.plan[0].notes.push(Note { quads: None, id: highlight_id(1001), kind: AnnotationKind::Highlight, rect: bounds, contents: String::new() }); assert!(validate_plan(&session.plan).unwrap_err().contains("1,000"));
-        session.plan[0].notes = (1..=128).map(|value| Note { quads: None, id: if value % 2 == 0 { highlight_id(value) } else { id(value) }, kind: if value % 2 == 0 { AnnotationKind::Highlight } else { AnnotationKind::Note }, rect: bounds, contents: "x".repeat(MAX_TEXT_BYTES) }).collect(); assert!(validate_plan(&session.plan).is_ok()); session.plan[0].notes.push(Note { quads: None, id: highlight_id(129), kind: AnnotationKind::Highlight, rect: bounds, contents: "x".into() }); assert!(validate_plan(&session.plan).unwrap_err().contains("1 MiB"));
+        session.plan[0].notes = (1..=MAX_NOTES).map(|value| Note { quads: None, created: None, modified: None, id: if value % 2 == 0 { highlight_id(value as u64) } else { id(value as u64) }, kind: if value % 2 == 0 { AnnotationKind::Highlight } else { AnnotationKind::Note }, rect: bounds, contents: "x".into() }).collect(); assert!(validate_plan(&session.plan).is_ok()); session.plan[0].notes.push(Note { quads: None, created: None, modified: None, id: highlight_id(1001), kind: AnnotationKind::Highlight, rect: bounds, contents: String::new() }); assert!(validate_plan(&session.plan).unwrap_err().contains("1,000"));
+        session.plan[0].notes = (1..=128).map(|value| Note { quads: None, created: None, modified: None, id: if value % 2 == 0 { highlight_id(value) } else { id(value) }, kind: if value % 2 == 0 { AnnotationKind::Highlight } else { AnnotationKind::Note }, rect: bounds, contents: "x".repeat(MAX_TEXT_BYTES) }).collect(); assert!(validate_plan(&session.plan).is_ok()); session.plan[0].notes.push(Note { quads: None, created: None, modified: None, id: highlight_id(129), kind: AnnotationKind::Highlight, rect: bounds, contents: "x".into() }); assert!(validate_plan(&session.plan).unwrap_err().contains("1 MiB"));
     }
     #[test]
     fn comments_unicode_owned_schema_reopens_and_foreign_links_or_appearance_refuse() {
@@ -652,11 +781,11 @@ mod tests {
         assert!(validate_text(&"é".repeat(MAX_TEXT_BYTES / 2)).is_ok()); assert!(validate_text(&"é".repeat(MAX_TEXT_BYTES / 2 + 1)).is_err());
         let mut session = EditSession::new(sample(), 6);
         let bounds = CropBox { left: 40.0, bottom: 60.0, right: 70.0, top: 90.0 };
-        session.plan[0].notes = (1..=MAX_NOTES).map(|value| Note { quads: None, id: id(value as u64), rect: bounds, contents: "x".into(), kind: AnnotationKind::Note }).collect(); assert!(validate_plan(&session.plan).is_ok());
-        session.plan[0].notes.push(Note { quads: None, id: id(MAX_NOTES as u64 + 1), rect: bounds, contents: "x".into(), kind: AnnotationKind::Note }); assert!(validate_plan(&session.plan).unwrap_err().contains("1,000"));
-        session.plan[0].notes = (1..=128).map(|value| Note { quads: None, id: id(value), rect: bounds, contents: "x".repeat(MAX_TEXT_BYTES), kind: AnnotationKind::Note }).collect(); assert!(validate_plan(&session.plan).is_ok());
-        session.plan[0].notes.push(Note { quads: None, id: id(129), rect: bounds, contents: "x".into(), kind: AnnotationKind::Note }); assert!(validate_plan(&session.plan).unwrap_err().contains("1 MiB"));
-        session.plan[0].notes = vec![Note { quads: None, id: id(1), rect: bounds, contents: "x".into(), kind: AnnotationKind::Note }; 2]; assert!(validate_plan(&session.plan).unwrap_err().contains("duplicate"));
+        session.plan[0].notes = (1..=MAX_NOTES).map(|value| Note { quads: None, created: None, modified: None, id: id(value as u64), rect: bounds, contents: "x".into(), kind: AnnotationKind::Note }).collect(); assert!(validate_plan(&session.plan).is_ok());
+        session.plan[0].notes.push(Note { quads: None, created: None, modified: None, id: id(MAX_NOTES as u64 + 1), rect: bounds, contents: "x".into(), kind: AnnotationKind::Note }); assert!(validate_plan(&session.plan).unwrap_err().contains("1,000"));
+        session.plan[0].notes = (1..=128).map(|value| Note { quads: None, created: None, modified: None, id: id(value), rect: bounds, contents: "x".repeat(MAX_TEXT_BYTES), kind: AnnotationKind::Note }).collect(); assert!(validate_plan(&session.plan).is_ok());
+        session.plan[0].notes.push(Note { quads: None, created: None, modified: None, id: id(129), rect: bounds, contents: "x".into(), kind: AnnotationKind::Note }); assert!(validate_plan(&session.plan).unwrap_err().contains("1 MiB"));
+        session.plan[0].notes = vec![Note { quads: None, created: None, modified: None, id: id(1), rect: bounds, contents: "x".into(), kind: AnnotationKind::Note }; 2]; assert!(validate_plan(&session.plan).unwrap_err().contains("duplicate"));
         let (_, bytes) = annotated(); let mut pdf = Document::load_mem(&bytes).unwrap(); let page = pdf.get_pages()[&1];
         let original = pdf.get_dictionary(page).unwrap().get(b"Annots").unwrap().as_array().unwrap()[0].as_reference().unwrap();
         let duplicate = pdf.add_object(pdf.get_object(original).unwrap().clone()); pdf.get_dictionary_mut(page).unwrap().get_mut(b"Annots").unwrap().as_array_mut().unwrap().push(Object::Reference(duplicate)); assert!(preserved(&pdf, original) && preserved(&pdf, duplicate), "a duplicated /NM makes both copies foreign");

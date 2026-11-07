@@ -231,12 +231,21 @@ impl EditSession {
                 let spec = next.get_mut(page).ok_or("Page is out of range")?;
                 let page_id = *document.get_pages().values().nth(spec.source).ok_or("Source page mapping is invalid.")?;
                 rect.validate_within(spec.crop.unwrap_or(visible_box(&document, page_id)?))?;
-                spec.notes.push(crate::comments::Note { quads: None, id: crate::comments::id(self.next_note), rect, contents: contents.to_owned(), kind: crate::comments::AnnotationKind::Note });
+                let now = crate::comments::pdf_date_now();
+                spec.notes.push(crate::comments::Note { quads: None, id: crate::comments::id(self.next_note), rect, contents: contents.to_owned(), kind: crate::comments::AnnotationKind::Note, created: Some(now.clone()), modified: Some(now) });
             }
             (None, Some(id), contents) => {
                 let (page, position) = next.iter().enumerate().find_map(|(page, spec)| spec.notes.iter().position(|note| note.id == id).map(|position| (page, position))).ok_or("The note no longer exists. Refresh comments.")?;
                 if next[page].notes[position].kind != crate::comments::AnnotationKind::Note { return Err("Choose the Area highlight editor for this annotation.".into()); }
-                match contents { Some(contents) => { crate::comments::validate_text(contents)?; next[page].notes[position].contents = contents.to_owned(); }, None => { next[page].notes.remove(position); } }
+                match contents {
+                    Some(contents) => {
+                        crate::comments::validate_text(contents)?;
+                        // Only a real change touches /M, so an unchanged save stays a no-op.
+                        let note = &mut next[page].notes[position];
+                        if note.contents != contents { note.contents = contents.to_owned(); note.modified = Some(crate::comments::pdf_date_now()); }
+                    }
+                    None => { next[page].notes.remove(position); }
+                }
             }
             _ => return Err("Invalid comment operation.".into()),
         }
@@ -253,12 +262,17 @@ impl EditSession {
                 let spec = next.get_mut(page).ok_or("Page is out of range")?;
                 let page_id = *document.get_pages().values().nth(spec.source).ok_or("Source page mapping is invalid.")?;
                 rect.validate_within(spec.crop.unwrap_or(visible_box(&document, page_id)?))?;
-                spec.notes.push(crate::comments::Note { quads: None, id: crate::comments::highlight_id(self.next_note), rect, contents, kind: crate::comments::AnnotationKind::Highlight });
+                let now = crate::comments::pdf_date_now();
+                spec.notes.push(crate::comments::Note { quads: None, id: crate::comments::highlight_id(self.next_note), rect, contents, kind: crate::comments::AnnotationKind::Highlight, created: Some(now.clone()), modified: Some(now) });
             }
             (None, Some(id), delete) => {
                 let (page, position) = next.iter().enumerate().find_map(|(page, spec)| spec.notes.iter().position(|note| note.id == id).map(|position| (page, position))).ok_or("The highlight no longer exists. Refresh annotations.")?;
                 if next[page].notes[position].kind != crate::comments::AnnotationKind::Highlight { return Err("Choose the Comment editor for this annotation.".into()); }
-                if delete { next[page].notes.remove(position); } else { next[page].notes[position].contents = crate::comments::highlight_contents(contents)?; }
+                if delete { next[page].notes.remove(position); } else {
+                    let contents = crate::comments::highlight_contents(contents)?;
+                    let note = &mut next[page].notes[position];
+                    if note.contents != contents { note.contents = contents; note.modified = Some(crate::comments::pdf_date_now()); }
+                }
             }
             _ => return Err("Invalid Area highlight operation.".into()),
         }
@@ -274,7 +288,8 @@ impl EditSession {
         let page_id = *document.get_pages().values().nth(spec.source).ok_or("Source page mapping is invalid.")?;
         let visible = spec.crop.unwrap_or(visible_box(&document, page_id)?);
         if bounds.left < visible.left || bounds.bottom < visible.bottom || bounds.right > visible.right || bounds.top > visible.top { return Err("The selected text is outside the current visible page.".into()); }
-        spec.notes.push(crate::comments::Note { id: crate::comments::highlight_id(self.next_note), rect: bounds, contents: crate::comments::highlight_contents(contents)?, kind: crate::comments::AnnotationKind::Highlight, quads: Some(quads) });
+        let now = crate::comments::pdf_date_now();
+        spec.notes.push(crate::comments::Note { id: crate::comments::highlight_id(self.next_note), rect: bounds, contents: crate::comments::highlight_contents(contents)?, kind: crate::comments::AnnotationKind::Highlight, quads: Some(quads), created: Some(now.clone()), modified: Some(now) });
         crate::comments::validate_plan(&next)?; Ok(next)
     }
     fn notes_changed(&self, plan: &[PageSpec]) -> bool {

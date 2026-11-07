@@ -118,7 +118,8 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
-- Tests: the annotation census now splits structure refusals by type, and the shared-annotation and forms-hardening timing tests compare against a baseline measured in the same run instead of fixed budgets (SM3; tests only).
+- Your comments and highlights now carry Acrobat-style creation and modification dates (UTC) and a subject ("Sticky Note", "Highlight"); no author name is written yet; older files still open (SM3, source build).
+- Tests: the annotation census now splits structure refusals by type, and the shared-annotation and forms-hardening timing tests compare against a baseline measured in the same run instead of fixed budgets, with absolute ceilings and per-test totals (SM3; tests only).
 - PDFs with other apps' annotations or links can now take your comments: their annotations are kept in place and order on save and listed view only; page delete and extract on such files stay refused (SM3, source build).
 - Highlights are saved with their corners in the order Acrobat and PDFium use, so readers that rebuild a highlight's appearance no longer draw it blank; older files still open. Comments lists other apps' annotations as view only, bounded against huge or shared strings and arrays (SM3, source build).
 - Tests: the bundled PDFium is checked as the non-V8, non-XFA build, and a file full of Launch, URI and JavaScript actions starts no process when loaded, rendered or printed with a form handle; a highlight probe and a read-only annotation census (SM3; tests only).
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - Test: with only a bookmark edit pending, form fill, redaction, image/text replacement and searchable/large OCR all refuse with the overlay message, and Undo lifts it (SM1; `outline_edit_tests.rs`; source build; mutation-checked).
 - Dev dependency: vitest and its @vitest packages 4.1.11 to 4.1.12 (SM0; `package.json`, `package-lock.json`, notices inventory hash). Test runner only; nothing in the app changes.
 - Comment fix (SM2; `named_dests.rs`): `is_goto_name` no longer claims PDFium follows an indirect /S; the bundled PDFium does not, and copies treat it as GoTo for readers that do. No code change.
-- Delete, move, extract and split now work on PDFs with bookmarks, named destinations or page labels (SM2; `editor.rs`, new `named_dests.rs`): bookmarks and names aimed at removed pages are dropped (children promoted), page-number destinations (`[3 /Fit]`) become page references, each page keeps its original label; malformed or aliased outlines and name trees, attachments, scripts, open actions, forms and tagged files still refuse (source build).
