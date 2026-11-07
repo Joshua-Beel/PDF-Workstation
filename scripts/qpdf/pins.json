@@ -1,5 +1,5 @@
 {
-  "comment": "Dev-only qpdf for the annotation interchange E2 check (SM3 P2-5). Never shipped, never a build dependency, never run on real work PDFs in CI. Nothing has been downloaded yet: the per-file hashes and the signature facts are recorded at the first fetch, which SM7 reviews. Source of the zip figures: GitHub release metadata for qpdf v12.4.2.",
+  "comment": "Dev-only qpdf for the annotation interchange E2 check (SM3 P2-5). Never shipped, never a build dependency, never run on real work PDFs in CI. Per-file hashes and signature facts were recorded at the one SM7-approved fetch on 2026-11-07 (qpdf.exe was not run). Source of the zip figures: GitHub release metadata for qpdf v12.4.2.",
   "version": "12.4.2",
   "license": "Apache-2.0",
   "zip": {
@@ -11,9 +11,25 @@
     "url": "https://github.com/qpdf/qpdf/releases/download/v12.4.2/qpdf-12.4.2.sha256",
     "size": 2906,
     "sha256": "bb4472ec2efb3fe4c4a49f030906c734506ffd99cb27abab0eb2f15ab1820d69",
-    "pgpClearSigned": null,
-    "signingKeyFingerprint": null,
-    "fingerprintSource": null
+    "pgpClearSigned": true,
+    "signingKeyFingerprint": "C2C96B10011FE009E6D1DF828A75D10998012C7E",
+    "signingKeyOwner": "Jay Berkenbilt <ejb@ql.org>",
+    "fingerprintSource": "https://raw.githubusercontent.com/qpdf/qpdf/main/README.md (qpdf source README, not the release page); key from https://q.ql.org/pubkey.asc",
+    "verifiedOn": "2026-11-07",
+    "verification": "gpg 2.4.9: Good signature, made 2026-09-26, primary key fingerprint matches; the file lists db87077e...5de25d for qpdf-12.4.2-msvc64.zip"
   },
-  "files": null
+  "files": {
+    "qpdf-12.4.2-msvc64/bin/concrt140.dll": "54716f0738af891f283d213b5c8d11b25896bb8ee3097d301eae718560cf974e",
+    "qpdf-12.4.2-msvc64/bin/fix-qdf.exe": "110741af48048dcdea7d9b14da685b855be71617f5d76aad42036a2304616656",
+    "qpdf-12.4.2-msvc64/bin/msvcp140_1.dll": "206c931bf90fdad8816de3b5e2ef80b2bcaa9406c89ecc05fe6fddffe251e982",
+    "qpdf-12.4.2-msvc64/bin/msvcp140_2.dll": "d50d7883f20d1dc6191768d3746f52dd9cac89c346ffaed5be1f110c2f34a838",
+    "qpdf-12.4.2-msvc64/bin/msvcp140_atomic_wait.dll": "3d0cbfaa1bf3eecf5a3f4491d2960ee803cb994f30292c6adc4a07c498f60e2b",
+    "qpdf-12.4.2-msvc64/bin/msvcp140_codecvt_ids.dll": "8a65c7596ef2e6938731f5a1058e7e40145b6d97967cc649231a076b9a608d78",
+    "qpdf-12.4.2-msvc64/bin/msvcp140.dll": "7c26614e1d733892c2deac7e245ce115504b1d80592dd0a01b08e3e5a55f89ca",
+    "qpdf-12.4.2-msvc64/bin/qpdf.exe": "1bdaf878f37eaffea1ea3c30591214c77636a0f2fc7432427516b6e22e36c0ff",
+    "qpdf-12.4.2-msvc64/bin/qpdf30.dll": "8812952678de93e0750308a113aa650e9161af466f9770679ea9673adeb61041",
+    "qpdf-12.4.2-msvc64/bin/vcruntime140_1.dll": "a7146c08f89fe5b04541ab507cdb59ff7b44534d4ba3c668a426c6450a03434e",
+    "qpdf-12.4.2-msvc64/bin/vcruntime140.dll": "d1f4225df2cd877dbf130d5668a021dce3f94118455ff5ec952061c30afc9ce7",
+    "qpdf-12.4.2-msvc64/bin/zlib-flate.exe": "dbe9a8e3ef6f9a2ab4850630c13c18a1e8e29fe15abf0c1c86c98a92ed174ebb"
+  }
 }

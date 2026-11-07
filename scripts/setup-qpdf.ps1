@@ -61,6 +61,10 @@ if (-not $WorkRoot) {
 }
 $WorkRoot = [IO.Path]::GetFullPath($WorkRoot)
 if (-not $env:CI -and $WorkRoot -match '^[Cc]:') { Fail "work root $WorkRoot is on C:; local runs keep everything under E:\Coding Projects\Smacrobat." }
+if ($ZipCache) {
+    $ZipCache = [IO.Path]::GetFullPath($ZipCache)
+    if (-not $env:CI -and $ZipCache -match '^[Cc]:') { Fail "zip cache $ZipCache is on C:; local runs keep everything under E:\Coding Projects\Smacrobat." }
+}
 New-Item -ItemType Directory -Path $WorkRoot -Force | Out-Null
 Assert-NotReparse $WorkRoot
 # Earlier runs' extracts are removed first: nothing extracted is ever reused.
@@ -72,7 +76,11 @@ New-Item -ItemType Directory -Path $run | Out-Null
 try {
     $zip = Join-Path $run 'qpdf.zip'
     if ($ZipPath) { Copy-Item -LiteralPath $ZipPath -Destination $zip }
-    elseif ($ZipCache -and (Test-Path -LiteralPath (Join-Path $ZipCache "qpdf-$($pins.version).zip") -PathType Leaf)) { Copy-Item -LiteralPath (Join-Path $ZipCache "qpdf-$($pins.version).zip") -Destination $zip }
+    elseif ($ZipCache -and (Test-Path -LiteralPath (Join-Path $ZipCache "qpdf-$($pins.version).zip") -PathType Leaf)) {
+        Assert-NotReparse $ZipCache
+        Assert-NotReparse (Join-Path $ZipCache "qpdf-$($pins.version).zip")
+        Copy-Item -LiteralPath (Join-Path $ZipCache "qpdf-$($pins.version).zip") -Destination $zip
+    }
     else {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -Uri $pins.zip.url -OutFile $zip -UseBasicParsing

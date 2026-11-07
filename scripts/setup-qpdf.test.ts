@@ -2,7 +2,7 @@
 // each case builds a small stand-in zip and its own pins file, and passes it with -ZipPath and -PinsPath.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -12,6 +12,13 @@ const folders: string[] = [];
 afterEach(() => { for (const folder of folders.splice(0)) rmSync(folder, { recursive: true, force: true }); });
 const scratch = () => { const folder = mkdtempSync(join(tmpdir(), 'sm3-setup-qpdf-')); folders.push(folder); return folder; };
 const sha256 = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex');
+// The hosted runner's TEMP is an 8.3 short path (C:\Users\RUNNER~1\...), and the script's GetFullPath expands it
+// to the long form, so paths are compared by their real long form, case-insensitively, as Windows does.
+const inside = (path: string, folder: string) => {
+  const child = realpathSync.native(path).toLowerCase();
+  const parent = realpathSync.native(folder).toLowerCase().replace(/\\+$/, '');
+  return child.startsWith(`${parent}\\`);
+};
 
 /** Builds a zip whose entries are the given names, each holding its own name as text. */
 function zip(folder: string, entries: string[]): string {
@@ -48,7 +55,7 @@ describe('setup-qpdf.ps1', { timeout: 240_000 }, () => {
     const line = result.out.split(/\r?\n/).find(text => text.startsWith('QPDF_EXE='));
     expect(line).toBeDefined();
     const exe = line!.slice('QPDF_EXE='.length);
-    expect(exe.startsWith(work)).toBe(true);
+    expect(inside(exe, work), `${exe} is not under ${work}`).toBe(true);
     expect(readFileSync(exe, 'utf8')).toBe('qpdf-test/bin/qpdf.exe');
     const again = run(['-PinsPath', pins(folder, archive, binHashes(folder, names.slice(0, 2))), '-ZipPath', archive, '-WorkRoot', work]);
     expect(again.status, again.err).toBe(0);
@@ -75,6 +82,8 @@ describe('setup-qpdf.ps1', { timeout: 240_000 }, () => {
     const sized = run(['-PinsPath', pins(folder, archive, {}, { size: 1 }), '-ZipPath', archive, '-WorkRoot', work]);
     expect(sized.status).not.toBe(0);
     expect(sized.err).toContain('size');
+    expect(readdirSync(work), 'no run or extract folder is left behind').toEqual([]);
+    expect(hashed.err + sized.err).not.toMatch(/zip entry|extracted item/);
   });
 
   it('refuses an unpinned or altered binary', () => {
@@ -104,13 +113,23 @@ describe('setup-qpdf.ps1', { timeout: 240_000 }, () => {
     expect(run(['-PinsPath', pinsPath, '-ZipPath', archive]).err).toContain('pass -WorkRoot');
     expect(run(['-PinsPath', pinsPath, '-ZipPath', archive, '-WorkRoot', 'C:\\sm3-qpdf-never-created'], { CI: undefined }).err).toContain('is on C:');
     expect(existsSync('C:\\sm3-qpdf-never-created')).toBe(false);
+    expect(run(['-PinsPath', pinsPath, '-WorkRoot', join(folder, 'work'), '-ZipCache', 'C:\\sm3-qpdf-cache-never-created'], { CI: undefined }).err).toContain('zip cache');
+    expect(existsSync('C:\\sm3-qpdf-cache-never-created')).toBe(false);
   });
 
-  it('the committed pins name the reviewed release and leave the unverified facts empty', () => {
+  it('the committed pins name the reviewed release, its signature facts and every binary in it', () => {
     const committed = JSON.parse(readFileSync(join(import.meta.dirname, 'qpdf', 'pins.json'), 'utf8'));
     expect(committed.version).toBe('12.4.2');
     expect(committed.zip).toEqual({ url: 'https://github.com/qpdf/qpdf/releases/download/v12.4.2/qpdf-12.4.2-msvc64.zip', size: 28183147, sha256: 'db87077e683630c1217e0e8f9a20a9749d952ab676e881c3689187763a5de25d' });
-    expect(committed.files).toBeNull();
-    expect(committed.releaseChecksumFile.pgpClearSigned).toBeNull();
+    expect(committed.releaseChecksumFile.pgpClearSigned).toBe(true);
+    expect(committed.releaseChecksumFile.signingKeyFingerprint).toBe('C2C96B10011FE009E6D1DF828A75D10998012C7E');
+    expect(committed.releaseChecksumFile.fingerprintSource).toContain('qpdf/qpdf/main/README.md');
+    const files = Object.entries(committed.files as Record<string, string>);
+    expect(files).toHaveLength(12);
+    for (const [name, hash] of files) {
+      expect(name).toMatch(/^qpdf-12\.4\.2-msvc64\/bin\/[A-Za-z0-9_.-]+\.(exe|dll)$/);
+      expect(hash).toMatch(/^[0-9a-f]{64}$/);
+    }
+    expect(committed.files['qpdf-12.4.2-msvc64/bin/qpdf.exe']).toBe('1bdaf878f37eaffea1ea3c30591214c77636a0f2fc7432427516b6e22e36c0ff');
   });
 });
