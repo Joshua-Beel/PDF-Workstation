@@ -2,6 +2,23 @@
 
 The full change log, newest first, moved verbatim from the README's "Recent changes" section (only relative link paths were adjusted for this folder); the [README](../README.md#recent-changes) keeps one-line summaries of the newest entries.
 
+- Annotation interchange Phase 2, P2-7a: typed model split, ahead of Ink, with no behaviour change (SM3; branch `sm3/annot-p2-7` off master `053bee7`; `src-tauri/src/comments.rs`, new `annotation_model.rs` and `annotation_write.rs`, `main.rs` module list).
+  - **`annotation_model.rs`** (236 lines) holds:
+    - kinds, limits and `Note`;
+    - `/Subj`, PDF dates, IDs and the UUID generator;
+    - plan and text validation;
+    - QuadPoints and rectangle helpers, `media_box`, text decoding and the version check.
+  - **`annotation_write.rs`** (93 lines) holds the writer (`write`, `new_annotation`), the appearance-stream generators and text encoding.
+  - **`comments.rs`** (742 lines, down from 1,055) keeps the reader (`read_owned`, `read`, app note and popup checks, `popup_rect`) and its tests. It re-exports both new modules, so every caller still uses `comments::` and no other file changes apart from the module list in `main.rs`.
+  - **Proof that only code moved:** the sorted lines of the three files equal the old `comments.rs`, apart from:
+    - module doc comments, imports and blank lines;
+    - `pub(crate)` added to helpers that now cross a module boundary;
+    - two test-only imports.
+  - **Tests:**
+    - `--bins` 627 passed, 0 failed, 44 ignored; only the existing `K32GetProcessMemoryInfo` warning.
+    - Annotation filters (`comments`, `annotation`) 56 passed, 4 ignored.
+    - Vitest: pdf.js fixture test plus the qpdf script and CI contract tests, 20 passed.
+    - E2 run locally against the real pinned qpdf (fresh verified fetch under E: tmp, since deleted): 1 passed.
 - SM7 M-1 follow-up to `e7899bb`: qpdf's launch path must name exactly the verified file (SM3; branch `sm3/annot-p2-5`; `src-tauri/src/qpdf_check.rs`; tests only).
   - **Gap:** the pin check hashes and holds qpdf through the canonical `\\?\` path, but since `e7899bb` qpdf starts through the stripped plain path. Win32 drops a trailing dot or space from plain path components, so a verified `…\x.\qpdf.exe` could start an unverified `…\x\qpdf.exe`. CI's GUID run folder rules this out there, but it weakened C-1.
   - **Fix, both ways:**
