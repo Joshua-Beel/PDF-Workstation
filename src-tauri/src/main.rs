@@ -19,7 +19,6 @@ mod combine;
 mod annotations;
 mod annotation_model;
 mod annotation_write;
-#[allow(dead_code)]
 mod annotation_patch;
 mod comments;
 mod forms;

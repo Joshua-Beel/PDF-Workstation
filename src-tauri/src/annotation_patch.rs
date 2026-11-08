@@ -13,18 +13,36 @@
 //! For 7c (SM7 conditions 7 and 8): a style edit drops on-disk appearance bytes, so the next save of an unsigned
 //! file must be a full rewrite with prune through `removes_saved_annotation` or its successor, failing closed.
 //! The colour and width UI must say the stroke will be redrawn from its saved path data and that Undo restores it.
+//! Condition 6: these functions check only the annotation itself. 7c must apply the document-level refusals
+//! (signed, encrypted, forms, tagged, page labels, threads) on the patch path before calling them.
 use crate::annotation_model::{read_ink_list, ink_bounds, valid_pdf_date, MAX_INK_COORDINATE, MAX_INK_WIDTH};
 use crate::annotation_write::{ink_appearance, ink_list};
 use crate::editor::CropBox;
 use lopdf::{dictionary, Dictionary, Document, Object, ObjectId, Stream, StringFormat};
 
 const MOVE_KEYS: &[&[u8]] = &[b"Rect", b"InkList", b"M"];
+/// `/BS` is compared without its `/W` (`same_border_apart_from_width`), so a style edit can change only the width.
 const STYLE_KEYS: &[&[u8]] = &[b"C", b"BS", b"AP", b"AS", b"M"];
 
 /// Another app's Ink, read with the strict editable validation (SM7 condition 6): `/Subtype /Ink`, a finite
 /// `/Rect` with positive size, an `/InkList` within the limits, and in-range `/C`, `/BS /W` and `/CA`.
 #[derive(Debug)]
-pub(crate) struct ForeignInk { pub strokes: Vec<Vec<(f32, f32)>>, pub rect: CropBox, pub color: Option<Vec<f32>>, pub width: f32, pub opacity: f32 }
+#[allow(dead_code, reason = "read by the census test now; by journalled editing in P2-7c")]
+pub(crate) struct ForeignInk { pub strokes: Vec<Vec<(f32, f32)>>, pub rect: CropBox, pub color: Option<Vec<f32>>, pub width: f32, pub opacity: f32, pub dashed_border: bool }
+
+/// The legacy `/Border` array: its width, and whether it has a dash array. A malformed one is an error.
+fn legacy_border(document: &Document, annotation: &Dictionary) -> Result<(Option<f32>, bool), String> {
+    let Ok(value) = annotation.get(b"Border") else { return Ok((None, false)) };
+    let (_, value) = document.dereference(value).map_err(|_| "The drawing has an unreadable /Border.".to_owned())?;
+    let entries = value.as_array().map_err(|_| "The drawing has a malformed /Border.".to_owned())?;
+    if !(3..=4).contains(&entries.len()) { return Err("The drawing has a malformed /Border.".into()); }
+    let width = number(document, &entries[2])?;
+    let dashed = match entries.get(3) {
+        None => false,
+        Some(dash) => !document.dereference(dash).ok().and_then(|(_, dash)| dash.as_array().ok()).ok_or("The drawing has a malformed /Border dash.")?.is_empty(),
+    };
+    Ok((Some(width), dashed))
+}
 
 fn number(document: &Document, value: &Object) -> Result<f32, String> {
     document.dereference(value).ok().and_then(|(_, value)| value.as_float().ok()).filter(|value| value.is_finite()).ok_or_else(|| "The drawing has a non-number where a number belongs.".to_owned())
@@ -42,6 +60,7 @@ fn border_style(document: &Document, annotation: &Dictionary) -> Result<Option<D
     }
 }
 
+#[allow(dead_code, reason = "wired to journalled editing in P2-7c")]
 pub(crate) fn read_foreign_ink(document: &Document, annotation: &Dictionary) -> Result<ForeignInk, String> {
     if annotation.get(b"Subtype").and_then(Object::as_name).ok() != Some(b"Ink") { return Err("Only drawings (Ink annotations) can be patched here.".into()); }
     let rect = numbers(document, annotation.get(b"Rect").map_err(|_| "The drawing has no /Rect.".to_owned())?)?;
@@ -51,11 +70,14 @@ pub(crate) fn read_foreign_ink(document: &Document, annotation: &Dictionary) -> 
     let strokes = read_ink_list(document, annotation.get(b"InkList").map_err(|_| "The drawing has no /InkList.".to_owned())?)?;
     let color = match annotation.get(b"C") { Ok(value) => Some(numbers(document, value)?), Err(_) => None };
     if color.as_ref().is_some_and(|color| !matches!(color.len(), 0 | 1 | 3 | 4) || color.iter().any(|value| !(0.0..=1.0).contains(value))) { return Err("The drawing has an out-of-range /C.".into()); }
-    let width = match border_style(document, annotation)?.and_then(|style| style.get(b"W").ok().cloned()) { Some(value) => number(document, &value)?, None => 1.0 };
+    // The legacy /Border [h v w (dash)] gives the width when /BS is absent, as readers use it (SM7 M-1 on 4e51eff).
+    let (border_width, dashed_border) = legacy_border(document, annotation)?;
+    let style = border_style(document, annotation)?;
+    let width = match style.as_ref().and_then(|style| style.get(b"W").ok().cloned()) { Some(value) => number(document, &value)?, None if style.is_none() => border_width.unwrap_or(1.0), None => 1.0 };
     if !(0.0..=MAX_INK_WIDTH).contains(&width) { return Err("The drawing has an out-of-range /BS /W.".into()); }
     let opacity = match annotation.get(b"CA") { Ok(value) => number(document, value)?, Err(_) => 1.0 };
     if !(0.0..=1.0).contains(&opacity) { return Err("The drawing has an out-of-range /CA.".into()); }
-    Ok(ForeignInk { strokes, rect, color, width, opacity })
+    Ok(ForeignInk { strokes, rect, color, width, opacity, dashed_border })
 }
 
 fn date(now: &str) -> Result<Object, String> {
@@ -70,8 +92,21 @@ fn only_allowed_changed(before: &Dictionary, after: &Dictionary, allowed: &[&[u8
     Ok(())
 }
 
+/// `/BS` before and after a style edit, each without `/W`, must be the same; a missing one counts as the solid
+/// default the edit adds.
+fn same_border_apart_from_width(document: &Document, before: &Dictionary, after: &Dictionary) -> Result<(), String> {
+    let without_width = |annotation: &Dictionary| -> Result<String, String> {
+        let mut style = border_style(document, annotation)?.unwrap_or_else(|| dictionary! { "Type" => "Border", "S" => "S" });
+        style.remove(b"W");
+        Ok(format!("{:?}", style.iter().map(|(key, value)| (key.clone(), format!("{value:?}"))).collect::<std::collections::BTreeMap<_, _>>()))
+    };
+    if without_width(before)? != without_width(after)? { return Err("A drawing patch changed the border style beyond its width. Nothing was changed.".into()); }
+    Ok(())
+}
+
 fn finish(document: &mut Document, id: ObjectId, before: &Dictionary, after: Dictionary, allowed: &[&[u8]]) -> Result<(), String> {
     only_allowed_changed(before, &after, allowed)?;
+    if allowed == STYLE_KEYS { same_border_apart_from_width(document, before, &after)?; }
     document.objects.insert(id, Object::Dictionary(after));
     Ok(())
 }
@@ -82,6 +117,7 @@ fn annotation(document: &Document, id: ObjectId) -> Result<Dictionary, String> {
 
 /// Moves another app's drawing by (`dx`, `dy`) points: `/Rect` and `/InkList` shift by the same finite delta,
 /// `/AP` stays byte-identical, `/M` becomes `now`. Refused when `/Path` is present or the result leaves 1e7.
+#[allow(dead_code, reason = "wired to journalled editing in P2-7c")]
 pub(crate) fn move_foreign_ink(document: &mut Document, id: ObjectId, dx: f32, dy: f32, now: &str) -> Result<(), String> {
     let before = annotation(document, id)?;
     let ink = read_foreign_ink(document, &before)?;
@@ -104,16 +140,24 @@ pub(crate) fn move_foreign_ink(document: &mut Document, id: ObjectId, dx: f32, d
 /// width edit is refused when any is present.
 const UNDRAWN_KEYS: &[&[u8]] = &[b"BE", b"Path", b"BM", b"OC"];
 
+/// Ink intents (`/IT`) known to draw as plain strokes, so a regenerated appearance looks the same; any other
+/// intent refuses a colour or width edit (code review P2 on 4e51eff). Empty: the census saw only InkHighlight,
+/// whose appearances blend with Multiply, which the generator does not draw. A highlighter mode is later work.
+const PLAIN_INTENTS: &[&[u8]] = &[];
+
 /// Changes the colour and/or width of another app's drawing (SM7 ruling (a)). `/AP` becomes exactly
 /// `<< /N new >>`, a new stream generated from the typed `/InkList`, colour, width and `/CA`, with the drawing's
 /// `/Rect` as its BBox; the old appearance objects are left as they are. Refused when a key in `UNDRAWN_KEYS` is
 /// present, the border style is not solid, `/ca` differs from `/CA`, or the wider stroke would not fit `/Rect`.
+#[allow(dead_code, reason = "wired to journalled editing in P2-7c")]
 pub(crate) fn restyle_foreign_ink(document: &mut Document, id: ObjectId, color: Option<&[f32]>, width: Option<f32>, now: &str) -> Result<(), String> {
     let before = annotation(document, id)?;
     let ink = read_foreign_ink(document, &before)?;
     if color.is_none() && width.is_none() { return Err("Nothing to change.".into()); }
     if let Some(key) = UNDRAWN_KEYS.iter().find(|key| before.has(key)) { return Err(format!("This drawing uses /{}, which the app cannot redraw, so its colour and width stay as they are.", String::from_utf8_lossy(key))); }
     let style = border_style(document, &before)?;
+    if ink.dashed_border { return Err("This drawing has a dashed border, which the app cannot redraw.".into()); }
+    if let Ok(intent) = before.get(b"IT") { if !intent.as_name().is_ok_and(|intent| PLAIN_INTENTS.contains(&intent)) { return Err("This drawing has an intent (/IT) whose look the app cannot reproduce, so its colour and width stay as they are.".into()); } }
     if style.as_ref().and_then(|style| style.get(b"S").ok()).is_some_and(|value| value.as_name().ok() != Some(b"S")) { return Err("This drawing has a non-solid border style, which the app cannot redraw.".into()); }
     if let Ok(value) = before.get(b"ca") { if (number(document, value)? - ink.opacity).abs() > f32::EPSILON { return Err("This drawing has different stroke and fill opacity, which the app cannot redraw.".into()); } }
     let color = match color { Some(color) => color.to_vec(), None => ink.color.clone().ok_or("This drawing has no colour to redraw it with.")? };
@@ -143,6 +187,9 @@ pub(crate) mod tests {
     use super::*;
 
     const NOW: &str = "D:20261107120000Z";
+    /// Every /IT value the Ink census saw on real work PDFs (2026-11-07: InkHighlight on all 4,425, each drawn
+    /// with a Multiply blend in its appearance). None draws plainly, so all refuse a style edit.
+    const REFUSED_INTENTS_SEEN: &[&[u8]] = &[b"InkHighlight"];
 
     /// A page with one foreign Ink in Acrobat's shape, an appearance stream of its own, action and unknown keys,
     /// and appearance states. Returns the document, the annotation id and its appearance stream id.
@@ -288,6 +335,54 @@ pub(crate) mod tests {
         restyle_foreign_ink(&mut alone, alone_id, Some(&[0.5]), None, NOW).unwrap();
         alone.prune_objects();
         assert!(alone.get_object(alone_stream).is_err(), "nothing refers to it any more, so pruning drops it");
+    }
+
+    #[test]
+    fn the_legacy_border_width_is_read_and_a_dashed_border_refuses_a_style_edit() {
+        let (mut document, id, _) = foreign_ink(|ink| { ink.remove(b"BS"); ink.set("Border", vec![0.into(), 0.into(), 5.into()]); });
+        assert_eq!(read_foreign_ink(&document, &get(&document, id)).unwrap().width, 5.0, "readers take the width from /Border when /BS is absent");
+        restyle_foreign_ink(&mut document, id, Some(&[0.0]), None, NOW).unwrap();
+        let after = get(&document, id);
+        let stream = document.get_object(after.get(b"AP").unwrap().as_dict().unwrap().get(b"N").unwrap().as_reference().unwrap()).unwrap().as_stream().unwrap().content.clone();
+        assert!(String::from_utf8(stream).unwrap().contains("5.000000 w"), "the redraw keeps the legacy width");
+        assert_eq!(read_foreign_ink(&document, &after).unwrap().width, 5.0);
+        let (mut dashed, id, _) = foreign_ink(|ink| ink.set("Border", vec![0.into(), 0.into(), 2.into(), Object::Array(vec![3.into(), 2.into()])]));
+        assert!(restyle_foreign_ink(&mut dashed, id, Some(&[0.0]), None, NOW).is_err(), "a dashed /Border refuses, even beside /BS");
+        assert!(move_foreign_ink(&mut dashed, id, 1.0, 1.0, NOW).is_ok(), "a move is exempt");
+        let (empty_dash, id, _) = foreign_ink(|ink| ink.set("Border", vec![0.into(), 0.into(), 2.into(), Object::Array(vec![])]));
+        assert!(!read_foreign_ink(&empty_dash, &get(&empty_dash, id)).unwrap().dashed_border, "an empty dash array is solid");
+        for malformed in [vec![0.into(), 0.into()], vec![0.into(), 0.into(), Object::string_literal("w")], vec![0.into(), 0.into(), 1.into(), 4.into()]] {
+            let (document, id, _) = foreign_ink(move |ink| ink.set("Border", malformed.clone()));
+            assert!(read_foreign_ink(&document, &get(&document, id)).is_err());
+        }
+    }
+
+    #[test]
+    fn an_intent_outside_the_plain_list_refuses_a_style_edit_but_not_a_move() {
+        for intent in REFUSED_INTENTS_SEEN {
+            let (mut document, id, _) = foreign_ink(|ink| ink.set("IT", Object::Name(intent.to_vec())));
+            assert!(restyle_foreign_ink(&mut document, id, Some(&[0.0]), None, NOW).is_err(), "{}", String::from_utf8_lossy(intent));
+            assert!(move_foreign_ink(&mut document, id, 1.0, 1.0, NOW).is_ok());
+        }
+        let (mut odd, id, _) = foreign_ink(|ink| ink.set("IT", Object::string_literal("not a name")));
+        assert!(restyle_foreign_ink(&mut odd, id, Some(&[0.0]), None, NOW).is_err());
+        for intent in PLAIN_INTENTS {
+            let (mut document, id, _) = foreign_ink(|ink| ink.set("IT", Object::Name(intent.to_vec())));
+            assert!(restyle_foreign_ink(&mut document, id, Some(&[0.0]), None, NOW).is_ok());
+        }
+    }
+
+    #[test]
+    fn a_border_style_change_beyond_the_width_is_caught() {
+        let document = Document::with_version("1.7");
+        let before = dictionary! { "BS" => dictionary! { "W" => 3, "S" => "S" } };
+        let wider = dictionary! { "BS" => dictionary! { "W" => 2, "S" => "S" } };
+        let dashed = dictionary! { "BS" => dictionary! { "W" => 2, "S" => "D" } };
+        assert!(same_border_apart_from_width(&document, &before, &wider).is_ok());
+        assert!(same_border_apart_from_width(&document, &before, &dashed).is_err());
+        let added = dictionary! { "BS" => dictionary! { "Type" => "Border", "W" => 2, "S" => "S" } };
+        assert!(same_border_apart_from_width(&document, &dictionary! {}, &added).is_ok(), "a missing /BS is the solid default the edit adds");
+        assert!(same_border_apart_from_width(&document, &dictionary! {}, &dashed).is_err());
     }
 
     #[test]
