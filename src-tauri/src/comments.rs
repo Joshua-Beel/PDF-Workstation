@@ -1,260 +1,15 @@
-use crate::editor::{CropBox, PageSpec};
-use lopdf::{dictionary, Dictionary, Document, Object, ObjectId, Stream, StringFormat};
-use serde::Serialize;
+//! Reading the app's annotations out of a PDF: which `/Annots` entries are the app's own (editable) and which
+//! are preserved untouched. The model is in `annotation_model.rs` and the writer in `annotation_write.rs`
+//! (SM3 P2-7a); both are re-exported here, so callers keep using `comments::`.
+use crate::editor::CropBox;
+use lopdf::{Dictionary, Document, Object, ObjectId};
 use std::collections::HashSet;
-
-pub const MAX_NOTES: usize = 1_000;
-pub const MAX_TEXT_BYTES: usize = 8 * 1024;
-pub const MAX_TOTAL_BYTES: usize = 1024 * 1024;
-pub const MAX_HIGHLIGHT_QUADS: usize = 256;
-pub const MAX_GEOMETRY_SLOTS: usize = 4_096;
-const PREFIX: &str = "pdf-workstation-note-";
-const HIGHLIGHT_PREFIX: &str = "pdf-workstation-highlight-";
-
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AnnotationKind { Note, Highlight }
-
-/// One of the app's own annotations. `created` and `modified` are PDF dates in the app's one form,
-/// `D:YYYYMMDDHHmmSSZ` (UTC, so no time-zone offset is recorded). They are written as `/CreationDate` and
-/// `/M`, as Acrobat does. Notes from 0.3.x and slice 1c have none: an edit sets `modified` and leaves
-/// `created` unknown.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Note { pub id: String, pub rect: CropBox, pub contents: String, pub kind: AnnotationKind, pub quads: Option<Vec<CropBox>>, pub created: Option<String>, pub modified: Option<String> }
-
-/// Acrobat's subject for each kind, written as `/Subj` (Acrobat shows it as the comment type).
-pub fn subject(kind: AnnotationKind) -> &'static str { match kind { AnnotationKind::Note => "Sticky Note", AnnotationKind::Highlight => "Highlight" } }
-
-/// Whether `value` is a PDF date in the app's form `D:YYYYMMDDHHmmSSZ`, a real calendar date and time. The one
-/// implementation lives in the recovery journal, which the standalone journal test also compiles.
-pub fn valid_pdf_date(value: &str) -> bool { crate::recovery_journal::valid_annotation_date(value) }
-
-/// Seconds since the Unix epoch as a PDF date in UTC (`D:YYYYMMDDHHmmSSZ`).
-pub fn pdf_date(epoch_seconds: u64) -> String {
-    let (days, seconds) = (epoch_seconds / 86_400, epoch_seconds % 86_400);
-    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm, proleptic Gregorian).
-    let z = days as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let day_of_era = z.rem_euclid(146_097);
-    let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_index = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 };
-    let year = year_of_era + era * 400 + i64::from(month <= 2);
-    format!("D:{year:04}{month:02}{day:02}{:02}{:02}{:02}Z", seconds / 3_600, seconds % 3_600 / 60, seconds % 60)
-}
-
-/// Now, as a PDF date in UTC.
-pub fn pdf_date_now() -> String { pdf_date(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs())) }
-#[derive(Clone, Debug, Serialize)]
-pub struct DisplayRect { pub x: f64, pub y: f64, pub width: f64, pub height: f64 }
-#[derive(Serialize)]
-pub struct CommentInfo { pub id: String, pub page: usize, pub rect: Option<DisplayRect>, pub contents: String }
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CommentList { pub document_id: u64, pub revision: u64, pub status: &'static str, pub reason: Option<String>, pub notes: Vec<CommentInfo> }
-#[derive(Serialize)]
-pub struct AnnotationInfo { pub id: String, pub kind: AnnotationKind, pub page: usize, pub rect: Option<DisplayRect>, pub contents: Option<String>, pub quads: Option<Vec<DisplayRect>> }
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AnnotationList { pub document_id: u64, pub revision: u64, pub status: &'static str, pub reason: Option<String>, pub annotations: Vec<AnnotationInfo>, pub view_only: Vec<ViewOnlyInfo>, pub view_only_truncated: usize }
-/// An annotation the app shows and preserves but does not edit (another app's, or a link-free
-/// annotation the strict format does not cover).
-#[derive(Serialize)]
-pub struct ViewOnlyInfo { pub page: usize, #[serde(flatten)] pub annotation: crate::annotations::Surveyed }
-
-pub fn highlight_contents(contents: Option<&str>) -> Result<String, String> {
-    let contents = contents.unwrap_or("");
-    if contents.contains('\0') || contents.len() > MAX_TEXT_BYTES { return Err("Highlight text must be NUL-free and limited to 8 KiB of UTF-8.".into()); }
-    Ok(if contents.trim().is_empty() { String::new() } else { contents.to_owned() })
-}
-
-pub fn validate_text(contents: &str) -> Result<(), String> {
-    if contents.trim().is_empty() { return Err("Enter some text for the note.".into()); }
-    if contents.contains('\0') { return Err("Notes cannot contain a null character.".into()); }
-    if contents.len() > MAX_TEXT_BYTES { return Err("Each note is limited to 8 KiB of UTF-8 text.".into()); }
-    Ok(())
-}
-pub fn validate_plan(plan: &[PageSpec]) -> Result<(), String> {
-    let mut count = 0usize; let mut total = 0usize; let mut slots = 0usize; let mut ids = HashSet::new();
-    for note in plan.iter().flat_map(|page| &page.notes) {
-        if [&note.created, &note.modified].into_iter().flatten().any(|date| !valid_pdf_date(date)) { return Err("The annotation has an invalid date.".into()); }
-        if let Some(quads) = &note.quads {
-            if note.kind != AnnotationKind::Highlight || highlight_union(quads)? != note.rect { return Err("The annotation has invalid text-highlight quadrilaterals.".into()); }
-        }
-        match note.kind { AnnotationKind::Note => validate_text(&note.contents)?, AnnotationKind::Highlight => { if highlight_contents(Some(&note.contents))? != note.contents { return Err("The highlight has a noncanonical empty body.".into()); } } }
-        id_matches_kind(&note.id, note.kind)?;
-        if !ids.insert(&note.id) { return Err("The PDF contains duplicate note IDs. Commenting is unavailable.".into()); }
-        count += 1; total += note.contents.len();
-        slots += note.quads.as_ref().map_or(1, Vec::len);
-    }
-    if count > MAX_NOTES { return Err("This document is limited to 1,000 notes and highlights in total.".into()); }
-    if total > MAX_TOTAL_BYTES { return Err("This document is limited to 1 MiB of total annotation text.".into()); }
-    if slots > MAX_GEOMETRY_SLOTS { return Err("This document is limited to 4,096 annotation geometry slots; each text-highlight character uses one slot and each note or area highlight uses one.".into()); }
-    Ok(())
-}
-pub fn number(id: &str) -> Result<u64, String> {
-    let suffix = id.strip_prefix(PREFIX).or_else(|| id.strip_prefix(HIGHLIGHT_PREFIX)).ok_or("The PDF has a foreign annotation. Commenting is unavailable.")?;
-    let value = suffix.parse::<u64>().map_err(|_| "The PDF has an invalid note ID.")?;
-    if value == 0 || suffix != value.to_string() { return Err("The PDF has an invalid note ID.".into()); }
-    Ok(value)
-}
-/// The numbered IDs of 0.3.x and slice 1c; the app no longer creates them, but tests build legacy files with them.
-#[cfg(test)]
-pub fn id(value: u64) -> String { format!("{PREFIX}{value}") }
-#[cfg(test)]
-pub fn highlight_id(value: u64) -> String { format!("{HIGHLIGHT_PREFIX}{value}") }
-
-/// Whether `id` is a random UUID (version 4, lowercase, dashed), the `/NM` form the app writes since P2-4
-/// part two, as Acrobat does.
-/// The one implementation lives in the recovery journal, which the standalone journal test also compiles.
-pub fn is_uuid(id: &str) -> bool { crate::recovery_journal::annotation_uuid(id) }
-
-/// An app annotation ID: a random UUID (new) or the numbered `pdf-workstation-note-N` /
-/// `pdf-workstation-highlight-N` form of 0.3.x and slice 1c, whose prefix must match the kind.
-pub fn id_matches_kind(id: &str, kind: AnnotationKind) -> Result<(), String> {
-    if is_uuid(id) { return Ok(()); }
-    number(id)?;
-    if id.starts_with(PREFIX) != (kind == AnnotationKind::Note) { return Err("The annotation ID does not match its kind.".into()); }
-    Ok(())
-}
-
-/// A new random UUID (version 4) for a new annotation's `/NM`, from the operating system's CSPRNG. Never
-/// derived from the machine, the user or the time (SM7 E3). A generator failure is an error, never a panic:
-/// the PDF worker serves every open document and has no unwind guard (SM7 L-1 on 684b33e).
-pub fn new_id() -> Result<String, String> {
-    let mut random = [0u8; 16];
-    #[cfg(test)]
-    if FAIL_RANDOM.with(std::cell::Cell::get) { return Err(RANDOM_FAILED.into()); }
-    fill_random(&mut random)?;
-    random[6] = (random[6] & 0x0f) | 0x40; random[8] = (random[8] & 0x3f) | 0x80;
-    let hex = random.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
-    Ok(format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32]))
-}
-#[cfg(test)]
-thread_local! { pub(crate) static FAIL_RANDOM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
-const RANDOM_FAILED: &str = "The system random number generator failed, so no annotation ID could be made. Nothing was changed.";
-#[cfg(windows)]
-fn fill_random(buffer: &mut [u8]) -> Result<(), String> {
-    use windows::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
-    let status = unsafe { BCryptGenRandom(None, buffer, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
-    if status.is_ok() { Ok(()) } else { Err(RANDOM_FAILED.into()) }
-}
-#[cfg(not(windows))]
-fn fill_random(buffer: &mut [u8]) -> Result<(), String> {
-    use std::io::Read;
-    std::fs::File::open("/dev/urandom").and_then(|mut file| file.read_exact(buffer)).map_err(|_| RANDOM_FAILED.to_owned())
-}
-/// QuadPoints in the order Acrobat writes and PDFium's appearance generator reads: top-left, top-right,
-/// bottom-left, bottom-right (measured on 204 real markup quads, 0 in any other order).
-fn quad(bounds: CropBox) -> Vec<f32> { vec![bounds.left, bounds.top, bounds.right, bounds.top, bounds.left, bounds.bottom, bounds.right, bounds.bottom] }
-/// The counter-clockwise order (bottom-left, bottom-right, top-right, top-left) this app wrote through 0.3.x.
-/// PDFium draws nothing for it once `/AP` is gone, so it is read but never written.
-fn legacy_quad(bounds: CropBox) -> Vec<f32> { vec![bounds.left, bounds.bottom, bounds.right, bounds.bottom, bounds.right, bounds.top, bounds.left, bounds.top] }
-/// The axis-aligned box of one quad, if its 8 numbers are that box in either order the app accepts.
-fn quad_box(points: &[f32]) -> Option<CropBox> {
-    let xs = [points[0], points[2], points[4], points[6]]; let ys = [points[1], points[3], points[5], points[7]];
-    let rect = CropBox { left: xs.iter().copied().fold(f32::INFINITY, f32::min), bottom: ys.iter().copied().fold(f32::INFINITY, f32::min), right: xs.iter().copied().fold(f32::NEG_INFINITY, f32::max), top: ys.iter().copied().fold(f32::NEG_INFINITY, f32::max) };
-    (points == quad(rect).as_slice() || points == legacy_quad(rect).as_slice()).then_some(rect)
-}
-pub fn highlight_union(quads: &[CropBox]) -> Result<CropBox, String> {
-    if quads.is_empty() || quads.len() > MAX_HIGHLIGHT_QUADS { return Err("A text highlight needs 1 through 256 positioned characters.".into()); }
-    let mut bounds = quads[0];
-    for rect in quads {
-        if ![rect.left, rect.bottom, rect.right, rect.top].iter().all(|value| value.is_finite()) || !((rect.right - rect.left).is_finite() && (rect.top - rect.bottom).is_finite()) || rect.right <= rect.left || rect.top <= rect.bottom { return Err("The text highlight has invalid bounds.".into()); }
-        bounds.left = bounds.left.min(rect.left); bounds.bottom = bounds.bottom.min(rect.bottom); bounds.right = bounds.right.max(rect.right); bounds.top = bounds.top.max(rect.top);
-    }
-    if !(bounds.right - bounds.left).is_finite() || !(bounds.top - bounds.bottom).is_finite() { return Err("The text highlight has invalid total bounds.".into()); }
-    Ok(bounds)
-}
-fn read_quads(value: &Object, bounds: CropBox) -> Result<Vec<CropBox>, String> {
-    let count = value.as_array().map_err(|error| error.to_string())?.len();
-    if count == 0 || count % 8 != 0 || count > MAX_HIGHLIGHT_QUADS * 8 { return Err("The PDF has invalid highlight quadrilaterals.".into()); }
-    let values = values(value)?;
-    if values.is_empty() || values.len() % 8 != 0 || values.len() > MAX_HIGHLIGHT_QUADS * 8 { return Err("The PDF has invalid highlight quadrilaterals.".into()); }
-    let quads = values.chunks_exact(8).map(|points| quad_box(points).ok_or_else(|| "The PDF has altered highlight quadrilaterals.".to_owned())).collect::<Result<Vec<_>, String>>()?;
-    if highlight_union(&quads)? != bounds { return Err("The highlight bounds do not match its quadrilaterals.".into()); }
-    Ok(quads)
-}
-fn keys(value: &Dictionary, allowed: &[&[u8]]) -> Result<(), String> {
-    if value.iter().any(|(key, _)| !allowed.contains(&key.as_slice())) { return Err("The PDF has an unknown annotation or appearance feature. Commenting is unavailable.".into()); }
-    Ok(())
-}
-fn name(value: &Dictionary, key: &[u8], expected: &[u8]) -> Result<(), String> {
-    if value.get(key).and_then(Object::as_name).ok() != Some(expected) { return Err("The PDF has an unsupported annotation schema. Commenting is unavailable.".into()); }
-    Ok(())
-}
-fn values(value: &Object) -> Result<Vec<f32>, String> {
-    value.as_array().map_err(|error| error.to_string())?.iter().map(|value| value.as_float().map_err(|error| error.to_string())).collect()
-}
-fn rect(value: &Object) -> Result<CropBox, String> {
-    let value = values(value)?;
-    if value.len() != 4 || !value.iter().all(|value| value.is_finite()) || !(value[2] - value[0]).is_finite() || !(value[3] - value[1]).is_finite() || value[2] - value[0] < 1.0 || value[3] - value[1] < 1.0 { return Err("The PDF has invalid note bounds. Commenting is unavailable.".into()); }
-    Ok(CropBox { left: value[0], bottom: value[1], right: value[2], top: value[3] })
-}
-fn highlight_rect(value: &Object) -> Result<CropBox, String> {
-    let value = values(value)?;
-    if value.len() != 4 { return Err("The PDF has invalid highlight bounds.".into()); }
-    let bounds = CropBox { left: value[0], bottom: value[1], right: value[2], top: value[3] }; highlight_union(&[bounds])?; Ok(bounds)
-}
-fn media_box(document: &Document, mut page: ObjectId) -> Result<CropBox, String> {
-    let mut visited = HashSet::new();
-    loop {
-        if !visited.insert(page) { return Err("The PDF has a cyclic page boundary inheritance.".into()); }
-        let dictionary = document.get_dictionary(page).map_err(|error| error.to_string())?;
-        if let Ok(value) = dictionary.get(b"MediaBox") {
-            let value = document.dereference(value).map_err(|error| error.to_string())?.1.as_array().map_err(|error| error.to_string())?;
-            let values = value.iter().map(|value| document.dereference(value).map(|(_, value)| value.clone()).map_err(|error| error.to_string())).collect::<Result<Vec<_>, _>>()?;
-            return rect(&Object::Array(values));
-        }
-        page = dictionary.get(b"Parent").and_then(Object::as_reference).map_err(|_| "The note page has no supported MediaBox.")?;
-    }
-}
-fn appearance(bounds: CropBox, kind: AnnotationKind) -> Vec<u8> {
-    let (w, h) = (bounds.right - bounds.left, bounds.top - bounds.bottom);
-    if kind == AnnotationKind::Highlight { return format!("q /GS0 gs 1 1 0 rg 0 0 {w:.6} {h:.6} re f Q\n").into_bytes(); }
-    format!("q 1 0.85 0 rg 0 0 {w:.6} {h:.6} re f 0.25 0.2 0 RG 0.25 w {x:.6} {a:.6} m {r:.6} {a:.6} l {x:.6} {b:.6} m {r:.6} {b:.6} l S Q\n", x=w*0.2, r=w*0.8, a=h*0.65, b=h*0.4).into_bytes()
-}
-fn text_appearance(bounds: CropBox, quads: &[CropBox]) -> Vec<u8> {
-    let mut content = String::from("q /GS0 gs 1 1 0 rg ");
-    for rect in quads { content.push_str(&format!("{x:.6} {y:.6} {w:.6} {h:.6} re ", x=rect.left-bounds.left, y=rect.bottom-bounds.bottom, w=rect.right-rect.left, h=rect.top-rect.bottom)); }
-    content.push_str("f Q\n"); content.into_bytes()
-}
-fn appearance_dict(bounds: CropBox, kind: AnnotationKind) -> Dictionary {
-    let resources = if kind == AnnotationKind::Highlight { dictionary! { "ExtGState" => dictionary! { "GS0" => dictionary! { "Type" => "ExtGState", "BM" => "Multiply", "ca" => Object::Real(0.25), "CA" => Object::Real(0.25) } } } } else { dictionary! {} };
-    dictionary! { "Type" => "XObject", "Subtype" => "Form", "FormType" => 1,
-        "BBox" => vec![0.into(), 0.into(), Object::Real(bounds.right - bounds.left), Object::Real(bounds.top - bounds.bottom)], "Resources" => resources }
-}
-fn decode_text(value: &Object) -> Result<String, String> {
-    let bytes = value.as_str().map_err(|error| error.to_string())?;
-    if bytes.len() > MAX_TEXT_BYTES * 2 + 2 { return Err("Each note is limited to 8 KiB of UTF-8 text.".into()); }
-    if bytes.len() < 2 || bytes[..2] != [0xfe, 0xff] || bytes.len() % 2 != 0 { return Err("The PDF has unsupported note text encoding.".into()); }
-    let units = bytes[2..].chunks_exact(2).map(|pair| u16::from_be_bytes([pair[0], pair[1]])).collect::<Vec<_>>();
-    String::from_utf16(&units).map_err(|_| "The PDF has invalid Unicode note text.".into())
-}
-fn encode_text(value: &str) -> Object {
-    let mut bytes = vec![0xfe, 0xff]; for unit in value.encode_utf16() { bytes.extend(unit.to_be_bytes()); }
-    Object::String(bytes, StringFormat::Hexadecimal)
-}
-fn effective_version(document: &Document) -> Result<(u8, u8), String> {
-    let parse = |value: &str| match value {
-        "1.0" => Ok((1, 0)), "1.1" => Ok((1, 1)), "1.2" => Ok((1, 2)), "1.3" => Ok((1, 3)),
-        "1.4" => Ok((1, 4)), "1.5" => Ok((1, 5)), "1.6" => Ok((1, 6)), "1.7" => Ok((1, 7)), "2.0" => Ok((2, 0)),
-        _ => Err("Commenting on this PDF version is not supported in this build.".to_owned()),
-    };
-    let header = parse(&document.version)?;
-    let catalog = document.catalog().map_err(|error| error.to_string())?;
-    let declared = catalog.get(b"Version").ok().map(|value| {
-        let value = document.dereference(value).map_err(|error| error.to_string())?.1.as_name().map_err(|error| error.to_string())?;
-        parse(std::str::from_utf8(value).map_err(|error| error.to_string())?)
-    }).transpose()?;
-    Ok(declared.map_or(header, |declared| declared.max(header)))
-}
+pub use crate::annotation_model::*;
+pub use crate::annotation_write::*;
 
 /// The page's `/Annots` array, direct or one reference deep, with the id of the array object when indirect.
 /// `None` when the page has no `/Annots`; an error when it is something other than an array.
-fn page_annots(document: &Document, page_id: ObjectId) -> Result<Option<(Option<ObjectId>, &[Object])>, String> {
+pub(crate) fn page_annots(document: &Document, page_id: ObjectId) -> Result<Option<(Option<ObjectId>, &[Object])>, String> {
     let page = document.get_dictionary(page_id).map_err(|error| error.to_string())?;
     match page.get(b"Annots") {
         Err(_) => Ok(None),
@@ -290,7 +45,7 @@ pub fn popup_rect(note: CropBox, media: CropBox) -> CropBox {
 
 /// The app's popup for the sticky note `parent`: exactly `/Type /Annot /Subtype /Popup /Parent /Rect /Open
 /// false /F 28`, with the rectangle `popup_rect` gives. Anything else makes the note foreign.
-fn app_popup(document: &Document, popup: ObjectId, parent: ObjectId, note: CropBox, media: CropBox) -> Result<(), String> {
+pub(crate) fn app_popup(document: &Document, popup: ObjectId, parent: ObjectId, note: CropBox, media: CropBox) -> Result<(), String> {
     let dict = document.get_dictionary(popup).map_err(|error| error.to_string())?;
     keys(dict, &[b"Type", b"Subtype", b"Parent", b"Rect", b"Open", b"F"])?;
     name(dict, b"Type", b"Annot")?; name(dict, b"Subtype", b"Popup")?;
@@ -302,7 +57,7 @@ fn app_popup(document: &Document, popup: ObjectId, parent: ObjectId, note: CropB
 
 /// One annotation checked against the app's strict format. Any failure makes it foreign, not the file.
 /// Returns the note, its appearance stream and, for a sticky note written since the popups slice, its popup.
-fn app_note(document: &Document, page_id: ObjectId, id: ObjectId, annotation: &Dictionary) -> Result<(Note, ObjectId, Option<ObjectId>), String> {
+pub(crate) fn app_note(document: &Document, page_id: ObjectId, id: ObjectId, annotation: &Dictionary) -> Result<(Note, ObjectId, Option<ObjectId>), String> {
                 let kind = match annotation.get(b"Subtype").and_then(Object::as_name).ok() { Some(b"Text") => AnnotationKind::Note, Some(b"Highlight") => AnnotationKind::Highlight, _ => return Err("The PDF has a foreign annotation subtype.".into()) };
                 match kind {
                     AnnotationKind::Note => { keys(annotation, &[b"Type", b"Subtype", b"Rect", b"NM", b"Contents", b"Name", b"C", b"Open", b"F", b"P", b"AP", b"Subj", b"M", b"CreationDate", b"Popup"])?; name(annotation, b"Name", b"Note")?; if annotation.get(b"Open").and_then(Object::as_bool).ok() != Some(false) { return Err("The PDF has unsupported popup state.".into()); } },
@@ -353,7 +108,7 @@ fn app_note(document: &Document, page_id: ObjectId, id: ObjectId, annotation: &D
 }
 
 /// The app number in an annotation's `/NM`, when it carries the app's prefix (valid or not otherwise).
-fn app_number(document: &Document, entry: &Object) -> Option<u64> {
+pub(crate) fn app_number(document: &Document, entry: &Object) -> Option<u64> {
     let dict = match entry { Object::Reference(id) => document.get_dictionary(*id).ok()?, Object::Dictionary(dict) => dict, _ => return None };
     let bytes = match dict.get(b"NM").ok()? { Object::Reference(id) => document.get_object(*id).ok()?, value => value }.as_str().ok()?;
     if bytes.len() > HIGHLIGHT_PREFIX.len() + 20 { return None; }
@@ -450,7 +205,7 @@ pub fn read_owned(document: &Document) -> Result<Owned, String> {
 /// The app's editable notes and highlights per page (see `read_owned`).
 pub fn read(document: &Document) -> Result<Vec<Vec<Note>>, String> { read_owned(document).map(|owned| owned.notes) }
 
-fn collect_references(value: &Object, owned: &HashSet<ObjectId>, found: &mut HashSet<ObjectId>) {
+pub(crate) fn collect_references(value: &Object, owned: &HashSet<ObjectId>, found: &mut HashSet<ObjectId>) {
     let mut remaining = vec![value];
     while let Some(value) = remaining.pop() {
         match value {
@@ -463,77 +218,12 @@ fn collect_references(value: &Object, owned: &HashSet<ObjectId>, found: &mut Has
     }
 }
 
-/// The `/Annots` entries for one app annotation: the annotation, then, for a sticky note, its popup (Acrobat
-/// lists a popup right after its parent).
-fn new_annotation(document: &mut Document, page_id: ObjectId, note: &Note) -> Result<Vec<Object>, String> {
-    let id = document.new_object_id();
-    let popup = if note.kind == AnnotationKind::Note {
-        // Fails closed (SM7 L-1 on 8bb61c3): without a valid MediaBox the reader would not accept the note as
-        // the app's own either, so writing it without a popup would gain nothing.
-        let media = media_box(document, page_id).map_err(|_| "This page has no valid MediaBox, so the sticky note's popup cannot be placed. Nothing was saved.".to_owned())?;
-        let area = popup_rect(note.rect, media);
-        Some(document.add_object(dictionary! { "Type" => "Annot", "Subtype" => "Popup", "Parent" => id, "Rect" => vec![Object::Real(area.left), Object::Real(area.bottom), Object::Real(area.right), Object::Real(area.top)], "Open" => false, "F" => 28 }))
-    } else { None };
-    let content = match &note.quads { Some(quads) => text_appearance(note.rect, quads), None => appearance(note.rect, note.kind) };
-    let appearance = document.add_object(Stream::new(appearance_dict(note.rect, note.kind), content));
-    let mut annotation = dictionary! { "Type" => "Annot", "Subtype" => if note.kind == AnnotationKind::Note { "Text" } else { "Highlight" }, "Rect" => vec![Object::Real(note.rect.left), Object::Real(note.rect.bottom), Object::Real(note.rect.right), Object::Real(note.rect.top)],
-        "NM" => Object::String(note.id.as_bytes().to_vec(), StringFormat::Literal), "F" => 4, "P" => page_id, "AP" => dictionary! { "N" => appearance },
-        "Subj" => Object::String(subject(note.kind).as_bytes().to_vec(), StringFormat::Literal) };
-    // No /T: the author name stays blank until Joshua rules on Q1 (design 6.4); the Windows user name is never read.
-    if let Some(created) = &note.created { annotation.set("CreationDate", Object::String(created.as_bytes().to_vec(), StringFormat::Literal)); }
-    if let Some(modified) = &note.modified { annotation.set("M", Object::String(modified.as_bytes().to_vec(), StringFormat::Literal)); }
-    if note.kind == AnnotationKind::Note { annotation.set("Contents", encode_text(&note.contents)); annotation.set("Name", "Note"); annotation.set("C", vec![Object::Real(1.0), Object::Real(0.85), Object::Real(0.0)]); annotation.set("Open", false); }
-    else { let points = note.quads.as_deref().map_or_else(|| quad(note.rect), |quads| quads.iter().flat_map(|bounds| quad(*bounds)).collect()); annotation.set("QuadPoints", points.into_iter().map(Object::Real).collect::<Vec<_>>()); annotation.set("C", vec![1.into(), 1.into(), 0.into()]); if !note.contents.is_empty() { annotation.set("Contents", encode_text(&note.contents)); } }
-    if let Some(popup) = popup { annotation.set("Popup", popup); }
-    document.objects.insert(id, Object::Dictionary(annotation));
-    Ok([Some(id), popup].into_iter().flatten().map(Object::Reference).collect())
-}
-
-/// Writes the planned app annotations. Only pages whose app annotations changed are touched. On such a
-/// page every other `/Annots` entry (other apps' annotations, links, widgets, inline or malformed entries)
-/// is kept, in order; each kept app annotation is regenerated in its place, deleted ones are dropped with
-/// their appearance, and new ones are appended. A page left with no entries loses its `/Annots`. An
-/// indirect `/Annots` array is replaced by a direct one on a touched page; the old array object is left for
-/// `prune_unreachable`. Foreign objects are never modified.
-pub fn write(document: &mut Document, plan: &[PageSpec]) -> Result<(), String> {
-    let owned = read_owned(document)?; validate_plan(plan)?;
-    let version = effective_version(document)?.max((1, 4)); document.version = format!("{}.{}", version.0, version.1);
-    let page_ids = document.get_pages().into_values().collect::<Vec<ObjectId>>();
-    let mut planned: std::collections::HashMap<usize, &[Note]> = std::collections::HashMap::new();
-    for spec in plan {
-        if spec.source >= page_ids.len() { return Err("Source page mapping is invalid.".into()); }
-        if planned.insert(spec.source, &spec.notes).is_some() { return Err("Source page mapping is invalid.".into()); }
-    }
-    for (index, page_id) in page_ids.iter().copied().enumerate() {
-        let Some(notes) = planned.get(&index).copied() else { continue };
-        if notes == owned.notes[index].as_slice() { continue; }
-        let entries = page_annots(document, page_id)?.map(|(_, entries)| entries.to_vec()).unwrap_or_default();
-        let mut emitted = HashSet::new();
-        let mut output = Vec::with_capacity(entries.len() + 2 * notes.len());
-        let app_popups: HashSet<ObjectId> = owned.popups.values().copied().collect();
-        for entry in entries {
-            // An app note's popup is regenerated with its note, so its old entry is dropped here.
-            if let Object::Reference(id) = &entry { if app_popups.contains(id) { document.objects.remove(id); continue; } }
-            let app = match &entry { Object::Reference(id) => owned.app.get(id).cloned().map(|app| (*id, app)), _ => None };
-            let Some((id, (note_id, appearance))) = app else { output.push(entry); continue };
-            document.objects.remove(&id); document.objects.remove(&appearance);
-            if let Some(popup) = owned.popups.get(&id) { document.objects.remove(popup); }
-            if let Some(note) = notes.iter().find(|note| note.id == note_id) {
-                output.extend(new_annotation(document, page_id, note)?);
-                emitted.insert(note_id);
-            }
-        }
-        for note in notes.iter().filter(|note| !emitted.contains(&note.id)) { output.extend(new_annotation(document, page_id, note)?); }
-        let page = document.get_dictionary_mut(page_id).map_err(|error| error.to_string())?;
-        if output.is_empty() { page.remove(b"Annots"); } else { page.set("Annots", output); }
-    }
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::editor::{EditSession, PageEdit};
+    use crate::editor::{EditSession, PageEdit, PageSpec};
+    use lopdf::{dictionary, Stream};
     fn sample() -> Vec<u8> { std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/welcome.pdf")).unwrap() }
     /// A one-page PDF with the given MediaBox.
     fn page_with_media_box(media: [f32; 4]) -> Vec<u8> {

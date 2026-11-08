@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Code structure: the annotation code is split into a model (`annotation_model.rs`), a writer (`annotation_write.rs`) and the reader (`comments.rs`), ahead of Ink. No behaviour change (SM3, P2-7a; source build).
 - CI: the qpdf check (E2) now runs after the master-only Cargo cache save, and the 8.3 path test finds its folders whatever the case of the variable names (SM3; `ci.yml`, `setup-qpdf.test.ts`; CI and tests only).
 - Test hardening (SM7 M-1): the plain path qpdf is launched with must resolve to exactly the file whose hash was checked. Folders ending in a dot or space are refused (SM3; `qpdf_check.rs`; tests only).
 - CI fix: the qpdf check (E2) now gives qpdf plain drive paths, because qpdf cannot open the `\\?\` form. E2 passes against the real pinned qpdf in a local source run (SM3; `qpdf_check.rs`; tests only).
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - Tests: the annotation census now splits structure refusals by type, and the shared-annotation and forms-hardening timing tests compare against a baseline measured in the same run instead of fixed budgets, with absolute ceilings and per-test totals (SM3; tests only).
 - PDFs with other apps' annotations or links can now take your comments: their annotations are kept in place and order on save and listed view only; page delete and extract on such files stay refused (SM3, source build).
 - Highlights are saved with their corners in the order Acrobat and PDFium use, so readers that rebuild a highlight's appearance no longer draw it blank; older files still open. Comments lists other apps' annotations as view only, bounded against huge or shared strings and arrays (SM3, source build).
-- Tests: the bundled PDFium is checked as the non-V8, non-XFA build, and a file full of Launch, URI and JavaScript actions starts no process when loaded, rendered or printed with a form handle; a highlight probe and a read-only annotation census (SM3; tests only).

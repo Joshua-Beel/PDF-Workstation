@@ -2,6 +2,23 @@
 
 The full change log, newest first, moved verbatim from the README's "Recent changes" section (only relative link paths were adjusted for this folder); the [README](../README.md#recent-changes) keeps one-line summaries of the newest entries.
 
+- Annotation interchange Phase 2, P2-7a: typed model split, ahead of Ink, with no behaviour change (SM3; branch `sm3/annot-p2-7` off master `053bee7`; `src-tauri/src/comments.rs`, new `annotation_model.rs` and `annotation_write.rs`, `main.rs` module list).
+  - **`annotation_model.rs`** (236 lines) holds:
+    - kinds, limits and `Note`;
+    - `/Subj`, PDF dates, IDs and the UUID generator;
+    - plan and text validation;
+    - QuadPoints and rectangle helpers, `media_box`, text decoding and the version check.
+  - **`annotation_write.rs`** (93 lines) holds the writer (`write`, `new_annotation`), the appearance-stream generators and text encoding.
+  - **`comments.rs`** (742 lines, down from 1,055) keeps the reader (`read_owned`, `read`, app note and popup checks, `popup_rect`) and its tests. It re-exports both new modules, so every caller still uses `comments::` and no other file changes apart from the module list in `main.rs`.
+  - **Proof that only code moved:** the sorted lines of the three files equal the old `comments.rs`, apart from:
+    - module doc comments, imports and blank lines;
+    - `pub(crate)` added to helpers that now cross a module boundary;
+    - two test-only imports.
+  - **Tests:**
+    - `--bins` 627 passed, 0 failed, 44 ignored; only the existing `K32GetProcessMemoryInfo` warning.
+    - Annotation filters (`comments`, `annotation`) 56 passed, 4 ignored.
+    - Vitest: pdf.js fixture test plus the qpdf script and CI contract tests, 20 passed.
+    - E2 run locally against the real pinned qpdf (fresh verified fetch under E: tmp, since deleted): 1 passed.
 - P2-5 closing follow-ups (SM3; branch `sm3/annot-p2-5` on master `053bee7`; `.github/workflows/ci.yml`, `scripts/ci-workflow.test.ts`, `scripts/setup-qpdf.test.ts`; CI and tests only). E2 passed on the hosted runner in CI run 42424565783.
   - **SM7 L-1 (from `b250c93`):** the E2 step now runs after "Save Cargo dependency cache", so nothing qpdf might write can enter the master-scope Cargo cache.
     - A new contract test pins this order, and the step-order test is updated.
