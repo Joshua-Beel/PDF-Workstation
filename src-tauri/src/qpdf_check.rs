@@ -540,7 +540,7 @@ mod tests {
     #[ignore = "E2: needs QPDF_EXE from scripts/setup-qpdf.ps1; ci.yml runs it with --ignored --exact"]
     fn qpdf_reads_the_interchange_fixtures_when_provided() {
         let qpdf = std::env::var_os("QPDF_EXE").expect("E2 not run: qpdf missing (set QPDF_EXE from scripts/setup-qpdf.ps1)");
-        for name in ["app-annotations.pdf", "foreign-plus-app.pdf"] {
+        for name in ["app-annotations.pdf", "foreign-plus-app.pdf", "ink.pdf"] {
             let json = qpdf_json(Path::new(&qpdf), &fixture(name)).unwrap_or_else(|error| panic!("{name}: {error:?}"));
             let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
             assert_eq!(value["version"], 2, "{name}");

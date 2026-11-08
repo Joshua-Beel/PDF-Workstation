@@ -234,3 +234,76 @@ pub(crate) fn effective_version(document: &Document) -> Result<(u8, u8), String>
     }).transpose()?;
     Ok(declared.map_or(header, |declared| declared.max(header)))
 }
+
+/// Ink limits (P2-7g; design 5.2): paths and points per annotation, points per document, the largest
+/// coordinate magnitude, the stroke width range and the largest generated appearance (SM7 ruling condition 1).
+pub const MAX_INK_STROKES: usize = 1_024;
+pub const MAX_INK_POINTS: usize = 131_072;
+#[allow(dead_code, reason = "used by the pen tool in P2-7b")]
+pub const MAX_INK_DOCUMENT_POINTS: usize = 4 * 1024 * 1024;
+pub const MAX_INK_COORDINATE: f32 = 1.0e7;
+pub const MAX_INK_WIDTH: f32 = 100.0;
+#[allow(dead_code, reason = "used by the pen tool in P2-7b")]
+pub const MIN_APP_INK_WIDTH: f32 = 0.1;
+pub const MAX_INK_APPEARANCE_BYTES: usize = 4 * 1024 * 1024;
+
+/// A freehand drawing the app makes (`/Subtype /Ink`): strokes of page-space points, one width, one RGB colour
+/// and one opacity. P2-7g groundwork: not part of `Note` or the editing plan, so nothing journalled changes.
+#[allow(dead_code, reason = "used by the pen tool in P2-7b")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ink { pub strokes: Vec<Vec<(f32, f32)>>, pub width: f32, pub color: [f32; 3], pub opacity: f32 }
+
+/// Checks a stroke list against the limits: 1 to 1,024 strokes, each with at least one point, at most 131,072
+/// points, every coordinate finite and within 1e7.
+pub fn validate_strokes(strokes: &[Vec<(f32, f32)>]) -> Result<(), String> {
+    if strokes.is_empty() || strokes.len() > MAX_INK_STROKES { return Err("A drawing needs 1 through 1,024 strokes.".into()); }
+    let mut points = 0usize;
+    for stroke in strokes {
+        if stroke.is_empty() { return Err("A drawing stroke has no points.".into()); }
+        points += stroke.len();
+        if points > MAX_INK_POINTS { return Err("A drawing is limited to 131,072 points.".into()); }
+        if stroke.iter().any(|&(x, y)| !(x.is_finite() && y.is_finite() && x.abs() <= MAX_INK_COORDINATE && y.abs() <= MAX_INK_COORDINATE)) { return Err("A drawing has an invalid point.".into()); }
+    }
+    Ok(())
+}
+
+/// Checks an app drawing: its strokes, a width from 0.1 to 100 points, colour components and an opacity in 0 to 1
+/// (opacity above 0).
+#[allow(dead_code, reason = "used by the pen tool in P2-7b")]
+pub fn validate_ink(ink: &Ink) -> Result<(), String> {
+    validate_strokes(&ink.strokes)?;
+    if !(MIN_APP_INK_WIDTH..=MAX_INK_WIDTH).contains(&ink.width) { return Err("The drawing width is out of range.".into()); }
+    if ink.color.iter().any(|value| !(0.0..=1.0).contains(value)) || !(ink.opacity > 0.0 && ink.opacity <= 1.0) { return Err("The drawing colour or opacity is out of range.".into()); }
+    Ok(())
+}
+
+/// The box around every point, grown by half the width (at least half a point) on each side so round caps and
+/// joins fit. The strokes must have passed `validate_strokes`.
+pub fn ink_bounds(strokes: &[Vec<(f32, f32)>], width: f32) -> CropBox {
+    let (mut left, mut bottom, mut right, mut top) = (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for &(x, y) in strokes.iter().flatten() { left = left.min(x); bottom = bottom.min(y); right = right.max(x); top = top.max(y); }
+    let grow = (width / 2.0).max(0.5);
+    CropBox { left: left - grow, bottom: bottom - grow, right: right + grow, top: top + grow }
+}
+
+/// Reads an `/InkList` (an array of arrays of numbers, x and y alternating, direct or by reference) and checks it
+/// with `validate_strokes`. Used on other apps' Ink, so every malformed shape is an error, never a panic.
+pub fn read_ink_list(document: &Document, value: &Object) -> Result<Vec<Vec<(f32, f32)>>, String> {
+    let resolve = |value: &Object| document.dereference(value).map(|(_, value)| value.clone()).map_err(|_| "The drawing has an unreadable stroke list.".to_owned());
+    let list = resolve(value)?;
+    let list = list.as_array().map_err(|_| "The drawing stroke list is not an array.".to_owned())?;
+    if list.is_empty() || list.len() > MAX_INK_STROKES { return Err("A drawing needs 1 through 1,024 strokes.".into()); }
+    let mut strokes = Vec::with_capacity(list.len());
+    let mut total = 0usize;
+    for stroke in list {
+        let stroke = resolve(stroke)?;
+        let numbers = stroke.as_array().map_err(|_| "A drawing stroke is not an array.".to_owned())?;
+        if numbers.is_empty() || numbers.len() % 2 != 0 { return Err("A drawing stroke has an odd or empty coordinate list.".into()); }
+        total += numbers.len() / 2;
+        if total > MAX_INK_POINTS { return Err("A drawing is limited to 131,072 points.".into()); }
+        let values = numbers.iter().map(|value| value.as_float().map_err(|_| "A drawing stroke has a non-number.".to_owned())).collect::<Result<Vec<f32>, String>>()?;
+        strokes.push(values.chunks_exact(2).map(|pair| (pair[0], pair[1])).collect::<Vec<_>>());
+    }
+    validate_strokes(&strokes)?;
+    Ok(strokes)
+}
