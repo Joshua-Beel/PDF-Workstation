@@ -2,6 +2,40 @@
 
 The full change log, newest first, moved verbatim from the README's "Recent changes" section (only relative link paths were adjusted for this folder); the [README](../README.md#recent-changes) keeps one-line summaries of the newest entries.
 
+- Annotation interchange Phase 2, P2-7g: Ink groundwork for 7b and 7c, not wired to editing, the editing plan or the recovery journal (SM3; branch `sm3/annot-p2-7g` off master `913577c`; `annotation_model.rs`, `annotation_write.rs`, new `annotation_patch.rs`, `annotations.rs` and `annotation_lockdown_tests.rs` tests, `qpdf_check.rs`, `scripts/pdfjs-annotations.test.ts`, new fixture `src-tauri/tests/fixtures/annotations/ink.pdf`, `main.rs` module list).
+  - **Model:** `Ink` (strokes, width, RGB colour, opacity) and the limits:
+    - 1,024 strokes and 131,072 points per annotation, 4 M points per document;
+    - coordinates within 1e7;
+    - width up to 100 pt (app drawings at least 0.1);
+    - generated appearance at most 4 MiB.
+
+    It also has `validate_strokes`, `validate_ink`, `ink_bounds` and a bounded `/InkList` reader. `Ink` is not part of `Note` or the plan, so nothing journalled changes.
+  - **Builders:**
+    - `ink_appearance` uses typed values only. Strokes have round caps and joins, in page coordinates with `/BBox` equal to `/Rect`, so there is no scaling. Colour can be gray, RGB, CMYK or none. The form keys are fixed (`/Type /Subtype /BBox /Resources`, plus `/Length`), and there is an app ExtGState only when opacity is below 1.
+    - `new_ink` builds an app drawing with `/Subj (Pencil)`, a UUID `/NM`, dates, `/BS /W`, `/C` and `/CA`. There is no `/T` until Joshua rules on Q1.
+  - **`annotation_patch.rs`, under SM7's ruling `sm7-ruling-annot-p2-7g-foreign-ap` (option (a), conditions 1-9):**
+    - **Strict read:** `read_foreign_ink` requires `/Subtype /Ink`, a finite non-empty `/Rect`, an `/InkList` within the limits, `/C` with 0, 1, 3 or 4 components in 0 to 1, `/BS /W` in 0 to 100, and `/CA` in 0 to 1.
+    - **Move:** shifts `/Rect` and `/InkList` by the same finite delta and sets `/M` in UTC. `/AP` stays byte-identical. A move is refused when `/Path` is present or the result leaves 1e7.
+    - **Colour and width edit:** refused when `/BE`, `/Path`, `/BM` or `/OC` is present, the `/BS` style is not solid, `/ca` differs from `/CA`, there is no colour, a value is out of range, or the wider stroke would not fit the unchanged `/Rect`. Otherwise it writes a new fixed-key stream and sets `/AP` to exactly `<< /N new >>`. `/AS` goes with the old appearance. The old objects are never modified; pruning removes them only when nothing else refers to them.
+    - **Allow-list check after every patch:** every key outside it must be unchanged, and none may appear or disappear. The lists are move `/Rect /InkList /M`, and style `/C /BS /AP /AS /M`. Action, link, structure, popup, author and unknown keys stay.
+    - **Notes for 7c (conditions 7 and 8):** a style edit drops on-disk appearance bytes, so the save must be a full rewrite with prune, failing closed. The UI must say the stroke is redrawn from its path data and that Undo restores it.
+  - **Fixture and independent readers:**
+    - `ink.pdf` holds an app drawing, another app's drawing moved by (10, -20), and a copy of it, sharing its appearance stream, restyled red at width 2. The shared old stream survives pruning because the moved drawing still uses it.
+    - pdf.js reads the strokes, colours, widths and rectangles of all three.
+    - E2 (qpdf) now reads three fixtures.
+  - **Tests:**
+    - Move: byte-identical `/AP`, refusals.
+    - Style: fixed keys; `/AP` exactly `/N`; the old stream unchanged and unreferenced; every undrawn key refuses a style edit but not a move; out-of-range `/C`, `/BS /W`, `/CA`, `/InkList` and over 131,072 points all refuse.
+    - A shared old stream survives pruning and an unshared one does not.
+    - The allow-list check works; the app builder writes Acrobat-style keys and no `/T`.
+    - The committed fixture reads back.
+  - **Ink census (real work PDFs, read-only, counts only):**
+    - 4,425 Ink annotations in 4,590 files. All 4,425 pass the strict editable read.
+    - Every one has exactly 1 stroke. Points per annotation: 1,863 have up to 100, 2,561 have 101-1,000 and 1 has 1,001-10,000. The maxima are 3,073 points in one annotation and 77,774 in one file, well inside the limits.
+    - All have 3-component `/C`, `/IT` and `/Popup`, and none set `/BS /S`. `/BS /W`: 4,351 have 3-12 and 74 are over 12 (all at or below 100). `/CA`: 4,351 below 1, 74 at 1.
+    - 1,231 have a key outside the known list; all keys are kept.
+    - The strokes plus width fit `/Rect` in 4,422; in 3 they do not, so a style edit at their current width would be refused.
+  - **Results:** see the commit message for `--bins`, the annotation filters, pdf.js 3/3 and E2 against the real pinned qpdf (fresh verified fetch under E: tmp, deleted afterwards).
 - Annotation interchange Phase 2, P2-7a: typed model split, ahead of Ink, with no behaviour change (SM3; branch `sm3/annot-p2-7` off master `053bee7`; `src-tauri/src/comments.rs`, new `annotation_model.rs` and `annotation_write.rs`, `main.rs` module list).
   - **`annotation_model.rs`** (236 lines) holds:
     - kinds, limits and `Note`;

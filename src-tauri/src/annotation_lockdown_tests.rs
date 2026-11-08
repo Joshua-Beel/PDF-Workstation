@@ -325,6 +325,7 @@ fn annotation_census_real_files() {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     let mut add = |key: String, amount: usize| *counts.entry(key).or_insert(0) += amount;
     let (mut files, mut unreadable, mut loaded, mut annotated, mut max_per_file) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    let (mut ink_max_strokes, mut ink_max_points, mut ink_max_file_points) = (0usize, 0usize, 0usize);
     while let Some(dir) = pending.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for entry in entries.flatten() {
@@ -343,6 +344,7 @@ fn annotation_census_real_files() {
             loaded += 1;
             let family = producer_family(&document);
             let mut in_file = 0usize;
+            let mut ink_points_in_file = 0usize;
             for (_, page) in document.get_pages() {
                 let Ok(page) = document.get_dictionary(page) else { continue };
                 let Ok(annots) = page.get(b"Annots") else { continue };
@@ -378,8 +380,42 @@ fn annotation_census_real_files() {
                     };
                     if candidate { add(format!("phase 2 editable candidate: {subtype}{}", if has(b"RC") { " (with /RC)" } else { "" }), 1); }
                     if has(b"StructParent") { add(format!("annotation with /StructParent: {subtype}"), 1); }
+                    if subtype == "Ink" {
+                        // P2-7g: Ink against the limits and the SM7 style-edit conditions. Counts and fixed buckets only.
+                        let band = |value: usize, bands: &[(usize, &'static str)]| bands.iter().find(|(limit, _)| value <= *limit).map_or("over the last band", |(_, label)| *label);
+                        match annotation.get(b"InkList").ok().and_then(|value| document.dereference(value).ok()).and_then(|(_, value)| value.as_array().ok()) {
+                            Some(list) => {
+                                let strokes = list.len();
+                                let points: usize = list.iter().filter_map(|stroke| document.dereference(stroke).ok().and_then(|(_, stroke)| stroke.as_array().ok()).map(|values| values.len() / 2)).sum();
+                                ink_points_in_file += points;
+                                add(format!("ink: strokes per annotation: {}", band(strokes, &[(0, "0"), (1, "1"), (10, "2-10"), (100, "11-100"), (1_024, "101-1,024")])), 1);
+                                add(format!("ink: points per annotation: {}", band(points, &[(100, "0-100"), (1_000, "101-1,000"), (10_000, "1,001-10,000"), (131_072, "10,001-131,072")])), 1);
+                                ink_max_strokes = ink_max_strokes.max(strokes); ink_max_points = ink_max_points.max(points);
+                            }
+                            None => add("ink: /InkList missing or not an array".into(), 1),
+                        }
+                        match crate::annotation_patch::read_foreign_ink(&document, annotation) {
+                            Ok(ink) => {
+                                add("ink: passes the strict editable read".into(), 1);
+                                add(format!("ink: /C components: {}", ink.color.as_ref().map_or("absent".to_owned(), |color| color.len().to_string())), 1);
+                                add(format!("ink: /BS /W: {}", if ink.width == 0.0 { "0" } else if ink.width <= 1.0 { "up to 1" } else if ink.width <= 3.0 { "1-3" } else if ink.width <= 12.0 { "3-12" } else { "over 12" }), 1);
+                                add(format!("ink: /CA: {}", if ink.opacity == 1.0 { "1" } else { "below 1" }), 1);
+                                let needed = crate::annotation_model::ink_bounds(&ink.strokes, ink.width);
+                                add(format!("ink: strokes plus width fit /Rect: {}", needed.left >= ink.rect.left && needed.bottom >= ink.rect.bottom && needed.right <= ink.rect.right && needed.top <= ink.rect.top), 1);
+                            }
+                            Err(reason) => add(format!("ink: refused by the strict editable read: {reason}"), 1),
+                        }
+                        for key in [b"BE".as_slice(), b"Path", b"BM", b"OC", b"ca", b"Border", b"AS", b"IT", b"Popup", b"RC", b"IRT"] {
+                            if annotation.has(key) { add(format!("ink: key present: /{}", String::from_utf8_lossy(key)), 1); }
+                        }
+                        let style = annotation.get(b"BS").ok().and_then(|value| document.dereference(value).ok()).and_then(|(_, value)| value.as_dict().ok());
+                        if let Some(style) = style { add(format!("ink: /BS /S: {}", match style.get(b"S").ok().and_then(|value| value.as_name().ok()) { None => "absent", Some(b"S") => "solid", Some(_) => "other" }), 1); }
+                        let known: &[&[u8]] = &[b"Type", b"Subtype", b"Rect", b"InkList", b"BS", b"C", b"CA", b"ca", b"F", b"P", b"NM", b"T", b"M", b"CreationDate", b"AP", b"AS", b"Popup", b"Subj", b"Contents", b"RC", b"IT", b"Border", b"BE", b"BM", b"OC", b"Path", b"IRT", b"RT", b"StructParent"];
+                        if annotation.iter().any(|(key, _)| !known.contains(&key.as_slice())) { add("ink: has a key outside the known list".into(), 1); }
+                    }
                 }
             }
+            ink_max_file_points = ink_max_file_points.max(ink_points_in_file);
             if in_file > 0 {
                 annotated += 1;
                 max_per_file = max_per_file.max(in_file);
@@ -407,4 +443,5 @@ fn annotation_census_real_files() {
     }
     println!("annotation census: {files} PDF files, {unreadable} unreadable, {loaded} loaded by pdf_load, {annotated} with annotations, at most {max_per_file} in one file, {:?}", started.elapsed());
     for (key, value) in counts { println!("  {key}: {value}"); }
+    println!("ink maxima: {ink_max_strokes} strokes and {ink_max_points} points in one annotation, {ink_max_file_points} points in one file");
 }

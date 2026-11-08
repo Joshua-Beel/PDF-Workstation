@@ -2,6 +2,71 @@
 //! behaviour change). Only pages whose app annotations changed are touched; foreign entries are kept in order.
 use crate::comments::*;
 use crate::editor::{CropBox, PageSpec};
+use std::fmt::Write as _;
+
+/// The appearance of a drawing (P2-7g; not called by `write` yet), for the app's own Ink and for a colour or
+/// width edit of another app's Ink (SM7 ruling, conditions 1 and 3). It is built only from typed values: each
+/// stroke is one path with round caps and joins, in page coordinates, so `bbox` is the annotation's `/Rect` and
+/// the appearance maps onto it without scaling. `color` has 0 (nothing is stroked), 1 (gray), 3 (RGB) or 4
+/// (CMYK) components in 0 to 1. The form has only `/Type /XObject /Subtype /Form /BBox /Resources`, and
+/// `/Resources` holds an app-made ExtGState only when the opacity is not 1. Over 4 MiB of content is refused.
+pub(crate) fn ink_appearance(strokes: &[Vec<(f32, f32)>], width: f32, color: &[f32], opacity: f32, bbox: CropBox) -> Result<(Dictionary, Vec<u8>), String> {
+    validate_strokes(strokes)?;
+    if !(width.is_finite() && (0.0..=MAX_INK_WIDTH).contains(&width)) { return Err("The drawing width is out of range.".into()); }
+    if !matches!(color.len(), 0 | 1 | 3 | 4) || color.iter().any(|value| !(0.0..=1.0).contains(value)) { return Err("The drawing colour is out of range.".into()); }
+    if !(0.0..=1.0).contains(&opacity) { return Err("The drawing opacity is out of range.".into()); }
+    let mut content = String::from("q\n");
+    if opacity != 1.0 { content.push_str("/GS0 gs\n"); }
+    let operator = match color.len() { 1 => "G", 3 => "RG", 4 => "K", _ => "" };
+    for value in color { let _ = write!(content, "{value:.6} "); }
+    if !operator.is_empty() { content.push_str(operator); content.push('\n'); }
+    let _ = writeln!(content, "{width:.6} w 1 J 1 j");
+    for stroke in strokes {
+        let (x0, y0) = stroke[0];
+        let _ = writeln!(content, "{x0:.6} {y0:.6} m");
+        // A single point still draws a dot: a zero-length line with round caps.
+        let rest: &[(f32, f32)] = if stroke.len() == 1 { stroke } else { &stroke[1..] };
+        for &(x, y) in rest { let _ = writeln!(content, "{x:.6} {y:.6} l"); }
+        content.push_str(if operator.is_empty() { "n\n" } else { "S\n" });
+        if content.len() > MAX_INK_APPEARANCE_BYTES { return Err("The drawing appearance would exceed 4 MiB.".into()); }
+    }
+    content.push_str("Q\n");
+    if content.len() > MAX_INK_APPEARANCE_BYTES { return Err("The drawing appearance would exceed 4 MiB.".into()); }
+    let resources = if opacity != 1.0 { dictionary! { "ExtGState" => dictionary! { "GS0" => dictionary! { "Type" => "ExtGState", "CA" => Object::Real(opacity), "ca" => Object::Real(opacity) } } } } else { dictionary! {} };
+    let form = dictionary! { "Type" => "XObject", "Subtype" => "Form",
+        "BBox" => vec![Object::Real(bbox.left), Object::Real(bbox.bottom), Object::Real(bbox.right), Object::Real(bbox.top)], "Resources" => resources };
+    Ok((form, content.into_bytes()))
+}
+
+/// The `/InkList` of a drawing.
+pub(crate) fn ink_list(strokes: &[Vec<(f32, f32)>]) -> Object {
+    Object::Array(strokes.iter().map(|stroke| Object::Array(stroke.iter().flat_map(|&(x, y)| [Object::Real(x), Object::Real(y)]).collect())).collect())
+}
+
+/// A new app drawing on `page_id` (P2-7g; not called by `write` yet): the annotation and its appearance, added to
+/// `document`. Acrobat-style keys: `/Subj (Pencil)`, a UUID `/NM`, `/CreationDate` and `/M`, `/BS` with the
+/// width, `/C`, `/CA`. No `/T` until Joshua rules on Q1.
+#[allow(dead_code, reason = "used by the pen tool in P2-7b")]
+pub(crate) fn new_ink(document: &mut Document, page_id: ObjectId, id: &str, ink: &Ink, created: Option<&str>) -> Result<ObjectId, String> {
+    validate_ink(ink)?;
+    if !is_uuid(id) { return Err("A drawing needs a UUID annotation ID.".into()); }
+    if created.is_some_and(|date| !valid_pdf_date(date)) { return Err("The annotation has an invalid date.".into()); }
+    let bounds = ink_bounds(&ink.strokes, ink.width);
+    let (form, content) = ink_appearance(&ink.strokes, ink.width, &ink.color, ink.opacity, bounds)?;
+    let appearance = document.add_object(Stream::new(form, content));
+    let [r, g, b] = ink.color;
+    let mut annotation = dictionary! { "Type" => "Annot", "Subtype" => "Ink",
+        "Rect" => vec![Object::Real(bounds.left), Object::Real(bounds.bottom), Object::Real(bounds.right), Object::Real(bounds.top)],
+        "InkList" => ink_list(&ink.strokes), "BS" => dictionary! { "Type" => "Border", "W" => Object::Real(ink.width), "S" => "S" },
+        "C" => vec![Object::Real(r), Object::Real(g), Object::Real(b)], "CA" => Object::Real(ink.opacity),
+        "NM" => Object::String(id.as_bytes().to_vec(), StringFormat::Literal), "F" => 4, "P" => page_id, "AP" => dictionary! { "N" => appearance },
+        "Subj" => Object::String(b"Pencil".to_vec(), StringFormat::Literal) };
+    if let Some(created) = created {
+        annotation.set("CreationDate", Object::String(created.as_bytes().to_vec(), StringFormat::Literal));
+        annotation.set("M", Object::String(created.as_bytes().to_vec(), StringFormat::Literal));
+    }
+    Ok(document.add_object(Object::Dictionary(annotation)))
+}
 use lopdf::{dictionary, Dictionary, Document, Object, ObjectId, Stream, StringFormat};
 use std::collections::HashSet;
 

@@ -64,3 +64,30 @@ describe('pdf.js reads the annotations the app writes', () => {
     expect(second.map(annotation => [annotation.subtype, annotation.titleObj?.str])).toEqual([['Highlight', 'Other app']]);
   });
 });
+
+type InkAnnotation = Annotation & { inkLists?: ArrayLike<ArrayLike<number> | { x: number; y: number }[]>; color?: ArrayLike<number> | null; borderStyle?: { width: number } };
+
+/** pdf.js has given ink strokes both as flat number arrays and as lists of points; this reads either. */
+const strokes = (annotation: InkAnnotation) => Array.from(annotation.inkLists ?? [], stroke => Array.from(stroke as ArrayLike<number | { x: number; y: number }>).flatMap(point => typeof point === 'number' ? [point] : [point.x, point.y]));
+
+describe('pdf.js reads drawings (P2-7g groundwork)', () => {
+  it('reads the app drawing, the moved drawing and the restyled one with their strokes, colours and widths', async () => {
+    const [page] = await annotations('ink.pdf') as InkAnnotation[][];
+    expect(page.map(annotation => annotation.subtype)).toEqual(['Ink', 'Ink', 'Ink']);
+    const [app, moved, restyled] = page;
+    const appStrokes = strokes(app);
+    expect(appStrokes.length).toBe(2);
+    near(appStrokes[0], [60, 700, 120, 740, 180, 710]);
+    near(appStrokes[1], [70, 690]);
+    expect(Array.from(app.color ?? [])).toEqual([0, 102, 255]);
+    expect(app.borderStyle?.width).toBeCloseTo(3, 3);
+    expect(app.titleObj?.str ?? '').toBe('');
+    near(moved.rect, [110, 180, 210, 240]);
+    near(strokes(moved)[0], [120, 190, 160, 220, 200, 230]);
+    expect(Array.from(moved.color ?? [])).toEqual([0, 0, 255]);
+    near(restyled.rect, [100, 200, 200, 260]);
+    expect(Array.from(restyled.color ?? [])).toEqual([255, 0, 0]);
+    expect(restyled.borderStyle?.width).toBeCloseTo(2, 3);
+    expect(restyled.titleObj?.str).toBe('Reviewer');
+  });
+});

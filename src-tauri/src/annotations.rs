@@ -293,6 +293,55 @@ mod tests {
         assert_eq!(survey_all(&mixed).pages.iter().map(Vec::len).sum::<usize>(), 5, "the foreign note, reply, square and highlight, plus the app note");
     }
 
+    const INK_ID: &str = "0b4c6a3e-2f1d-4c8b-9a7e-5d3f2e1c0b9a";
+    const INK_DATE: &str = "D:20261107120000Z";
+
+    /// The Ink fixture (P2-7g): an app drawing from the builder, another app's drawing moved by (10, -20), and a
+    /// copy of it, sharing its appearance stream, restyled to red at width 2. Not written by the editor: these
+    /// builders are not wired to editing yet.
+    fn ink_fixture() -> Document {
+        let (mut document, moved, _) = crate::annotation_patch::tests::foreign_ink(|_| {});
+        let page = document.get_pages()[&1];
+        let copy = document.get_dictionary(moved).unwrap().clone();
+        let restyled = document.add_object(copy);
+        let app = crate::annotation_write::new_ink(&mut document, page, INK_ID, &crate::annotation_model::Ink { strokes: vec![vec![(60.0, 700.0), (120.0, 740.0), (180.0, 710.0)], vec![(70.0, 690.0)]], width: 3.0, color: [0.0, 0.4, 1.0], opacity: 1.0 }, Some(INK_DATE)).unwrap();
+        crate::annotation_patch::move_foreign_ink(&mut document, moved, 10.0, -20.0, INK_DATE).unwrap();
+        crate::annotation_patch::restyle_foreign_ink(&mut document, restyled, Some(&[1.0, 0.0, 0.0]), Some(2.0), INK_DATE).unwrap();
+        document.get_dictionary_mut(page).unwrap().set("Annots", vec![app.into(), moved.into(), restyled.into()]);
+        document.prune_objects();
+        document
+    }
+
+    #[test]
+    #[ignore = "writes the committed Ink fixture: set SM3_WRITE_FIXTURES=1"]
+    fn write_ink_fixture() {
+        if std::env::var_os("SM3_WRITE_FIXTURES").is_none() { return; }
+        let mut bytes = Vec::new(); ink_fixture().save_to(&mut bytes).unwrap();
+        std::fs::write(fixture("ink.pdf"), bytes).unwrap();
+    }
+
+    /// The committed Ink fixture still reads back as built: every drawing passes the strict editable read, the
+    /// moved one keeps the other app's appearance stream, the restyled one has only the app's new stream, and the
+    /// shared old stream survived pruning because the moved drawing still uses it.
+    #[test]
+    fn committed_ink_fixture_reads_back_as_built() {
+        let document = Document::load_mem(&std::fs::read(fixture("ink.pdf")).unwrap()).unwrap();
+        let page = document.get_pages()[&1];
+        let annots = document.get_dictionary(page).unwrap().get(b"Annots").unwrap().as_array().unwrap().iter().map(|entry| document.get_dictionary(entry.as_reference().unwrap()).unwrap().clone()).collect::<Vec<_>>();
+        assert_eq!(annots.len(), 3);
+        let inks = annots.iter().map(|annotation| crate::annotation_patch::read_foreign_ink(&document, annotation).unwrap()).collect::<Vec<_>>();
+        assert_eq!(annots[0].get(b"NM").unwrap().as_str().unwrap(), INK_ID.as_bytes());
+        assert!(!annots[0].has(b"T"));
+        assert_eq!(inks[1].rect, crate::editor::CropBox { left: 110.0, bottom: 180.0, right: 210.0, top: 240.0 });
+        let stream = |annotation: &Dictionary| document.get_object(annotation.get(b"AP").unwrap().as_dict().unwrap().get(b"N").unwrap().as_reference().unwrap()).unwrap().as_stream().unwrap().clone();
+        assert_eq!(stream(&annots[1]).content, b"0 0 1 RG 3 w 10 10 m 90 50 l S");
+        assert_eq!(annots[2].get(b"AP").unwrap().as_dict().unwrap().len(), 1);
+        assert!(String::from_utf8(stream(&annots[2]).content).unwrap().contains("1.000000 0.000000 0.000000 RG\n2.000000 w"));
+        assert_eq!((inks[2].color.clone(), inks[2].width), (Some(vec![1.0, 0.0, 0.0]), 2.0));
+        let rebuilt = ink_fixture();
+        assert_eq!(rebuilt.get_pages().len(), 1, "the builder still runs");
+    }
+
     fn entries(document: &Document, page: usize) -> Vec<Object> {
         let id = document.get_pages().into_values().nth(page).unwrap();
         match document.get_dictionary(id).unwrap().get(b"Annots") {
