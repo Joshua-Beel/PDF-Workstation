@@ -2,6 +2,19 @@
 
 The full change log, newest first, moved verbatim from the README's "Recent changes" section (only relative link paths were adjusted for this folder); the [README](../README.md#recent-changes) keeps one-line summaries of the newest entries.
 
+- P2-7g review fixes, made before any 7c wiring (SM3; branch `sm3/annot-p2-7g-fix` off master `67f6e88`; `annotation_patch.rs`, `annotation_lockdown_tests.rs`, `main.rs`). Still not wired to editing or the journal.
+  - **SM7 M-1, legacy `/Border`:** `read_foreign_ink` now takes the width from `/Border [h v w]` when `/BS` is absent, as readers do, instead of defaulting to 1.
+    - A `/Border` with a non-empty dash array refuses a colour or width edit (moves are exempt). A malformed `/Border` refuses the strict read.
+    - A redraw keeps the legacy width.
+  - **Code review P2, `/IT`:** a colour or width edit is refused unless `/IT` is absent or on a list of intents known to draw as plain strokes. The list is empty.
+    - The census (real work PDFs, read-only, counts only) saw `/IT /InkHighlight` on all 4,425 Ink annotations, every one drawn with a Multiply blend in its appearance. None has a `/Border`.
+    - So every real drawing measured refuses a style edit until a highlighter mode exists; moves still work. The test covers each refused intent the census saw.
+  - **P3, allow-list:** `/BS` is now compared without its `/W`, so a style edit can change only the width. A missing `/BS` counts as the solid default the edit adds. A change to `/BS /S` is caught.
+  - **P3, `allow(dead_code)`:** it is now on each item, with its reason, instead of on the whole module in `main.rs`.
+  - **Condition 6 note:** the module docs now say 7c must apply the document-level refusals (signed, encrypted, forms, tagged, page labels, threads) on the patch path, alongside the notes for conditions 7 and 8.
+  - **SM7 note on `/Rect`:** SM7 accepted `/BBox` = `/Rect`. If 7c ever puts `/Rect` on the style allow-list, it may only grow to cover the strokes plus the width, never shrink, and must stay finite and within 1e7.
+  - **Census:** buckets added for `/IT` values (a fixed list, otherwise "other"), `/Border` shape and the appearance blend mode.
+  - **Tests:** legacy border width and redraw; dashed and malformed borders; refused intents; a `/BS` change beyond the width caught. See the commit message for the suite results.
 - Annotation interchange Phase 2, P2-7g: Ink groundwork for 7b and 7c, not wired to editing, the editing plan or the recovery journal (SM3; branch `sm3/annot-p2-7g` off master `913577c`; `annotation_model.rs`, `annotation_write.rs`, new `annotation_patch.rs`, `annotations.rs` and `annotation_lockdown_tests.rs` tests, `qpdf_check.rs`, `scripts/pdfjs-annotations.test.ts`, new fixture `src-tauri/tests/fixtures/annotations/ink.pdf`, `main.rs` module list).
   - **Model:** `Ink` (strokes, width, RGB colour, opacity) and the limits:
     - 1,024 strokes and 131,072 points per annotation, 4 M points per document;

@@ -118,6 +118,7 @@ More: [architecture notes](docs/decisions.md), [PDFium documentation](https://do
 
 Full history: [docs/changelog.md](docs/changelog.md)
 
+- Ink groundwork review fixes: colour/width edits of other apps' drawings now honour the legacy `/Border` width and refuse dashed borders and highlighter-style intents (`/IT`), which covers every real drawing measured (SM3, P2-7g; source only).
 - Ink groundwork (not wired to editing yet): a drawing model and builders, and typed moves and colour/width edits for other apps' drawings under SM7's rules. pdf.js and qpdf read a new Ink fixture (SM3, P2-7g; tests and source only).
 - Code structure: the annotation code is split into a model (`annotation_model.rs`), a writer (`annotation_write.rs`) and the reader (`comments.rs`), ahead of Ink. No behaviour change (SM3, P2-7a; source build).
 - CI: the qpdf check (E2) now runs after the master-only Cargo cache save, and the 8.3 path test finds its folders whatever the case of the variable names (SM3; `ci.yml`, `setup-qpdf.test.ts`; CI and tests only).
@@ -132,4 +133,3 @@ Full history: [docs/changelog.md](docs/changelog.md)
 - Sticky notes are saved with an Acrobat-style closed popup at the page's right edge, and the app keeps editing them as one unit; a page without a valid MediaBox refuses the save (SM3, source build).
 - Your comments and highlights now carry Acrobat-style creation and modification dates (UTC) and a subject ("Sticky Note", "Highlight"), and new ones get random Acrobat-style IDs; no author name is written yet; older files still open (SM3, source build).
 - Tests: the annotation census now splits structure refusals by type, and the shared-annotation and forms-hardening timing tests compare against a baseline measured in the same run instead of fixed budgets, with absolute ceilings and per-test totals (SM3; tests only).
-- PDFs with other apps' annotations or links can now take your comments: their annotations are kept in place and order on save and listed view only; page delete and extract on such files stay refused (SM3, source build).

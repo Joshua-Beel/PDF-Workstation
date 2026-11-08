@@ -408,6 +408,25 @@ fn annotation_census_real_files() {
                         for key in [b"BE".as_slice(), b"Path", b"BM", b"OC", b"ca", b"Border", b"AS", b"IT", b"Popup", b"RC", b"IRT"] {
                             if annotation.has(key) { add(format!("ink: key present: /{}", String::from_utf8_lossy(key)), 1); }
                         }
+                        // P2-7g follow-up (SM7 M-1, code review P2): intent, legacy /Border and the appearance's blend
+                        // mode. Fixed buckets only; an intent outside the known list is counted as "other".
+                        let intent = annotation.get(b"IT").ok().and_then(|value| value.as_name().ok()).map(|name| match name {
+                            b"Ink" | b"InkHighlight" | b"InkPen" | b"InkPencil" | b"InkMarker" | b"InkSignature" => String::from_utf8_lossy(name).into_owned(),
+                            _ => "other".to_owned(),
+                        });
+                        add(format!("ink: /IT value: {}", intent.as_deref().unwrap_or("absent")), 1);
+                        if let Ok(border) = annotation.get(b"Border").and_then(Object::as_array) {
+                            add(format!("ink: /Border: {} entries, /BS {}", border.len(), if annotation.has(b"BS") { "present" } else { "absent" }), 1);
+                        }
+                        let blend = annotation.get(b"AP").ok().and_then(|value| document.dereference(value).ok()).and_then(|(_, value)| value.as_dict().ok())
+                            .and_then(|ap| ap.get(b"N").ok()).and_then(|value| document.dereference(value).ok()).and_then(|(_, value)| value.as_stream().ok())
+                            .map(|stream| {
+                                let states = stream.dict.get(b"Resources").ok().and_then(|value| document.dereference(value).ok()).and_then(|(_, value)| value.as_dict().ok())
+                                    .and_then(|resources| resources.get(b"ExtGState").ok()).and_then(|value| document.dereference(value).ok()).and_then(|(_, value)| value.as_dict().ok());
+                                let modes = states.map(|states| states.iter().filter_map(|(_, state)| document.dereference(state).ok().and_then(|(_, state)| state.as_dict().ok()).and_then(|state| state.get(b"BM").ok()).and_then(|mode| mode.as_name().ok()).map(|mode| if mode == b"Multiply" { "Multiply" } else if mode == b"Normal" { "Normal" } else { "other" })).collect::<Vec<_>>()).unwrap_or_default();
+                                if modes.is_empty() { "none" } else if modes.contains(&"Multiply") { "Multiply" } else if modes.contains(&"other") { "other" } else { "Normal" }
+                            }).unwrap_or("no /AP /N stream");
+                        add(format!("ink: appearance blend mode: {blend} (/IT {})", intent.as_deref().unwrap_or("absent")), 1);
                         let style = annotation.get(b"BS").ok().and_then(|value| document.dereference(value).ok()).and_then(|(_, value)| value.as_dict().ok());
                         if let Some(style) = style { add(format!("ink: /BS /S: {}", match style.get(b"S").ok().and_then(|value| value.as_name().ok()) { None => "absent", Some(b"S") => "solid", Some(_) => "other" }), 1); }
                         let known: &[&[u8]] = &[b"Type", b"Subtype", b"Rect", b"InkList", b"BS", b"C", b"CA", b"ca", b"F", b"P", b"NM", b"T", b"M", b"CreationDate", b"AP", b"AS", b"Popup", b"Subj", b"Contents", b"RC", b"IT", b"Border", b"BE", b"BM", b"OC", b"Path", b"IRT", b"RT", b"StructParent"];
